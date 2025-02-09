@@ -16,7 +16,7 @@ Because price on CFAMM liquidity pairs is calculated by dividing the sum of Toke
 
 When a swap is triggered; the token fetches the correct price from the target oracle contract, parses it then fetches the balances of [TOKEN0] and [TOKEN1] (in this case WMATIC and DOHL). Then determines how much should be in the LP to achieve the target price and alters the DOHL amount towards that purpose. 
 
-The initial supply is (5), all of which is issued to the deployer at deployment. 
+The initial supply is (4.0e9), all of which is issued to the deployer at deployment. 
  
  /// Functions ///
 ! transferFrom !
@@ -70,7 +70,3 @@ Defines tax collector address (ownerOnly)
 - No constructor arguments, causes headaches during verification. 
 
 - Contract is ownable. 
-
-- Post deployment the tokens are to be distributed as follows; one unit to the LP, one unit to the contract address, then one to each member of the team. These amounts are trivial and not for profit, they're just to give the token an initial marketcap of $3
-
-- When Liquidity is out into the LP, if there is $500 worth of MATIC and (1) DOHL, when the contract rebases it will mint 499 DOHL to the LP. 
