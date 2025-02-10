@@ -5,7 +5,7 @@ A CFAMM stablecoin using Liquidity rebase and Chainlink price oracles to maintai
 
 /// Parameters ///
 Name: Link Dollar
-Ticker: DOHL 
+Ticker: LUSD 
 Price: $1 
 Decimals: 18
 
