@@ -14,36 +14,36 @@ Stores the valid router address that can call `transact` or `update`.
 
 - Listing Data (11) 
 
-Contract Name : (string)
-Token-A address : (address)
-Token-B address : (address)
-Price : (uint256)
-Pairing address : (address) 
-Pairing token : (address)
-Liquidity Address : (address)
-xBalance : (uint256)
-yBalance : (uint256)
-xVolume : (uint256) 
-yVolume : (uint256)
+Contract Name : (string),
+Token-A address : (address),
+Token-B address : (address),
+Price : (uint256),
+Pairing address : (address),
+Pairing token : (address),
+Liquidity Address : (address),
+xBalance : (uint256),
+yBalance : (uint256),
+xVolume : (uint256),
+yVolume : (uint256),
 
 `Token-$ address` can be `0` indicating [NATIVE]. 
 
 - Order Slots (14)
 
-Slot Index: (uint256)
-Maker Address: (address)
-Recipient Address: (address) 
-Order type: (bool)
-Token-A Contract: (address) 
-Token-B Contract: (address) 
-Max Price: (uint256) 
-Min Price: (uint256) 
-Principal:  (`TOKEN-0` or `TOKEN-1`)
+Slot Index: (uint256),
+Maker Address: (address),
+Recipient Address: (address),
+Order type: (bool),
+Token-A Contract: (address),
+Token-B Contract: (address),
+Max Price: (uint256),
+Min Price: (uint256),
+Principal:  (`TOKEN-0` or `TOKEN-1`),
 Pending:  (`TOKEN-0` or `TOKEN-1`)  
-Created at: (uint256)
-Last Settled Price: (uint256)
-Order ID: (uint256) 
-Status: (uint256)
+Created at: (uint256),
+Last Settled Price: (uint256),
+Order ID: (uint256),
+Status: (uint256),
 
 `Status` is `Pending`, `Filled`, or `Cancelled`, Cancelled orders can No longer be settled. 
 
@@ -68,18 +68,23 @@ Stores entries for previous yVolume appended with index + timestamp.
 Stores entries for previous xVolume appended with an index + timestamp.
 
 - historicalPrice
+  
 Stores entries for previous price appended with an index + timestamp. 
 
-- historical marketCap 
+- historical marketCap
+  
 Stores entries for previous mcap appended with index + timestamp. 
 
 - Order Index
+  
 Stores the index numbers of all order slots, indexes are malleable - addressable and adjust their number when a slot is cleared. 
 
-- Maker Index 
+- Maker Index
+  
 A separate set of indexing exists for individual maker addresses. 
 
-- Order ID 
+- Order ID
+  
 All orders are tagged on a third scheme that is rigid and does not change number. 
 
 ### **Functions**
@@ -118,34 +123,36 @@ Stores the valid router address that can call `transact` or `update`.
 
 - Liquidity Details
 
-Listing : (address)
-xLiquid : (uint256) 
-yLiquid : (uint256) 
-xFees : (uint256)
-yFees : (uint256)
+Listing : (address),
+xLiquid : (uint256),
+yLiquid : (uint256),
+xFees : (uint256),
+yFees : (uint256),
 
 - Liquidity Slots 
 
-depositor : (address)
-xRatio : (uint256)
-xAllocation : (uint256)
-dVolume : (uint256)
-index : (uint256)
-type : (string)
+depositor : (address),
+xRatio : (uint256),
+xAllocation : (uint256),
+dVolume : (uint256),
+index : (uint256),
+type : (string),
 
-depositor : (address)
-yRatio : (uint256)
-yAllocation : (uint256)
-dVolume : (uint256)
-index : (uint256)
-type : (string)
+depositor : (address),
+yRatio : (uint256),
+yAllocation : (uint256),
+dVolume : (uint256),
+index : (uint256),
+type : (string),
 
 `Ratios` store how much of the overall liquidity the depositor owns
 
 - Liquidity Index
+  
 Stores the index numbers of all Liquidity slots, indexes are malleable - addressable and adjust their number when a slot is cleared. 
 
-- User Index 
+- User Index
+  
 A separate set of indexing exists for individual depositors. 
 
 ### **Functions**
@@ -399,12 +406,12 @@ The listing agent, creates new Listing and Liquidity contracts, stores `validati
 
 - **Listing Validation**
 
-Listing Address ;  (address) 
-Listed Token(s) ;  (address)
-xBalance ; (uint256) 
-yBalance ; (uint256)
-xLiquid ; (uint256) 
-yLiquid ; (uint256) 
+Listing Address ;  (address),
+Listed Token(s) ;  (address),
+xBalance ; (uint256),
+yBalance ; (uint256),
+xLiquid ; (uint256),
+yLiquid ; (uint256),
 
 ### **Functions**
 
