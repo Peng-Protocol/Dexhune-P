@@ -1,13 +1,13 @@
-### **Premise**
+# **Premise**
 A succinct and homogenized version of `MF-PairingFoundry.md` and `MF-FixedFoundry.md`. 
 
-### **General**
+# **General**
 The system is made up of (4) contracts, `MFP-Listing`, `MFP-Liquidity`, `MFP-Router`, `MFP-Agent`. 
 
 
 ## **MFP-Listing**
 
-# **Data**
+### **Data**
 - routerAddress 
 
 Stores the valid router address that can call `transact` or `update`. 
@@ -82,7 +82,7 @@ A separate set of indexing exists for individual maker addresses.
 - Order ID 
 All orders are tagged on a third scheme that is rigid and does not change number. 
 
-# **Functions**
+### **Functions**
 
 - QueryOrderByIndex
 
@@ -106,7 +106,7 @@ Returns the full details of an order slot by an index number in a specific maker
 
 ## **MFP-Liquidity**
 
-# **Data**
+### **Data**
 
 - routerAddress 
 
@@ -144,7 +144,7 @@ Stores the index numbers of all Liquidity slots, indexes are malleable - address
 - User Index 
 A separate set of indexing exists for individual depositors. 
 
-# **Functions**
+### **Functions**
 - QueryLiquidbyIndex
 
 Returns the details of a liquidity slot based on the index number. 
@@ -185,13 +185,13 @@ Determines the router address.
  
 ## **MFP-Router**
 
-# **Data**
+### **Data**
 
 - listingAgent
 
 Stores the listing agent contract address where validation data is updated or fetched from. Only interacts with listings that are on the listing validation, otherwise various functions fail. 
 
-# **Functions**
+### **Functions**
 
 - **createBuyOrder**
 
@@ -391,7 +391,7 @@ Determines the `Listing Agent` contract.
 ## **MFP-Agent**
 The listing agent, creates new Listing and Liquidity contracts, stores `validation` details for the router to retrieve or update.  
 
-# **Data**
+### **Data**
 
 - **Listing Validation**
 
@@ -402,7 +402,7 @@ yBalance ; (uint256)
 xLiquid ; (uint256) 
 yLiquid ; (uint256) 
 
-# **Functions**
+### **Functions**
 
 - queryByListing 
 
@@ -441,7 +441,7 @@ Writes liquidity contract details
 Ensure that contract is verified upon creation 
 
 
-### **Examples**
+# **Examples**
 E1 : A token with the price of `0.25` implies that the token is worth 0.25 `TOKEN-0`. If a user puts an order to spend 250 `TOKEN-0` to buy the token, the exchange calculates; 250 / 0.25 = 1000. If they were selling (1000) `TOKEN-1` then the equation is; (1000) * 0.25 = 250. 
 
 E2 : If a listing address has 500 `TOKEN-0` and 100 `TOKEN-1`, 500 / 100 = 5, this means the price is 5 `TOKEN-0'. If a user was buying 250 `TOKEN-0` worth of `TOKEN-1` this is; 250 / 5 = 50. Whereas if they were to sell 50 `TOKEN-1` it would be; 50 * 5 = 250.  
