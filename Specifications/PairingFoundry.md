@@ -259,19 +259,27 @@ Settles as many orders that can only be settled partially
 
 Buys are settled as; 
 
-`Order amount / price = pre output
-yLiquidity - pre output = impact-y
- x-liquid / impact-y = impact price`
+```
+Order amount / price = pre output
 
-`order amount / impact price = settlement-y`
+yLiquidity - pre output = impact-y
+
+x-liquid / impact-y = impact price
+
+order amount / impact price = settlement-y
+```
 
 Sells are settled as;
 
-`Order amount * price = pre output
-xLiquidity - pre output = impact-x
- impact-x / y-liquid = impact price`
+```
+Order amount * price = pre output
 
-`order amount * impact price = settlement-x`
+xLiquidity - pre output = impact-x
+
+impact-x / y-liquid = impact price
+
+order amount * impact price = settlement-x
+```
 
 Settlement cannot use >50% of the available liquidity 
 Only settles orders whose max/min prices are met
@@ -331,8 +339,11 @@ Output cannot be greater than xAllocation
 Default to nominal xAllocation as output
 if output is lesser than allocation then calculate;
 
-`initial deposit - pending amount = deficit`
-`deficit / price = compensation-y`
+```
+initial deposit - pending amount = deficit
+
+deficit / price = compensation-y
+```
 
 Pays pending amount
 Attempts to pay compensation-y from y-liquid or y-liquid and y-balance if y-liquid is insufficient 
@@ -376,14 +387,15 @@ fetches dVolume
 
 Calculates; 
 
-`Current (x or y)Volume - (x or y)Volume at deposit = contributed volume`
+```
+Current (x or y)Volume - (x or y)Volume at deposit = contributed volume
 
-`contributed volume / 100 * 0.05 = fees accrued`
+contributed volume / 100 * 0.05 = fees accrued
 
-`user Liquidity / total Liquidity = Liquidity contribution` 
+user Liquidity / total Liquidity = Liquidity contribution
 
-`fees accrued * liquidity contribution = output amount` 
-
+fees accrued * liquidity contribution = output amount
+```
 
 Resets dVolume to current (x or y)Volume
 Output amount cannot be greater than available fees, if greater then only pay available fees. 
