@@ -50,7 +50,8 @@ Status: (uint256),
 `Last Settled Price` is updated after every settlement.
 
 
-- price 
+- price
+  
 Price is calculated as; 
 
 `Token-0 Balance / Token-1 Balance`
