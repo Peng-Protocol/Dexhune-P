@@ -53,7 +53,7 @@ Status: (uint256)
 - price 
 Price is calculated as; 
 
-Token-0 Balance / Token-1 Balance 
+`Token-0 Balance / Token-1 Balance`
 
 
 If price can not be acquired then default price is lowest divisible unit of Token-1 
