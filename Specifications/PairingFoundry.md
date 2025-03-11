@@ -104,6 +104,10 @@ This uses a separate index for each maker address.
 
 Returns the full details of an order slot by an index number in a specific maker address's index storage. 
 
+- queryLatest 
+
+Returns the full details of the newest order slot. 
+
 ## **MFP-Liquidity**
 
 ### **Data**
