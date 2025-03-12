@@ -57,6 +57,7 @@ Price is calculated as;
 
 If price can not be acquired then default price is lowest divisible unit of Token-1 
 
+Whenever price is updated, the prior price becomes historical, this updates all historical data as well. 
 
 - historicalSellVolume 
 
@@ -70,7 +71,7 @@ Stores entries for previous xVolume appended with an index + timestamp.
   
 Stores entries for previous price appended with an index + timestamp. 
 
-- historical marketCap
+- historicalMarketCap
   
 Stores entries for previous mcap appended with index + timestamp. 
 
