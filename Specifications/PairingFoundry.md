@@ -12,7 +12,7 @@ The system is made up of (4) contracts, `MFP-Listing`, `MFP-Liquidity`, `MFP-Rou
 
 Stores the valid router address that can call `transact` or `update`. 
 
-- Listing Data (11) 
+- Listing Data (9) 
 
 Contract Name : (string),
 Token-A address : (address),
