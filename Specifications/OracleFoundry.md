@@ -29,7 +29,8 @@ yVolume : (uint256),
 
 `Price Function` defines what read function or data entry to query at the oracle address, this either queries or fetches. 
 
-- price 
+- price
+  
 Price is derived from the oracle. 
 
 ## **OMF-Agent**
