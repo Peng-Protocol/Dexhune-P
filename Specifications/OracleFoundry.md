@@ -1,16 +1,14 @@
 # **Premise**
-A version of `PairingFoundry` but for creating oracle priced assets. 
+A version of `PairingFoundry` but for creating oracle priced listings. 
 
 # **General**
 The only notable difference is listing data and oracle related functions. The associated contracts are called; `OMF-Listing`, `OMF-Liquidity`, `OMF-Router`, `OMF-Agent`. 
-
----
 
 ## **OMF-Listing**
 
 ### **Data**
 
-- Listing Data (11) 
+- Listing Data (12) 
 
 Contract Name : (string),
 Base Token : (address), 
@@ -25,13 +23,11 @@ yBalance : (uint256),
 xVolume : (uint256),
 yVolume : (uint256),
 
-`Price Function` defines what read function or data entry to query at the oracle address, this either queries or fetches. 
+`Base Token` is `Link Dollar`, is set by the agent during deployment. 
 
 `Price` is normalized to 18 decimals from how ever many the oracle uses. 
 
-`Base Token` is `Link Dollar`, is set by the agent during deployment. 
-
----
+`Price Function` defines what read function or data entry to query at the oracle address, this either queries or fetches. 
 
 - price 
 Price is derived from the oracle. 
@@ -40,9 +36,13 @@ Price is derived from the oracle.
 
 ### **Data**
 
-- Base Token 
+- baseToken 
 
 Stores the address of the base token.
+
+- taxCollector 
+
+Stores the taxCollector address. 
 
 ### **Functions**
 
@@ -62,5 +62,10 @@ Writes listing contract details,
 Writes liquidity contract details,
 
 - setBaseToken (ownerOnly) 
+
 Determines the base token all listings will use. 
+
+- setTaxCollector 
+
+Determines the taxCollector address. 
 
