@@ -456,14 +456,12 @@ Determines the router address, the router can update balance and volume details 
 
 Searches Listing validation for the exact token pair
 Cannot list existing pair
-Creates a new Listing Contract with the specified details 
-Requires a Token-0 and Token-1 
+Requires a `Token-0` and `Token-1` 
 Stating `0` as a Token address sets the token to `NATIVE`
 Creates a new listing and liquidity contract 
-Writes the token addresses and router address into the listing
+Verifies contracts 
+Writes listing contract details
 Writes liquidity contract details
-Ensure that contract is verified upon creation 
-
 
 # **Examples**
 E1 : A token with the price of `0.25` implies that the token is worth 0.25 `TOKEN-0`. If a user puts an order to spend 250 `TOKEN-0` to buy the token, the exchange calculates; 250 / 0.25 = 1000. If they were selling (1000) `TOKEN-1` then the equation is; (1000) * 0.25 = 250. 
