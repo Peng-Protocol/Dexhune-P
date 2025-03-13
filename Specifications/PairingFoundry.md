@@ -118,6 +118,22 @@ Returns the full details of an order slot by an index number in a specific maker
 
 Returns the full details of the newest order slot. 
 
+- queryHistoricalSellVolume 
+
+Returns up to (1000) prior historical sell volume entries, requires `step` to query additional (1000). 
+
+- queryHistoricalBuyVolume 
+
+Returns up to (1000) prior historical buy volume entries, requires `step` to query additional (1000). 
+
+- queryHistoricalPrice
+
+Returns up to (1000) prior historical price entries, requires `step` to query additional (1000). 
+
+- queryHistoricalMarketCap 
+
+Returns up to (1000) prior historical mcap entries, requires `step` to query additional (1000). 
+
 ## **MFP-Liquidity**
 
 ### **Data**
