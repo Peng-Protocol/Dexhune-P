@@ -44,6 +44,8 @@ Last Settled Price: (uint256),
 Order ID: (uint256),
 Status: (uint256),
 
+`Recipient Address` is where the settlement is sent, this is necessary for Multihop. 
+
 `Status` is `Pending`, `Settled`, or `Cancelled`, Cancelled orders can No longer be settled. 
 
 `Last Settled Price` is updated after every settlement.
@@ -238,7 +240,7 @@ Same as `createBuyOrder` but with sell order details, spends token-B of the list
 
 Notes the order pending amount 
 Sets the order status to `cancelled`
-Returns the pending amount to the caller 
+Sends the pending amount to the `Recipient Address` 
 Can only be called by the maker 
 *
 Updates validation balances and liquids
