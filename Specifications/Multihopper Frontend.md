@@ -14,6 +14,7 @@ Routes are calculated depending on the number of listings the frontend needs to 
 Frontend acquires listings by querying 'queryByToken' at the Listing Agent contract using the stated Token-A and Token-B. Frontend determines required route by performing the following; 
 
 - Single Hop
+  
 Find two listings that have Token-A and Token-B where each listing has the same paired asset as Token-C. 
 
 If none then return error pop-up; "No feasible routes found! Contact the token's deployer for assistance!" 
