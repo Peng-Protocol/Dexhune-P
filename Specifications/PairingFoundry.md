@@ -37,7 +37,8 @@ Token-B Contract: (address),
 Max Price: (uint256),
 Min Price: (uint256),
 Principal:  (`TOKEN-0` or `TOKEN-1`),
-Pending:  (`TOKEN-0` or `TOKEN-1`)  
+Pending:  (`TOKEN-0` or `TOKEN-1`),
+Settled: (uint256)
 Created at: (uint256),
 Last Settled Price: (uint256),
 Order ID: (uint256),
@@ -46,6 +47,8 @@ Status: (uint256),
 `Status` is `Pending`, `Filled`, or `Cancelled`, Cancelled orders can No longer be settled. 
 
 `Last Settled Price` is updated after every settlement.
+
+`Settled` stores how much of the destination token the maker has received, is updated after every settlement - partial or whole. 
 
 
 - price
