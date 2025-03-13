@@ -38,7 +38,7 @@ Max Price: (uint256),
 Min Price: (uint256),
 Principal:  (`TOKEN-0` or `TOKEN-1`),
 Pending:  (`TOKEN-0` or `TOKEN-1`),
-Settled: (uint256)
+Filled: (uint256)
 Created at: (uint256),
 Last Settled Price: (uint256),
 Order ID: (uint256),
@@ -48,7 +48,7 @@ Status: (uint256),
 
 `Last Settled Price` is updated after every settlement.
 
-`Settled` stores how much of the destination token the maker has received, is updated after every settlement - partial or whole. 
+`Filled` stores how much of the destination token the maker has received, is updated after every settlement - partial or whole. 
 
 
 - price
