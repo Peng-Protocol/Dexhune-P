@@ -44,7 +44,7 @@ Last Settled Price: (uint256),
 Order ID: (uint256),
 Status: (uint256),
 
-`Status` is `Pending`, `Filled`, or `Cancelled`, Cancelled orders can No longer be settled. 
+`Status` is `Pending`, `Settled`, or `Cancelled`, Cancelled orders can No longer be settled. 
 
 `Last Settled Price` is updated after every settlement.
 
