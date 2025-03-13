@@ -254,10 +254,11 @@ Same as `createBuyOrder` but with sell order details, spends token-B of the list
 
 - clearSingleOrder
 
-Notes the order pending amount 
-Sets the order status to `cancelled`
-Sends the pending amount to the `Recipient Address` 
-Can only be called by the maker 
+Notes the order pending amount,
+Sets the order status to `cancelled`,
+Sends the pending amount to the `Recipient Address`,
+Can only be called by the maker,
+If there are insufficient tokens units to cover the cancellation fully then only what is available is paid, the order remains pending and the order's pending amount is subtracted by the cancelled amount. 
 *
 Updates validation balances and liquids
 
