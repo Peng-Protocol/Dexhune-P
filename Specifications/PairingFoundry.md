@@ -134,6 +134,20 @@ Returns up to (1000) prior historical price entries, requires `step` to query ad
 
 Returns up to (1000) prior historical mcap entries, requires `step` to query additional (1000). 
 
+- queryYield 
+
+Calculates and returns the real yield rate for fees collected. uses the following formula; 
+
+``` 
+Total 24hr (x or y)Volume / 100 * 0.05 = total (x or y)Fees 
+
+Total (x or y)Fees / total (x or y)Liquid * 100 = daily (x or y)Yield 
+
+Daily (x or y)Yield * 365 = (x or y)APY
+``` 
+
+This function fetches (x or y)Liquid data from liquidity contract.
+
 ## **MFP-Liquidity**
 
 ### **Data**
