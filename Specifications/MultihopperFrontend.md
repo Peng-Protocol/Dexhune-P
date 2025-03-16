@@ -404,6 +404,10 @@ Shows details from liquidity slots on the target listing contract, presents the 
 
 Liquidity positions can be clicked to highlight and prepare them for "Claim Fees" or "Withdraw".
 
+- Yield Rate 
+
+Queries and displays yield rate. 
+
 - **2e ; Claim Fees**
 
 Pushes a transaction to claim fees on a liquidity position highlighted in "Liquidity positions", index numbers for liquidity slots are stored by the frontend and updated before any transaction is pushed. 
