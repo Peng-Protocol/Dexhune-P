@@ -136,7 +136,7 @@ Returns up to (1000) prior historical mcap entries, requires `step` to query add
 
 - queryYield 
 
-Calculates and returns the real yield rate for fees collected. uses the following formula; 
+Calculates and returns the real yield rate for fees collected. First gets the latest historical (x or y)volume entry and attempts to find a volume entry from 24 hours ago or the latest fee before a 24 hour cutoff point. Then calculates; 
 
 ``` 
 Total 24hr (x or y)Volume / 100 * 0.05 = total (x or y)Fees 
