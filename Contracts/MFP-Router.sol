@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.20;
 
-// Version: 0.0.2
+// Version: 0.0.3
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
@@ -454,7 +454,7 @@ contract MFPRouter is Ownable, ReentrancyGuard {
     }
 }
 
-// Interfaces
+// Interfaces (unchanged, assuming they match MFP-$Template naming)
 interface IMFP {
     function writeValidationSlot(uint256 listingId, address listingAddress, address tokenA, address tokenB, uint256 xBalance, uint256 yBalance, uint256 xLiquid, uint256 yLiquid) external;
     function isValidListing(address listingAddress) external view returns (bool);
@@ -484,11 +484,4 @@ interface IMFPLiquidity {
     function xLiquiditySlots(uint256 listingId, uint256 index) external view returns (address, uint256, uint256, uint256, uint256);
     function yLiquiditySlots(uint256 listingId, uint256 index) external view returns (address, uint256, uint256, uint256, uint256);
     function liquidityIndexCount(uint256 listingId) external view returns (uint256);
-}
-
-// Assume IERC20 includes decimals() function
-interface IERC20 {
-    function decimals() external view returns (uint8);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }

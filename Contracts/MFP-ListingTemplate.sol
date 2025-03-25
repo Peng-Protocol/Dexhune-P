@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.20;
 
-// Version: 0.0.2
+// Version: 0.0.3
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
@@ -305,11 +305,4 @@ contract MFPListingTemplate is Ownable {
         if (decimals < 18) return amount / (10 ** (18 - decimals));
         return amount * (10 ** (decimals - 18));
     }
-}
-
-// Assume IERC20 includes decimals() function
-interface IERC20 {
-    function decimals() external view returns (uint8);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
