@@ -182,6 +182,25 @@ A mapping that stores the index numbers of all liquidity slots, indexes are quer
 An array that stores the liquidity index numbers for each address, is updated after every user deposit or withdrawal. Is queryable. 
 
 ### **Functions**
+- xWithdraw
+
+Requires Listing Address
+Requires withdrawal amount
+Requires index
+Finds Liquidity Address on Listing Address
+Fetches `x-liquidity`, `x-ratio`, `xAllocation`, `price`
+Pays requested amount of xLiquid has enough token units, else fails. 
+
+When a withdrawal leaves `0` allocation then the liquidity slot is erased and the liquidity index is updated,
+Forfeits unclaimed fees if slot is erased. 
+
+
+
+- yWithdraw
+
+Same as xWithdraw but deals with Y-Type liquidity slots and their details.
+
+
 - update (Router only)
 
 Changes the details of up to (100) arrays or mappings, either creating - updating or clearing entries for liquidity slots, historical data etc,  
@@ -320,25 +339,6 @@ Calculates and stores Ratio as;
 
 Fetches yVolume from Listing Address. 
 
-
-
-- xWithdraw
-
-Requires Listing Address
-Requires withdrawal amount
-Requires index
-Finds Liquidity Address on Listing Address
-Fetches `x-liquidity`, `x-ratio`, `xAllocation`, `price`
-Pays requested amount of xLiquid has enough token units, else fails. 
-
-When a withdrawal leaves `0` allocation then the liquidity slot is erased and the liquidity index is updated,
-Forfeits unclaimed fees if slot is erased. 
-
-
-
-- yWithdraw
-
-Same as xWithdraw but deals with Y-Type liquidity slots and their details.
 
 
 - claimFees 
