@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.5
+// Version: 0.0.6
 
 import "./imports/SafeERC20.sol";
 
 interface IMFPListing {
-        function volumeBalances(uint256 listingId) external view returns (
-            uint256 xBalance,
-            uint256 yBalance,
-            uint256 xVolume,
-            uint256 yVolume
-        );
-    }
+    function volumeBalances(uint256 listingId) external view returns (
+        uint256 xBalance,
+        uint256 yBalance,
+        uint256 xVolume,
+        uint256 yVolume
+    );
+}
 
 contract MFPLiquidityTemplate {
     using SafeERC20 for IERC20;
@@ -52,6 +52,7 @@ contract MFPLiquidityTemplate {
 
     event LiquidityUpdated(uint256 listingId, uint256 xLiquid, uint256 yLiquid);
     event FeesUpdated(uint256 listingId, uint256 xFees, uint256 yFees);
+    event FeesClaimed(uint256 listingId, uint256 liquidityIndex, uint256 xFees, uint256 yFees);
 
     function setRouter(address _routerAddress) external {
         require(routerAddress == address(0), "Router already set");
@@ -94,7 +95,7 @@ contract MFPLiquidityTemplate {
                 }
             } else if (u.updateType == 2) { // xSlot update
                 Slot storage slot = xLiquiditySlots[listingId][u.index];
-                if (slot.depositor == address(0)) {
+                if (slot.depositor == address(0) && u.addr != address(0)) {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
                     activeXLiquiditySlots[listingId].push(u.index);
@@ -117,7 +118,7 @@ contract MFPLiquidityTemplate {
                 details.xLiquid += u.value;
             } else if (u.updateType == 3) { // ySlot update
                 Slot storage slot = yLiquiditySlots[listingId][u.index];
-                if (slot.depositor == address(0)) {
+                if (slot.depositor == address(0) && u.addr != address(0)) {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
                     activeYLiquiditySlots[listingId].push(u.index);
@@ -173,6 +174,117 @@ contract MFPLiquidityTemplate {
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
+    function deposit(uint256 listingId, address token, uint256 amount) external payable {
+        require(msg.sender == routerAddress, "Router only");
+        require(token == tokenA || token == tokenB, "Invalid token");
+        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+        uint256 preBalance = token == address(0) ? address(this).balance : IERC20(token).balanceOf(address(this));
+        if (token == address(0)) {
+            require(msg.value == amount, "Incorrect ETH amount");
+        } else {
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        }
+        uint256 postBalance = token == address(0) ? address(this).balance : IERC20(token).balanceOf(address(this));
+        uint256 receivedAmount = postBalance - preBalance;
+        uint256 normalizedAmount = normalize(receivedAmount, decimals);
+
+        UpdateType[] memory updates = new UpdateType[](1);
+        uint256 index = token == tokenA ? activeXLiquiditySlots[listingId].length : activeYLiquiditySlots[listingId].length;
+        updates[0] = UpdateType(token == tokenA ? 2 : 3, index, normalizedAmount, msg.sender, address(0));
+        update(listingId, updates);
+    }
+
+    function xWithdraw(uint256 listingId, uint256 amount, uint256 index) external {
+        Slot storage slot = xLiquiditySlots[listingId][index];
+        require(slot.depositor == msg.sender, "Not depositor");
+        uint256 withdrawAmount = slot.allocation < amount ? slot.allocation : amount;
+
+        UpdateType[] memory updates = new UpdateType[](1);
+        updates[0] = UpdateType(2, index, slot.allocation - withdrawAmount, msg.sender, address(0));
+        update(listingId, updates);
+
+        transact(listingId, tokenA, withdrawAmount, msg.sender);
+    }
+
+    function yWithdraw(uint256 listingId, uint256 amount, uint256 index) external {
+        Slot storage slot = yLiquiditySlots[listingId][index];
+        require(slot.depositor == msg.sender, "Not depositor");
+        uint256 withdrawAmount = slot.allocation < amount ? slot.allocation : amount;
+
+        UpdateType[] memory updates = new UpdateType[](1);
+        updates[0] = UpdateType(3, index, slot.allocation - withdrawAmount, msg.sender, address(0));
+        update(listingId, updates);
+
+        transact(listingId, tokenB, withdrawAmount, msg.sender);
+    }
+
+    function claimFees(uint256 listingId, uint256 liquidityIndex, bool isX, uint256 volume) external {
+        LiquidityDetails storage details = liquidityDetails[listingId];
+        Slot storage slot = isX ? xLiquiditySlots[listingId][liquidityIndex] : yLiquiditySlots[listingId][liquidityIndex];
+        require(slot.depositor == msg.sender, "Not depositor");
+
+        uint256 liquid = isX ? details.xLiquid : details.yLiquid;
+        uint256 fees = isX ? details.xFees : details.yFees;
+        uint256 allocation = slot.allocation;
+        uint256 dVolume = slot.dVolume;
+
+        (uint256 feeShare, UpdateType[] memory updates) = _claimFeeShare(volume, dVolume, liquid, allocation, fees);
+        if (feeShare > 0) {
+            updates[0] = UpdateType(1, isX ? 0 : 1, fees - feeShare, address(0), address(0));
+            updates[1] = UpdateType(isX ? 2 : 3, liquidityIndex, allocation, msg.sender, address(0));
+            update(listingId, updates);
+
+            transact(listingId, isX ? tokenA : tokenB, feeShare, msg.sender);
+            emit FeesClaimed(listingId, liquidityIndex, isX ? feeShare : 0, isX ? 0 : feeShare);
+        }
+    }
+
+    function addFees(uint256 listingId, bool isX, uint256 fee) external {
+        require(msg.sender == routerAddress, "Router only");
+        UpdateType[] memory feeUpdates = new UpdateType[](1);
+        feeUpdates[0] = UpdateType(1, isX ? 0 : 1, fee, address(0), address(0));
+        update(listingId, feeUpdates);
+    }
+
+    function updateLiquidity(uint256 listingId, bool isX, uint256 amount) external {
+        require(msg.sender == routerAddress, "Router only");
+        LiquidityDetails storage details = liquidityDetails[listingId];
+        if (isX) {
+            require(details.xLiquid >= amount, "Insufficient xLiquid");
+            details.xLiquid -= amount;
+        } else {
+            require(details.yLiquid >= amount, "Insufficient yLiquid");
+            details.yLiquid -= amount;
+        }
+        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
+    }
+
+    function transferLiquidity(uint256 listingId, uint256 liquidityIndex, address newDepositor) external {
+        Slot storage xSlot = xLiquiditySlots[listingId][liquidityIndex];
+        require(xSlot.depositor == msg.sender, "Not depositor");
+
+        UpdateType[] memory updates = new UpdateType[](2);
+        updates[0] = UpdateType(2, liquidityIndex, xSlot.allocation, newDepositor, address(0));
+        updates[1] = UpdateType(3, liquidityIndex, xSlot.allocation, newDepositor, address(0));
+        update(listingId, updates);
+    }
+
+    function _claimFeeShare(
+        uint256 volume,
+        uint256 dVolume,
+        uint256 liquid,
+        uint256 allocation,
+        uint256 fees
+    ) private pure returns (uint256 feeShare, UpdateType[] memory updates) {
+        updates = new UpdateType[](2);
+        uint256 contributedVolume = volume > dVolume ? volume - dVolume : 0;
+        uint256 feesAccrued = (contributedVolume * 5) / 10000;
+        uint256 liquidityContribution = liquid > 0 ? (allocation * 1e18) / liquid : 0;
+        feeShare = (feesAccrued * liquidityContribution) / 1e18;
+        feeShare = feeShare > fees ? fees : feeShare;
+        return (feeShare, updates);
+    }
+
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount * 10**(18 - decimals);
@@ -184,5 +296,4 @@ contract MFPLiquidityTemplate {
         else if (decimals < 18) return amount / 10**(18 - decimals);
         else return amount * 10**(decimals - 18);
     }
-
-} 
+}
