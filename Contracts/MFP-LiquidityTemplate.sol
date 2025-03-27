@@ -54,21 +54,25 @@ contract MFPLiquidityTemplate {
     event FeesUpdated(uint256 listingId, uint256 xFees, uint256 yFees);
     event FeesClaimed(uint256 listingId, uint256 liquidityIndex, uint256 xFees, uint256 yFees);
 
+    // Reverted to setRouter, no caller restriction for initial setup
     function setRouter(address _routerAddress) external {
         require(routerAddress == address(0), "Router already set");
+        require(_routerAddress != address(0), "Invalid router address");
         routerAddress = _routerAddress;
     }
 
+    // No router restriction, one-time set during deployment
     function setListingAddress(address _listingAddress) external {
-        require(msg.sender == routerAddress, "Router only");
         require(listingAddress == address(0), "Listing already set");
+        require(_listingAddress != address(0), "Invalid listing address");
         listingAddress = _listingAddress;
     }
 
+    // No router restriction, one-time set during deployment
     function setTokens(address _tokenA, address _tokenB) external {
-        require(msg.sender == routerAddress, "Router only");
         require(tokenA == address(0) && tokenB == address(0), "Tokens already set");
         require(_tokenA != _tokenB, "Tokens must be different");
+        require(_tokenA != address(0) || _tokenB != address(0), "Both tokens cannot be zero"); // Optional safety
         tokenA = _tokenA;
         tokenB = _tokenB;
     }
@@ -191,7 +195,7 @@ contract MFPLiquidityTemplate {
         UpdateType[] memory updates = new UpdateType[](1);
         uint256 index = token == tokenA ? activeXLiquiditySlots[listingId].length : activeYLiquiditySlots[listingId].length;
         updates[0] = UpdateType(token == tokenA ? 2 : 3, index, normalizedAmount, msg.sender, address(0));
-        update(listingId, updates);
+        this.update(listingId, updates);
     }
 
     function xWithdraw(uint256 listingId, uint256 amount, uint256 index) external {
@@ -201,9 +205,9 @@ contract MFPLiquidityTemplate {
 
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(2, index, slot.allocation - withdrawAmount, msg.sender, address(0));
-        update(listingId, updates);
+        this.update(listingId, updates);
 
-        transact(listingId, tokenA, withdrawAmount, msg.sender);
+        this.transact(listingId, tokenA, withdrawAmount, msg.sender);
     }
 
     function yWithdraw(uint256 listingId, uint256 amount, uint256 index) external {
@@ -213,9 +217,9 @@ contract MFPLiquidityTemplate {
 
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(3, index, slot.allocation - withdrawAmount, msg.sender, address(0));
-        update(listingId, updates);
+        this.update(listingId, updates);
 
-        transact(listingId, tokenB, withdrawAmount, msg.sender);
+        this.transact(listingId, tokenB, withdrawAmount, msg.sender);
     }
 
     function claimFees(uint256 listingId, uint256 liquidityIndex, bool isX, uint256 volume) external {
@@ -232,9 +236,9 @@ contract MFPLiquidityTemplate {
         if (feeShare > 0) {
             updates[0] = UpdateType(1, isX ? 0 : 1, fees - feeShare, address(0), address(0));
             updates[1] = UpdateType(isX ? 2 : 3, liquidityIndex, allocation, msg.sender, address(0));
-            update(listingId, updates);
+            this.update(listingId, updates);
 
-            transact(listingId, isX ? tokenA : tokenB, feeShare, msg.sender);
+            this.transact(listingId, isX ? tokenA : tokenB, feeShare, msg.sender);
             emit FeesClaimed(listingId, liquidityIndex, isX ? feeShare : 0, isX ? 0 : feeShare);
         }
     }
@@ -243,7 +247,7 @@ contract MFPLiquidityTemplate {
         require(msg.sender == routerAddress, "Router only");
         UpdateType[] memory feeUpdates = new UpdateType[](1);
         feeUpdates[0] = UpdateType(1, isX ? 0 : 1, fee, address(0), address(0));
-        update(listingId, feeUpdates);
+        this.update(listingId, feeUpdates);
     }
 
     function updateLiquidity(uint256 listingId, bool isX, uint256 amount) external {
@@ -266,7 +270,19 @@ contract MFPLiquidityTemplate {
         UpdateType[] memory updates = new UpdateType[](2);
         updates[0] = UpdateType(2, liquidityIndex, xSlot.allocation, newDepositor, address(0));
         updates[1] = UpdateType(3, liquidityIndex, xSlot.allocation, newDepositor, address(0));
-        update(listingId, updates);
+        this.update(listingId, updates);
+    }
+
+    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount * 10**(18 - decimals);
+        else return amount / 10**(decimals - 18);
+    }
+
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10**(18 - decimals);
+        else return amount * 10**(decimals - 18);
     }
 
     function _claimFeeShare(
@@ -283,17 +299,5 @@ contract MFPLiquidityTemplate {
         feeShare = (feesAccrued * liquidityContribution) / 1e18;
         feeShare = feeShare > fees ? fees : feeShare;
         return (feeShare, updates);
-    }
-
-    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount * 10**(18 - decimals);
-        else return amount / 10**(decimals - 18);
-    }
-
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
     }
 }

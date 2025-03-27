@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version : 0.0.6
+// Version: 0.0.8
 
 import "./MFP-ListingTemplate.sol";
 import "./MFP-LiquidityTemplate.sol";
@@ -11,32 +11,48 @@ contract MFPAgent is Ownable {
     address public routerAddress;
     uint256 public listingCount;
 
-    struct ListingValidation {
-        address listingAddress;
-        address liquidityAddress;
-        address tokenA;
-        address tokenB;
-        uint256 xBalance;
-        uint256 yBalance;
-        uint256 xLiquid;
-        uint256 yLiquid;
+    mapping(address => mapping(address => address)) public getListing; // tokenA -> tokenB -> listingAddress
+    address[] public allListings;
+    address[] public allListedTokens; // New: Stores unique token addresses
+
+    event ListingCreated(address indexed tokenA, address indexed tokenB, address listingAddress, address liquidityAddress, uint256 listingId);
+
+    // Helper function to check if a token already exists in allListedTokens
+    function tokenExists(address token) internal view returns (bool) {
+        for (uint256 i = 0; i < allListedTokens.length; i++) {
+            if (allListedTokens[i] == token) {
+                return true;
+            }
+        }
+        return false;
     }
-
-    mapping(address => mapping(address => bool)) public listedPairs;
-    mapping(uint256 => ListingValidation) public listingValidationByIndex;
-    mapping(address => uint256) public listingValidationByAddress;
-    mapping(address => uint256[]) public listingIndex;
-
-    event ListingCreated(uint256 listingId, address listingAddress, address liquidityAddress);
 
     function setRouter(address _routerAddress) external onlyOwner {
         require(_routerAddress != address(0), "Invalid router address");
         routerAddress = _routerAddress;
     }
 
+    // Internal function to initialize the deployed pair
+    function _initializePair(
+        address listingAddress,
+        address liquidityAddress,
+        address tokenA,
+        address tokenB,
+        uint256 listingId
+    ) internal {
+        MFPListingTemplate(listingAddress).setRouter(routerAddress);
+        MFPListingTemplate(listingAddress).setLiquidityAddress(listingId, liquidityAddress);
+        MFPListingTemplate(listingAddress).setTokens(tokenA, tokenB);
+
+        MFPLiquidityTemplate(liquidityAddress).setRouter(routerAddress);
+        MFPLiquidityTemplate(liquidityAddress).setListingAddress(listingAddress);
+        MFPLiquidityTemplate(liquidityAddress).setTokens(tokenA, tokenB);
+    }
+
     function listToken(address tokenA, address tokenB) external returns (address listingAddress, address liquidityAddress) {
         require(tokenA != tokenB, "Identical tokens");
-        require(!listedPairs[tokenA][tokenB], "Pair already listed");
+        require(getListing[tokenA][tokenB] == address(0), "Pair already listed");
+        require(routerAddress != address(0), "Router not set");
 
         bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, tokenB, listingCount));
         bytes32 liquiditySalt = keccak256(abi.encodePacked(tokenB, tokenA, listingCount));
@@ -44,62 +60,33 @@ contract MFPAgent is Ownable {
         listingAddress = address(new MFPListingTemplate{salt: listingSalt}());
         liquidityAddress = address(new MFPLiquidityTemplate{salt: liquiditySalt}());
 
-        MFPListingTemplate(listingAddress).setRouter(routerAddress);
-        MFPListingTemplate(listingAddress).setLiquidityAddress(listingCount, liquidityAddress);
-        MFPListingTemplate(listingAddress).setTokens(tokenA, tokenB);
+        _initializePair(listingAddress, liquidityAddress, tokenA, tokenB, listingCount);
 
-        MFPLiquidityTemplate(liquidityAddress).setRouter(routerAddress);
-        MFPLiquidityTemplate(liquidityAddress).setListingAddress(listingAddress);
-        MFPLiquidityTemplate(liquidityAddress).setTokens(tokenA, tokenB);
+        getListing[tokenA][tokenB] = listingAddress;
+        allListings.push(listingAddress);
 
-        listingValidationByIndex[listingCount] = ListingValidation(
-            listingAddress,
-            liquidityAddress,
-            tokenA,
-            tokenB,
-            0,
-            0,
-            0,
-            0
-        );
-        listingValidationByAddress[listingAddress] = listingCount;
-        listingIndex[tokenA].push(listingCount);
-        listingIndex[tokenB].push(listingCount);
-        listedPairs[tokenA][tokenB] = true;
-        emit ListingCreated(listingCount, listingAddress, liquidityAddress);
+        // Add unique tokens to allListedTokens
+        if (!tokenExists(tokenA)) {
+            allListedTokens.push(tokenA);
+        }
+        if (!tokenExists(tokenB)) {
+            allListedTokens.push(tokenB);
+        }
+
+        emit ListingCreated(tokenA, tokenB, listingAddress, liquidityAddress, listingCount);
         listingCount++;
+
+        return (listingAddress, liquidityAddress);
     }
 
-    function isValidListing(address listingAddress) external view returns (bool) {
-        return listingValidationByAddress[listingAddress] != 0 || listingAddress == listingValidationByIndex[listingValidationByAddress[listingAddress]].listingAddress;
+    function listNative(address token, bool isA) external returns (address listingAddress, address liquidityAddress) {
+        address nativeAddress = address(0);
+        (address tokenA, address tokenB) = isA ? (nativeAddress, token) : (token, nativeAddress);
+        (listingAddress, liquidityAddress) = this.listToken(tokenA, tokenB);
+        return (listingAddress, liquidityAddress);
     }
 
-    function getListingId(address listingAddress) external view returns (uint256) {
-        require(this.isValidListing(listingAddress), "Invalid listing");
-        return listingValidationByAddress[listingAddress];
-    }
-
-    function writeValidationSlot(
-        uint256 listingId,
-        address listingAddress,
-        address tokenA,
-        address tokenB,
-        uint256 xBalance,
-        uint256 yBalance,
-        uint256 xLiquid,
-        uint256 yLiquid
-    ) external {
-        require(msg.sender == routerAddress, "Router only");
-        require(listingValidationByIndex[listingId].listingAddress == listingAddress, "Invalid listing");
-        listingValidationByIndex[listingId] = ListingValidation(
-            listingAddress,
-            listingValidationByIndex[listingId].liquidityAddress,
-            tokenA,
-            tokenB,
-            xBalance,
-            yBalance,
-            xLiquid,
-            yLiquid
-        );
+    function allListingsLength() external view returns (uint256) {
+        return allListings.length;
     }
 }

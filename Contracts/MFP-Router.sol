@@ -105,6 +105,7 @@ interface IMFPLiquidity {
     function deposit(uint256 listingId, address token, uint256 amount) external payable;
     function addFees(uint256 listingId, bool isX, uint256 fee) external;
     function updateLiquidity(uint256 listingId, bool isX, uint256 amount) external;
+    function claimFees(uint256 listingId, uint256 liquidityIndex, bool isX, uint256 volume) external; // Added
 }
 
 contract MFPRouter is Ownable, ReentrancyGuard {
@@ -161,7 +162,7 @@ contract MFPRouter is Ownable, ReentrancyGuard {
         return postBalance - preBalance;
     }
 
-    function _normalizeAndFee(address token, uint256 amount) internal pure returns (uint256 normalized, uint256 fee, uint256 principal) {
+        function _normalizeAndFee(address token, uint256 amount) internal view returns (uint256 normalized, uint256 fee, uint256 principal) {
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
         normalized = normalize(amount, decimals);
         fee = (normalized * 5) / 10000;
@@ -185,18 +186,32 @@ contract MFPRouter is Ownable, ReentrancyGuard {
         return updates;
     }
 
-    function createBuyOrder(address listingAddress, BuyOrderDetails memory details) external payable nonReentrant {
+    function _prepareOrder(
+        address listingAddress,
+        uint256 listingId,
+        address token,
+        uint256 amount,
+        uint8 updateType,
+        address recipient,
+        uint256 maxPrice,
+        uint256 minPrice,
+        uint256 volumeIndex
+    ) internal returns (uint256 orderId, IMFPListing.UpdateType[] memory updates, uint256 fee) {
+        uint256 receivedAmount = _transferToken(token, listingAddress, amount);
+        (uint256 normalizedAmount, uint256 fee_, uint256 principal) = _normalizeAndFee(token, receivedAmount);
+        orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, amount)));
+        updates = _createOrderUpdate(updateType, orderId, principal, msg.sender, recipient, maxPrice, minPrice, volumeIndex, normalizedAmount);
+        return (orderId, updates, fee_);
+    }
+
+        function createBuyOrder(address listingAddress, BuyOrderDetails memory details) external payable nonReentrant {
         require(listingAgent != address(0), "Agent not set");
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
         IMFPListing listing = IMFPListing(listingAddress);
 
         address tokenA = listing.tokenA();
-        uint256 receivedAmount = _transferToken(tokenA, listingAddress, details.amount);
-        (uint256 normalizedAmount, uint256 fee, uint256 principal) = _normalizeAndFee(tokenA, receivedAmount);
-
-        uint256 orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, details.amount)));
-        IMFPListing.UpdateType[] memory updates = _createOrderUpdate(1, orderId, principal, msg.sender, details.recipient, details.maxPrice, details.minPrice, 0, normalizedAmount);
+        (uint256 orderId, IMFPListing.UpdateType[] memory updates, uint256 fee) = _prepareOrder(listingAddress, listingId, tokenA, details.amount, 1, details.recipient, details.maxPrice, details.minPrice, 0);
         listing.update(listingId, updates);
 
         IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
@@ -205,18 +220,14 @@ contract MFPRouter is Ownable, ReentrancyGuard {
         emit OrderCreated(orderId, true, msg.sender);
     }
 
-    function createSellOrder(address listingAddress, SellOrderDetails memory details) external payable nonReentrant {
+        function createSellOrder(address listingAddress, SellOrderDetails memory details) external payable nonReentrant {
         require(listingAgent != address(0), "Agent not set");
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
         IMFPListing listing = IMFPListing(listingAddress);
 
         address tokenB = listing.tokenB();
-        uint256 receivedAmount = _transferToken(tokenB, listingAddress, details.amount);
-        (uint256 normalizedAmount, uint256 fee, uint256 principal) = _normalizeAndFee(tokenB, receivedAmount);
-
-        uint256 orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, details.amount)));
-        IMFPListing.UpdateType[] memory updates = _createOrderUpdate(2, orderId, principal, msg.sender, details.recipient, details.maxPrice, details.minPrice, 1, normalizedAmount);
+        (uint256 orderId, IMFPListing.UpdateType[] memory updates, uint256 fee) = _prepareOrder(listingAddress, listingId, tokenB, details.amount, 2, details.recipient, details.maxPrice, details.minPrice, 1);
         listing.update(listingId, updates);
 
         IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
@@ -297,141 +308,164 @@ contract MFPRouter is Ownable, ReentrancyGuard {
             listing.update(listingId, updates);
         }
     }
-}
 
     function settleBuyOrders(address listingAddress) external nonReentrant {
-        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
-        IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory pendingOrders = listing.pendingBuyOrders(listingId);
-        (uint256 xBalance, uint256 yBalance, , ) = listing.volumeBalances(listingId);
+    require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
+    uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
+    IMFPListing listing = IMFPListing(listingAddress);
+    uint256[] memory pendingOrders = listing.pendingBuyOrders(listingId);
+    (uint256 xBalance, uint256 yBalance, , ) = listing.volumeBalances(listingId);
 
-        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
-        uint256 updateCount = 0;
-        uint256 currentPrice = listing.prices(listingId);
-        for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
-            (, address recipient, uint256 maxPrice, , uint256 pending, , , , uint8 status) = listing.buyOrders(pendingOrders[i]);
-            if (status == 1 && pending > 0) {
-                uint256 available = yBalance > pending ? pending : yBalance;
-                if (currentPrice <= maxPrice && available > 0) {
-                    updates[updateCount] = _createOrderUpdate(1, pendingOrders[i], available, recipient, address(0), 0, 0, 0, 0)[0];
-                    yBalance -= available;
-                    updateCount++;
+    IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
+    uint256 updateCount = 0;
+    uint256 currentPrice = listing.prices(listingId);
+    address tokenB = listing.tokenB();
+    uint8 decimals = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
+
+    for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
+        (, address recipient, uint256 maxPrice, , uint256 pending, , , , uint8 status) = listing.buyOrders(pendingOrders[i]);
+        if (status == 1 && pending > 0) {
+            uint256 available = yBalance > pending ? pending : yBalance;
+            if (currentPrice <= maxPrice && available > 0) {
+                uint256 rawAmount = denormalize(available, decimals);
+                uint256 preBalance = tokenB == address(0) ? recipient.balance : IERC20(tokenB).balanceOf(recipient);
+                updates[updateCount] = IMFPListing.UpdateType(1, pendingOrders[i], available, recipient, address(0), 0, 0);
+                yBalance -= available;
+                updateCount++;
+                listing.transact(listingId, tokenB, rawAmount, recipient);
+                uint256 postBalance = tokenB == address(0) ? recipient.balance : IERC20(tokenB).balanceOf(recipient);
+                uint256 actualReceived = postBalance - preBalance;
+                if (actualReceived < rawAmount) {
+                    updates[updateCount - 1].value = normalize(actualReceived, decimals); // Adjust filled amount
                 }
             }
         }
-        if (updateCount > 0) {
-            assembly { mstore(updates, updateCount) }
-            updates[updateCount] = _createOrderUpdate(0, 2, currentPrice, address(0), address(0), 0, 0, 0, 0)[0]; // Historical price
-            updateCount++;
-            assembly { mstore(updates, updateCount) }
-            listing.update(listingId, updates);
-
-            uint8 decimals = listing.tokenB() == address(0) ? 18 : IERC20(listing.tokenB()).decimals();
-            for (uint256 i = 0; i < updateCount - 1; i++) {
-                listing.transact(listingId, listing.tokenB(), denormalize(updates[i].value, decimals), updates[i].addr);
-            }
-        }
     }
+    if (updateCount > 0) {
+        assembly { mstore(updates, updateCount) }
+        updates[updateCount] = IMFPListing.UpdateType(0, 2, currentPrice, address(0), address(0), 0, 0);
+        updateCount++;
+        assembly { mstore(updates, updateCount) }
+        listing.update(listingId, updates);
+    }
+}
 
     function settleSellOrders(address listingAddress) external nonReentrant {
-        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
-        IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory pendingOrders = listing.pendingSellOrders(listingId);
-        (uint256 xBalance, uint256 yBalance, , ) = listing.volumeBalances(listingId);
+    require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
+    uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
+    IMFPListing listing = IMFPListing(listingAddress);
+    uint256[] memory pendingOrders = listing.pendingSellOrders(listingId);
+    (uint256 xBalance, uint256 yBalance, , ) = listing.volumeBalances(listingId);
 
-        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
-        uint256 updateCount = 0;
-        uint256 currentPrice = listing.prices(listingId);
-        for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
-            (, address recipient, uint256 maxPrice, uint256 minPrice, uint256 pending, , , , uint8 status) = listing.sellOrders(pendingOrders[i]);
-            if (status == 1 && pending > 0) {
-                uint256 available = xBalance > pending ? pending : xBalance;
-                if (currentPrice >= minPrice && currentPrice <= maxPrice && available > 0) {
-                    updates[updateCount] = _createOrderUpdate(2, pendingOrders[i], available, recipient, address(0), 0, 0, 0, 0)[0];
-                    xBalance -= available;
-                    updateCount++;
+    IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
+    uint256 updateCount = 0;
+    uint256 currentPrice = listing.prices(listingId);
+    address tokenA = listing.tokenA();
+    uint8 decimals = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
+
+    for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
+        (, address recipient, uint256 maxPrice, uint256 minPrice, uint256 pending, , , , uint8 status) = listing.sellOrders(pendingOrders[i]);
+        if (status == 1 && pending > 0) {
+            uint256 available = xBalance > pending ? pending : xBalance;
+            if (currentPrice >= minPrice && currentPrice <= maxPrice && available > 0) {
+                uint256 rawAmount = denormalize(available, decimals);
+                uint256 preBalance = tokenA == address(0) ? recipient.balance : IERC20(tokenA).balanceOf(recipient);
+                updates[updateCount] = IMFPListing.UpdateType(2, pendingOrders[i], available, recipient, address(0), 0, 0);
+                xBalance -= available;
+                updateCount++;
+                listing.transact(listingId, tokenA, rawAmount, recipient);
+                uint256 postBalance = tokenA == address(0) ? recipient.balance : IERC20(tokenA).balanceOf(recipient);
+                uint256 actualReceived = postBalance - preBalance;
+                if (actualReceived < rawAmount) {
+                    updates[updateCount - 1].value = normalize(actualReceived, decimals); // Adjust filled amount
                 }
             }
         }
-        if (updateCount > 0) {
-            assembly { mstore(updates, updateCount) }
-            updates[updateCount] = _createOrderUpdate(0, 2, currentPrice, address(0), address(0), 0, 0, 0, 0)[0]; // Historical price
-            updateCount++;
-            assembly { mstore(updates, updateCount) }
-            listing.update(listingId, updates);
-
-            uint8 decimals = listing.tokenA() == address(0) ? 18 : IERC20(listing.tokenA()).decimals();
-            for (uint256 i = 0; i < updateCount - 1; i++) {
-                listing.transact(listingId, listing.tokenA(), denormalize(updates[i].value, decimals), updates[i].addr);
-            }
-        }
     }
+    if (updateCount > 0) {
+        assembly { mstore(updates, updateCount) }
+        updates[updateCount] = IMFPListing.UpdateType(0, 2, currentPrice, address(0), address(0), 0, 0);
+        updateCount++;
+        assembly { mstore(updates, updateCount) }
+        listing.update(listingId, updates);
+    }
+}
 
     function settleBuyLiquid(address listingAddress) external nonReentrant {
-        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
-        IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
+    require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
+    uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
+    IMFPListing listing = IMFPListing(listingAddress);
+    IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
 
-        uint256[] memory pendingOrders = listing.pendingSellOrders(listingId);
-        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
-        uint256 updateCount = 0;
-        uint256 currentPrice = listing.prices(listingId);
-        for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
-            (, address recipient, , , uint256 pending, , , , uint8 status) = listing.sellOrders(pendingOrders[i]);
-            if (status == 1 && pending > 0) {
-                updates[updateCount] = _createOrderUpdate(2, pendingOrders[i], pending, recipient, address(0), 0, 0, 0, 0)[0];
-                liquidity.updateLiquidity(listingId, true, pending);
-                updateCount++;
-            }
-        }
-        if (updateCount > 0) {
-            assembly { mstore(updates, updateCount) }
-            updates[updateCount] = _createOrderUpdate(0, 2, currentPrice, address(0), address(0), 0, 0, 0, 0)[0]; // Historical price
+    uint256[] memory pendingOrders = listing.pendingSellOrders(listingId);
+    IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
+    uint256 updateCount = 0;
+    uint256 currentPrice = listing.prices(listingId);
+    address tokenA = listing.tokenA();
+    uint8 decimals = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
+
+    for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
+        (, address recipient, , , uint256 pending, , , , uint8 status) = listing.sellOrders(pendingOrders[i]);
+        if (status == 1 && pending > 0) {
+            uint256 rawAmount = denormalize(pending, decimals);
+            uint256 preBalance = tokenA == address(0) ? recipient.balance : IERC20(tokenA).balanceOf(recipient);
+            updates[updateCount] = IMFPListing.UpdateType(2, pendingOrders[i], pending, recipient, address(0), 0, 0);
+            liquidity.updateLiquidity(listingId, true, pending);
             updateCount++;
-            assembly { mstore(updates, updateCount) }
-            listing.update(listingId, updates);
-
-            uint8 decimals = listing.tokenA() == address(0) ? 18 : IERC20(listing.tokenA()).decimals();
-            for (uint256 i = 0; i < updateCount - 1; i++) {
-                listing.transact(listingId, listing.tokenA(), denormalize(updates[i].value, decimals), updates[i].addr);
+            listing.transact(listingId, tokenA, rawAmount, recipient);
+            uint256 postBalance = tokenA == address(0) ? recipient.balance : IERC20(tokenA).balanceOf(recipient);
+            uint256 actualReceived = postBalance - preBalance;
+            if (actualReceived < rawAmount) {
+                updates[updateCount - 1].value = normalize(actualReceived, decimals); // Adjust filled amount
             }
         }
     }
+    if (updateCount > 0) {
+        assembly { mstore(updates, updateCount) }
+        updates[updateCount] = IMFPListing.UpdateType(0, 2, currentPrice, address(0), address(0), 0, 0);
+        updateCount++;
+        assembly { mstore(updates, updateCount) }
+        listing.update(listingId, updates);
+    }
+}
 
     function settleSellLiquid(address listingAddress) external nonReentrant {
-        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
-        IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
+    require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
+    uint256 listingId = IMFP(listingAgent).getListingId(listingAddress);
+    IMFPListing listing = IMFPListing(listingAddress);
+    IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
 
-        uint256[] memory pendingOrders = listing.pendingBuyOrders(listingId);
-        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
-        uint256 updateCount = 0;
-        uint256 currentPrice = listing.prices(listingId);
-        for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
-            (, address recipient, , , uint256 pending, , , , uint8 status) = listing.buyOrders(pendingOrders[i]);
-            if (status == 1 && pending > 0) {
-                updates[updateCount] = _createOrderUpdate(1, pendingOrders[i], pending, recipient, address(0), 0, 0, 0, 0)[0];
-                liquidity.updateLiquidity(listingId, false, pending);
-                updateCount++;
-            }
-        }
-        if (updateCount > 0) {
-            assembly { mstore(updates, updateCount) }
-            updates[updateCount] = _createOrderUpdate(0, 2, currentPrice, address(0), address(0), 0, 0, 0, 0)[0]; // Historical price
+    uint256[] memory pendingOrders = listing.pendingBuyOrders(listingId);
+    IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](pendingOrders.length < 100 ? pendingOrders.length : 100);
+    uint256 updateCount = 0;
+    uint256 currentPrice = listing.prices(listingId);
+    address tokenB = listing.tokenB();
+    uint8 decimals = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
+
+    for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
+        (, address recipient, , , uint256 pending, , , , uint8 status) = listing.buyOrders(pendingOrders[i]);
+        if (status == 1 && pending > 0) {
+            uint256 rawAmount = denormalize(pending, decimals);
+            uint256 preBalance = tokenB == address(0) ? recipient.balance : IERC20(tokenB).balanceOf(recipient);
+            updates[updateCount] = IMFPListing.UpdateType(1, pendingOrders[i], pending, recipient, address(0), 0, 0);
+            liquidity.updateLiquidity(listingId, false, pending);
             updateCount++;
-            assembly { mstore(updates, updateCount) }
-            listing.update(listingId, updates);
-
-            uint8 decimals = listing.tokenB() == address(0) ? 18 : IERC20(listing.tokenB()).decimals();
-            for (uint256 i = 0; i < updateCount - 1; i++) {
-                listing.transact(listingId, listing.tokenB(), denormalize(updates[i].value, decimals), updates[i].addr);
+            listing.transact(listingId, tokenB, rawAmount, recipient);
+            uint256 postBalance = tokenB == address(0) ? recipient.balance : IERC20(tokenB).balanceOf(recipient);
+            uint256 actualReceived = postBalance - preBalance;
+            if (actualReceived < rawAmount) {
+                updates[updateCount - 1].value = normalize(actualReceived, decimals); // Adjust filled amount
             }
         }
     }
+    if (updateCount > 0) {
+        assembly { mstore(updates, updateCount) }
+        updates[updateCount] = IMFPListing.UpdateType(0, 2, currentPrice, address(0), address(0), 0, 0);
+        updateCount++;
+        assembly { mstore(updates, updateCount) }
+        listing.update(listingId, updates);
+    }
+}
 
     function xDeposit(address listingAddress, uint256 amount) external payable nonReentrant {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");

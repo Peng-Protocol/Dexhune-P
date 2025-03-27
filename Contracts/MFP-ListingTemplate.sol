@@ -63,21 +63,26 @@ contract MFPListingTemplate {
     event OrderUpdated(uint256 listingId, uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 listingId, uint256 xBalance, uint256 yBalance);
 
+      // Reverted to setRouter, no caller restriction for initial setup
+
     function setRouter(address _routerAddress) external {
         require(routerAddress == address(0), "Router already set");
+        require(_routerAddress != address(0), "Invalid router address");
         routerAddress = _routerAddress;
     }
 
+    // No router restriction, one-time set during deployment
     function setLiquidityAddress(uint256 listingId, address _liquidityAddress) external {
-        require(msg.sender == routerAddress, "Router only");
         require(liquidityAddresses[listingId] == address(0), "Liquidity already set");
+        require(_liquidityAddress != address(0), "Invalid liquidity address");
         liquidityAddresses[listingId] = _liquidityAddress;
     }
 
+    // No router restriction, one-time set during deployment
     function setTokens(address _tokenA, address _tokenB) external {
-        require(msg.sender == routerAddress, "Router only");
         require(tokenA == address(0) && tokenB == address(0), "Tokens already set");
         require(_tokenA != _tokenB, "Tokens must be different");
+        require(_tokenA != address(0) || _tokenB != address(0), "Both tokens cannot be zero"); // Optional safety
         tokenA = _tokenA;
         tokenB = _tokenB;
     }
