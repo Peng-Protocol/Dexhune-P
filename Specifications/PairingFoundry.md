@@ -47,7 +47,7 @@ Status: (uint256),
 
 `Recipient Address` is where the settlement is sent, this is necessary for Multihop. 
 
-`Filled` stores how much of the destination token the maker has received, is updated after every settlement - partial or whole. 
+`Filled` stores how much of the destination token the maker has received, is updated after every settlement - partial or whole. Router checks the recipient address before and after settlement to note actual filled amount in case of tax on transfer. 
 
 `Status` is `Pending`, `Filled`, or `Cancelled` (1, 2, 3), Cancelled orders can No longer be settled. 
 
@@ -295,7 +295,7 @@ xLiquidity - pre output = impact-x
 
 `order amount * impact price = settlement-x`
 
-Settlement cannot use >50% of the available liquidity,
+
 Only settles orders whose max/min prices are met,
 Updates Price on listing contract again,
 Note that all numbers in all formulas need to use some form of safe math to account for decimals
