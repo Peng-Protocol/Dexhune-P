@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.8
+// Version: 0.0.9
 
 import "./MFP-ListingTemplate.sol";
 import "./MFP-LiquidityTemplate.sol";
@@ -11,13 +11,12 @@ contract MFPAgent is Ownable {
     address public routerAddress;
     uint256 public listingCount;
 
-    mapping(address => mapping(address => address)) public getListing; // tokenA -> tokenB -> listingAddress
+    mapping(address => mapping(address => address)) public getListing;
     address[] public allListings;
-    address[] public allListedTokens; // New: Stores unique token addresses
+    address[] public allListedTokens;
 
     event ListingCreated(address indexed tokenA, address indexed tokenB, address listingAddress, address liquidityAddress, uint256 listingId);
 
-    // Helper function to check if a token already exists in allListedTokens
     function tokenExists(address token) internal view returns (bool) {
         for (uint256 i = 0; i < allListedTokens.length; i++) {
             if (allListedTokens[i] == token) {
@@ -32,7 +31,6 @@ contract MFPAgent is Ownable {
         routerAddress = _routerAddress;
     }
 
-    // Internal function to initialize the deployed pair
     function _initializePair(
         address listingAddress,
         address liquidityAddress,
@@ -41,10 +39,12 @@ contract MFPAgent is Ownable {
         uint256 listingId
     ) internal {
         MFPListingTemplate(listingAddress).setRouter(routerAddress);
-        MFPListingTemplate(listingAddress).setLiquidityAddress(listingId, liquidityAddress);
+        MFPListingTemplate(listingAddress).setListingId(listingId);
+        MFPListingTemplate(listingAddress).setLiquidityAddress(liquidityAddress);
         MFPListingTemplate(listingAddress).setTokens(tokenA, tokenB);
 
         MFPLiquidityTemplate(liquidityAddress).setRouter(routerAddress);
+        MFPLiquidityTemplate(liquidityAddress).setListingId(listingId);
         MFPLiquidityTemplate(liquidityAddress).setListingAddress(listingAddress);
         MFPLiquidityTemplate(liquidityAddress).setTokens(tokenA, tokenB);
     }
@@ -65,7 +65,6 @@ contract MFPAgent is Ownable {
         getListing[tokenA][tokenB] = listingAddress;
         allListings.push(listingAddress);
 
-        // Add unique tokens to allListedTokens
         if (!tokenExists(tokenA)) {
             allListedTokens.push(tokenA);
         }

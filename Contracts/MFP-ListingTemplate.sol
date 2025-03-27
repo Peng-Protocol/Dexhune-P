@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.5
+// Version: 0.0.10
 
 import "./imports/SafeERC20.sol";
 
@@ -11,15 +11,16 @@ contract MFPListingTemplate {
     address public routerAddress;
     address public tokenA;
     address public tokenB;
+    uint256 public listingId;
 
-    struct UpdateType { // Added locally, identical to MFPRouter.sol
-        uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order
-        uint256 index;    // orderId or slot index
-        uint256 value;    // principal or amount (normalized)
+    struct UpdateType {
+        uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
+        uint256 index;    // orderId or slot index (0 = xBalance, 1 = yBalance, 2 = xVolume, 3 = yVolume for type 0)
+        uint256 value;    // principal or amount (normalized) or price (for historical)
         address addr;     // makerAddress
         address recipient;// recipientAddress
-        uint256 maxPrice; // for buy orders
-        uint256 minPrice; // for sell orders
+        uint256 maxPrice; // for buy orders or packed xBalance/yBalance (historical)
+        uint256 minPrice; // for sell orders or packed xVolume/yVolume (historical)
     }
 
     struct VolumeBalance {
@@ -28,6 +29,7 @@ contract MFPListingTemplate {
         uint256 xVolume;
         uint256 yVolume;
     }
+
     struct BuyOrder {
         address makerAddress;
         address recipientAddress;
@@ -39,6 +41,7 @@ contract MFPListingTemplate {
         uint256 blockNumber;
         uint8 status; // 0 = cancelled, 1 = pending, 2 = partially filled, 3 = filled
     }
+
     struct SellOrder {
         address makerAddress;
         address recipientAddress;
@@ -51,6 +54,14 @@ contract MFPListingTemplate {
         uint8 status;
     }
 
+    struct HistoricalData {
+        uint256 price;
+        uint256 xBalance;
+        uint256 yBalance;
+        uint256 xVolume;
+        uint256 yVolume;
+    }
+
     mapping(uint256 => VolumeBalance) public volumeBalances;
     mapping(uint256 => address) public liquidityAddresses;
     mapping(uint256 => uint256) public prices;
@@ -59,46 +70,48 @@ contract MFPListingTemplate {
     mapping(uint256 => uint256[]) public pendingBuyOrders;
     mapping(uint256 => uint256[]) public pendingSellOrders;
     mapping(address => uint256[]) public makerPendingOrders;
+    mapping(uint256 => HistoricalData[]) public historicalData;
 
     event OrderUpdated(uint256 listingId, uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 listingId, uint256 xBalance, uint256 yBalance);
 
-      // Reverted to setRouter, no caller restriction for initial setup
-
+    // One-time setup functions
     function setRouter(address _routerAddress) external {
         require(routerAddress == address(0), "Router already set");
         require(_routerAddress != address(0), "Invalid router address");
         routerAddress = _routerAddress;
     }
 
-    // No router restriction, one-time set during deployment
-    function setLiquidityAddress(uint256 listingId, address _liquidityAddress) external {
+    function setListingId(uint256 _listingId) external {
+        require(listingId == 0, "Listing ID already set");
+        listingId = _listingId;
+    }
+
+    function setLiquidityAddress(address _liquidityAddress) external {
         require(liquidityAddresses[listingId] == address(0), "Liquidity already set");
         require(_liquidityAddress != address(0), "Invalid liquidity address");
         liquidityAddresses[listingId] = _liquidityAddress;
     }
 
-    // No router restriction, one-time set during deployment
     function setTokens(address _tokenA, address _tokenB) external {
         require(tokenA == address(0) && tokenB == address(0), "Tokens already set");
         require(_tokenA != _tokenB, "Tokens must be different");
-        require(_tokenA != address(0) || _tokenB != address(0), "Both tokens cannot be zero"); // Optional safety
+        require(_tokenA != address(0) || _tokenB != address(0), "Both tokens cannot be zero");
         tokenA = _tokenA;
         tokenB = _tokenB;
     }
 
-    function update(uint256 listingId, UpdateType[] memory updates) external { // Updated signature
-        require(msg.sender == routerAddress, "Router only");
+    function update(address caller, UpdateType[] memory updates) external {
+        require(caller == routerAddress, "Router only");
         VolumeBalance storage balances = volumeBalances[listingId];
 
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 0) { // Balance update
-                if (u.index == 0) {
-                    balances.xBalance = u.value;
-                } else if (u.index == 1) {
-                    balances.yBalance = u.value;
-                }
+                if (u.index == 0) balances.xBalance = u.value;       // Set xBalance
+                else if (u.index == 1) balances.yBalance = u.value;  // Set yBalance
+                else if (u.index == 2) balances.xVolume += u.value;  // Increase xVolume (unused currently)
+                else if (u.index == 3) balances.yVolume += u.value;  // Increase yVolume (unused currently)
             } else if (u.updateType == 1) { // Buy order update
                 BuyOrder storage order = buyOrders[u.index];
                 if (order.makerAddress == address(0)) { // New order
@@ -112,6 +125,8 @@ contract MFPListingTemplate {
                     order.status = 1;
                     pendingBuyOrders[listingId].push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
+                    balances.yBalance += u.value; // Deposit increases yBalance
+                    balances.yVolume += u.value;  // Track order volume
                     emit OrderUpdated(listingId, u.index, true, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
@@ -122,7 +137,7 @@ contract MFPListingTemplate {
                     require(order.pending >= u.value, "Insufficient pending");
                     order.pending -= u.value;
                     order.filled += u.value;
-                    balances.xBalance -= u.value;
+                    balances.xBalance -= u.value; // Reduce xBalance on fill
                     order.status = order.pending == 0 ? 3 : 2;
                     if (order.pending == 0) {
                         removePendingOrder(pendingBuyOrders[listingId], u.index);
@@ -143,6 +158,8 @@ contract MFPListingTemplate {
                     order.status = 1;
                     pendingSellOrders[listingId].push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
+                    balances.xBalance += u.value; // Deposit increases xBalance
+                    balances.xVolume += u.value;  // Track order volume
                     emit OrderUpdated(listingId, u.index, false, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
@@ -153,7 +170,7 @@ contract MFPListingTemplate {
                     require(order.pending >= u.value, "Insufficient pending");
                     order.pending -= u.value;
                     order.filled += u.value;
-                    balances.yBalance -= u.value;
+                    balances.yBalance -= u.value; // Reduce yBalance on fill
                     order.status = order.pending == 0 ? 3 : 2;
                     if (order.pending == 0) {
                         removePendingOrder(pendingSellOrders[listingId], u.index);
@@ -161,6 +178,12 @@ contract MFPListingTemplate {
                     }
                     emit OrderUpdated(listingId, u.index, false, order.status);
                 }
+            } else if (u.updateType == 3) { // Historical data
+                historicalData[listingId].push(HistoricalData(
+                    u.value, // price
+                    u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1), // xBalance, yBalance
+                    u.minPrice >> 128, u.minPrice & ((1 << 128) - 1)  // xVolume, yVolume
+                ));
             }
         }
 
@@ -170,8 +193,8 @@ contract MFPListingTemplate {
         emit BalancesUpdated(listingId, balances.xBalance, balances.yBalance);
     }
 
-    function transact(uint256 listingId, address token, uint256 amount, address recipient) external {
-        require(msg.sender == routerAddress, "Router only");
+    function transact(address caller, address token, uint256 amount, address recipient) external {
+        require(caller == routerAddress, "Router only");
         VolumeBalance storage balances = volumeBalances[listingId];
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
@@ -225,5 +248,36 @@ contract MFPListingTemplate {
                 break;
             }
         }
+    }
+
+    // View functions
+    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
+        VolumeBalance memory bal = volumeBalances[listingId];
+        return (bal.xBalance, bal.yBalance, bal.xVolume, bal.yVolume);
+    }
+
+    function price() external view returns (uint256) {
+        return prices[listingId];
+    }
+
+    function pendingBuyOrders() external view returns (uint256[] memory) {
+        return pendingBuyOrders[listingId];
+    }
+
+    function pendingSellOrders() external view returns (uint256[] memory) {
+        return pendingSellOrders[listingId];
+    }
+
+    function makerPendingOrders(address maker) external view returns (uint256[] memory) {
+        return makerPendingOrders[maker];
+    }
+
+    function getHistoricalData(uint256 index) external view returns (HistoricalData memory) {
+        require(index < historicalData[listingId].length, "Invalid index");
+        return historicalData[listingId][index];
+    }
+
+    function historicalDataLength() external view returns (uint256) {
+        return historicalData[listingId].length;
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.1
+// Version: 0.0.2
 
 import "./imports/Ownable.sol";
 import "./imports/ReentrancyGuard.sol";
@@ -94,7 +94,7 @@ contract Multihopper is Ownable, ReentrancyGuard {
     }
 
     function denormalizeForToken(uint256 amount, address token) internal view returns (uint256) {
-        uint8 decimals = this.getTokenDecimals(token);
+        uint8 decimals = getTokenDecimals(token);
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount / 10**(18 - decimals);
         else return amount * 10**(decimals - 18);
@@ -190,7 +190,7 @@ contract Multihopper is Ownable, ReentrancyGuard {
         uint256 actionCount = 0;
 
         // Compute route
-        (uint256[] memory indices, bool[] memory isBuy) = this.computeRoute(
+        (uint256[] memory indices, bool[] memory isBuy) = computeRoute(
             request.listingAddresses, request.startToken, request.endToken
         );
         actionCount += 2 * request.numListings; // Token queries
@@ -208,13 +208,13 @@ contract Multihopper is Ownable, ReentrancyGuard {
             recipient = (i == indices.length - 1) ? msg.sender : address(this);
 
             // Calculate price limits
-            uint256 priceLimit = this.calculateImpactPrice(listing, listingId, request.impactPricePercents[idx], buy);
+            uint256 priceLimit = calculateImpactPrice(listing, listingId, request.impactPricePercents[idx], buy);
             actionCount += 2; // Price query and calc
 
             // Create order
             if (buy) {
                 IMFPRouter.BuyOrderDetails memory details = IMFPRouter.BuyOrderDetails(
-                    recipient, this.denormalizeForToken(principal, currentToken), priceLimit, 0
+                    recipient, denormalizeForToken(principal, currentToken), priceLimit, 0
                 );
                 if (currentToken == address(0)) {
                     router.createBuyOrder{value: principal}(listing, details);
@@ -225,7 +225,7 @@ contract Multihopper is Ownable, ReentrancyGuard {
                 }
             } else {
                 IMFPRouter.SellOrderDetails memory details = IMFPRouter.SellOrderDetails(
-                    recipient, this.denormalizeForToken(principal, currentToken), 0, priceLimit
+                    recipient, denormalizeForToken(principal, currentToken), 0, priceLimit
                 );
                 if (currentToken == address(0)) {
                     router.createSellOrder{value: principal}(listing, details);
@@ -243,11 +243,11 @@ contract Multihopper is Ownable, ReentrancyGuard {
             actionCount += 1; // Query
 
             // Attempt settlement
-            bool success = this.safeSettle(listing, orderId, buy, request.settleType);
+            bool success = safeSettle(listing, orderId, buy, request.settleType);
             actionCount += 1; // Settlement
 
             // Check status
-            (uint256 pending, uint256 filled, uint8 status) = this.checkOrderStatus(listing, orderId, buy);
+            (uint256 pending, uint256 filled, uint8 status) = checkOrderStatus(listing, orderId, buy);
             actionCount += 1; // Query
 
             if (pending > 0 || !success) {
@@ -290,86 +290,86 @@ contract Multihopper is Ownable, ReentrancyGuard {
     }
 
     function continueHop() external nonReentrant {
-        uint256[] storage userHops = hopsByAddress[msg.sender];
-        uint256 processed = 0;
-        uint256 actionCount = 0;
+    uint256[] storage userHops = hopsByAddress[msg.sender];
+    uint256 processed = 0;
+    uint256 actionCount = 0;
 
-        for (uint256 i = 0; i < userHops.length && processed < 20 && actionCount < 100; i++) {
-            StalledHop storage hop = hopID[userHops[i]];
-            if (hop.hopStatus != 1) continue;
+    for (uint256 i = 0; i < userHops.length && processed < 20 && actionCount < 100; i++) {
+        StalledHop storage hop = hopID[userHops[i]];
+        if (hop.hopStatus != 1) continue;
 
-            (uint256 pending, uint256 filled, uint8 status) = this.checkOrderStatus(
-                hop.currentListing, hop.orderID, hop.maxPrice > 0
-            );
-            actionCount += 1;
+        (uint256 pending, uint256 filled, uint8 status) = checkOrderStatus(
+            hop.currentListing, hop.orderID, hop.maxPrice > 0
+        );
+        actionCount += 1;
 
-            if (pending > 0 || status != 2) continue;
+        if (pending > 0 || status != 2) continue;
 
-            processed++;
-            uint256 nextStage = hop.stage + 1;
-            if (nextStage >= hop.remainingListings.length + hop.stage + 1) {
-                hop.hopStatus = 2;
-                totalHops.push(userHops[i]);
-                emit HopContinued(userHops[i], nextStage);
-                continue;
-            }
-
-            address nextListing = hop.remainingListings[0];
-            bool isBuy = hop.endToken == IMFPListing(nextListing).tokenA();
-            uint256 priceLimit = this.calculateImpactPrice(nextListing, 0, 500, isBuy); // Placeholder impact
-            actionCount += 2;
-
-            IMFPRouter router = IMFPRouter(routerAddress);
-            if (isBuy) {
-                IMFPRouter.BuyOrderDetails memory details = IMFPRouter.BuyOrderDetails(
-                    msg.sender, this.denormalizeForToken(filled, hop.startToken), priceLimit, 0
-                );
-                router.createBuyOrder(nextListing, details);
-            } else {
-                IMFPRouter.SellOrderDetails memory details = IMFPRouter.SellOrderDetails(
-                    msg.sender, this.denormalizeForToken(filled, hop.startToken), 0, priceLimit
-                );
-                router.createSellOrder(nextListing, details);
-            }
-            actionCount += 1;
-
-            uint256[] memory pendingOrders = IMFPListing(nextListing).makerPendingOrders(msg.sender);
-            uint256 orderId = pendingOrders[pendingOrders.length - 1];
-            actionCount += 1;
-
-            bool success = this.safeSettle(nextListing, orderId, isBuy, hop.settleType);
-            actionCount += 1;
-
-            (pending, filled, status) = this.checkOrderStatus(nextListing, orderId, isBuy);
-            actionCount += 1;
-
-            if (pending > 0 || !success) {
-                hop.currentListing = nextListing;
-                hop.orderID = orderId;
-                hop.stage = uint8(nextStage);
-                hop.principalAmount = filled;
-                address[] memory newRemaining = new address[](hop.remainingListings.length - 1);
-                for (uint256 j = 1; j < hop.remainingListings.length; j++) {
-                    newRemaining[j - 1] = hop.remainingListings[j];
-                }
-                hop.remainingListings = newRemaining;
-                emit HopContinued(userHops[i], nextStage);
-            } else {
-                hop.hopStatus = 2;
-                totalHops.push(userHops[i]);
-                emit HopContinued(userHops[i], nextStage);
-            }
+        processed++;
+        uint256 nextStage = hop.stage + 1;
+        if (nextStage >= hop.remainingListings.length + hop.stage + 1) {
+            hop.hopStatus = 2;
+            totalHops.push(userHops[i]);
+            emit HopContinued(userHops[i], uint8(nextStage)); // Fix 1: Cast to uint8
+            continue;
         }
 
-        // Prune completed hops
-        for (uint256 i = userHops.length; i > 0 && actionCount < 100; i--) {
-            if (hopID[userHops[i - 1]].hopStatus == 2) {
-                userHops[i - 1] = userHops[userHops.length - 1];
-                userHops.pop();
-                actionCount += 1;
+        address nextListing = hop.remainingListings[0];
+        bool isBuy = hop.endToken == IMFPListing(nextListing).tokenA();
+        uint256 priceLimit = calculateImpactPrice(nextListing, 0, 500, isBuy); // Placeholder impact
+        actionCount += 2;
+
+        IMFPRouter router = IMFPRouter(routerAddress);
+        if (isBuy) {
+            IMFPRouter.BuyOrderDetails memory details = IMFPRouter.BuyOrderDetails(
+                msg.sender, denormalizeForToken(filled, hop.startToken), priceLimit, 0
+            );
+            router.createBuyOrder(nextListing, details);
+        } else {
+            IMFPRouter.SellOrderDetails memory details = IMFPRouter.SellOrderDetails(
+                msg.sender, denormalizeForToken(filled, hop.startToken), 0, priceLimit
+            );
+            router.createSellOrder(nextListing, details);
+        }
+        actionCount += 1;
+
+        uint256[] memory pendingOrders = IMFPListing(nextListing).makerPendingOrders(msg.sender);
+        uint256 orderId = pendingOrders[pendingOrders.length - 1];
+        actionCount += 1;
+
+        bool success = safeSettle(nextListing, orderId, isBuy, hop.settleType);
+        actionCount += 1;
+
+        (pending, filled, status) = checkOrderStatus(nextListing, orderId, isBuy);
+        actionCount += 1;
+
+        if (pending > 0 || !success) {
+            hop.currentListing = nextListing;
+            hop.orderID = orderId;
+            hop.stage = uint8(nextStage);
+            hop.principalAmount = filled;
+            address[] memory newRemaining = new address[](hop.remainingListings.length - 1);
+            for (uint256 j = 1; j < hop.remainingListings.length; j++) {
+                newRemaining[j - 1] = hop.remainingListings[j];
             }
+            hop.remainingListings = newRemaining;
+            emit HopContinued(userHops[i], uint8(nextStage)); // Fix 2: Cast to uint8
+        } else {
+            hop.hopStatus = 2;
+            totalHops.push(userHops[i]);
+            emit HopContinued(userHops[i], uint8(nextStage)); // Fix 3: Cast to uint8
         }
     }
+
+    // Prune completed hops
+    for (uint256 i = userHops.length; i > 0 && actionCount < 100; i--) {
+        if (hopID[userHops[i - 1]].hopStatus == 2) {
+            userHops[i - 1] = userHops[userHops.length - 1];
+            userHops.pop();
+            actionCount += 1;
+        }
+    }
+}
 
     function cancelHop(uint256 hopId) external nonReentrant {
         StalledHop storage hop = hopID[hopId];
@@ -382,15 +382,15 @@ contract Multihopper is Ownable, ReentrancyGuard {
 
         router.clearSingleOrder(hop.currentListing, hop.orderID, isBuy);
 
-        (uint256 pending, uint256 filled, ) = this.checkOrderStatus(hop.currentListing, hop.orderID, isBuy);
+        (uint256 pending, uint256 filled, ) = checkOrderStatus(hop.currentListing, hop.orderID, isBuy);
         if (filled > 0) {
             address targetToken = isBuy ? listing.tokenA() : listing.tokenB();
-            uint256 rawFilled = this.denormalizeForToken(filled, targetToken);
+            uint256 rawFilled = denormalizeForToken(filled, targetToken);
             listing.transact(0, targetToken, rawFilled, msg.sender);
         }
         if (hop.stage < hop.remainingListings.length + hop.stage) {
             address principalToken = isBuy ? listing.tokenB() : listing.tokenA();
-            uint256 rawPending = this.denormalizeForToken(pending, principalToken);
+            uint256 rawPending = denormalizeForToken(pending, principalToken);
             if (rawPending > 0) {
                 listing.transact(0, principalToken, rawPending, msg.sender);
             }
