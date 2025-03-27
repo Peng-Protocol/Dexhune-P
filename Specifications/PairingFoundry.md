@@ -217,6 +217,25 @@ Determines the router address.
  
 ## **MFP-Router**
 
+### *** Libraries 
+The MFP Router uses "library contracts" and inherits logic from said libraries which it uses to execute functions. 
+
+- **MFP-ProxyRouter**
+
+Manages states and inherits logic from libraries, allows user facing functions. 
+
+- **MFP-OrderLibrary**
+
+Stores the logic for order related functions. 
+
+- **MFP-SettlementLibrary** 
+
+Stores the logic for settlement related functions. 
+
+- **MFP-LiquidLibrary**
+
+Stores the logic for liquidity related functions. 
+
 ### **Data**
 
 - listingAgent
