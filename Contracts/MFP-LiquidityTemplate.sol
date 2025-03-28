@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.11 
+// Version: 0.0.13
 
 import "./imports/SafeERC20.sol";
+import "./MFPLiquidLibrary.sol"; // Import to use PreparedWithdrawal
 
 interface IMFPListing {
     function volumeBalances(uint256 listingId) external view returns (
@@ -12,6 +13,7 @@ interface IMFPListing {
         uint256 xVolume,
         uint256 yVolume
     );
+    function prices(uint256 listingId) external view returns (uint256);
 }
 
 contract MFPLiquidityTemplate {
@@ -201,28 +203,86 @@ contract MFPLiquidityTemplate {
         this.update(caller, updates);
     }
 
-    function xWithdraw(uint256 amount, uint256 index) external {
+    function xPrepOut(address caller, uint256 amount, uint256 index) external returns (MFPLiquidLibrary.PreparedWithdrawal memory) {
+        require(caller == routerAddress, "Router only");
+        LiquidityDetails storage details = liquidityDetails[listingId];
         Slot storage slot = xLiquiditySlots[listingId][index];
-        require(slot.depositor == msg.sender, "Not depositor");
-        uint256 withdrawAmount = slot.allocation < amount ? slot.allocation : amount;
+        require(slot.allocation >= amount, "Amount exceeds allocation");
 
-        UpdateType[] memory updates = new UpdateType[](1);
-        updates[0] = UpdateType(2, index, slot.allocation - withdrawAmount, msg.sender, address(0));
-        this.update(routerAddress, updates);
+        uint256 withdrawAmountA = amount > details.xLiquid ? details.xLiquid : amount;
+        uint256 deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0;
+        uint256 withdrawAmountB = 0;
 
-        this.transact(routerAddress, tokenA, withdrawAmount, msg.sender);
+        if (deficit > 0) {
+            uint256 currentPrice = IMFPListing(listingAddress).prices(0);
+            require(currentPrice > 0, "Price cannot be zero");
+            uint256 compensation = (deficit * 1e18) / currentPrice; // Normalize to 18 decimals for division
+            withdrawAmountB = compensation > details.yLiquid ? details.yLiquid : compensation;
+        }
+
+        return MFPLiquidLibrary.PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
     }
 
-    function yWithdraw(uint256 amount, uint256 index) external {
+    function yPrepOut(address caller, uint256 amount, uint256 index) external returns (MFPLiquidLibrary.PreparedWithdrawal memory) {
+        require(caller == routerAddress, "Router only");
+        LiquidityDetails storage details = liquidityDetails[listingId];
         Slot storage slot = yLiquiditySlots[listingId][index];
-        require(slot.depositor == msg.sender, "Not depositor");
-        uint256 withdrawAmount = slot.allocation < amount ? slot.allocation : amount;
+        require(slot.allocation >= amount, "Amount exceeds allocation");
 
+        uint256 withdrawAmountB = amount > details.yLiquid ? details.yLiquid : amount;
+        uint256 deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0;
+        uint256 withdrawAmountA = 0;
+
+        if (deficit > 0) {
+            uint256 currentPrice = IMFPListing(listingAddress).prices(0);
+            require(currentPrice > 0, "Price cannot be zero");
+            uint256 compensation = (deficit * currentPrice) / 1e18; // Normalize to 18 decimals for multiplication
+            withdrawAmountA = compensation > details.xLiquid ? details.xLiquid : compensation;
+        }
+
+        return MFPLiquidLibrary.PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
+    }
+
+    function xExecuteOut(address caller, uint256 index, MFPLiquidLibrary.PreparedWithdrawal memory withdrawal) external {
+        require(caller == routerAddress, "Router only");
+        Slot storage slot = xLiquiditySlots[listingId][index];
+        LiquidityDetails storage details = liquidityDetails[listingId];
+
+        // Update slot allocation and liquidity
         UpdateType[] memory updates = new UpdateType[](1);
-        updates[0] = UpdateType(3, index, slot.allocation - withdrawAmount, msg.sender, address(0));
-        this.update(routerAddress, updates);
+        updates[0] = UpdateType(2, index, slot.allocation - withdrawal.amountA, slot.depositor, address(0));
+        this.update(caller, updates);
 
-        this.transact(routerAddress, tokenB, withdrawAmount, msg.sender);
+        // Transfer tokenA (main) and tokenB (compensation)
+        if (withdrawal.amountA > 0) {
+            uint8 decimalsA = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
+            this.transact(caller, tokenA, denormalize(withdrawal.amountA, decimalsA), slot.depositor);
+        }
+        if (withdrawal.amountB > 0) {
+            uint8 decimalsB = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
+            this.transact(caller, tokenB, denormalize(withdrawal.amountB, decimalsB), slot.depositor);
+        }
+    }
+
+    function yExecuteOut(address caller, uint256 index, MFPLiquidLibrary.PreparedWithdrawal memory withdrawal) external {
+        require(caller == routerAddress, "Router only");
+        Slot storage slot = yLiquiditySlots[listingId][index];
+        LiquidityDetails storage details = liquidityDetails[listingId];
+
+        // Update slot allocation and liquidity
+        UpdateType[] memory updates = new UpdateType[](1);
+        updates[0] = UpdateType(3, index, slot.allocation - withdrawal.amountB, slot.depositor, address(0));
+        this.update(caller, updates);
+
+        // Transfer tokenB (main) and tokenA (compensation)
+        if (withdrawal.amountB > 0) {
+            uint8 decimalsB = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
+            this.transact(caller, tokenB, denormalize(withdrawal.amountB, decimalsB), slot.depositor);
+        }
+        if (withdrawal.amountA > 0) {
+            uint8 decimalsA = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
+            this.transact(caller, tokenA, denormalize(withdrawal.amountA, decimalsA), slot.depositor);
+        }
     }
 
     function claimFees(address caller, uint256 liquidityIndex, bool isX, uint256 volume) external {
@@ -305,7 +365,7 @@ contract MFPLiquidityTemplate {
         return (feeShare, updates);
     }
 
-    // View functions (renamed to avoid overlap)
+    // View functions
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees) {
         LiquidityDetails memory details = liquidityDetails[listingId];
         return (details.xLiquid, details.yLiquid, details.xFees, details.yFees);
