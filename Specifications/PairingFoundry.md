@@ -184,12 +184,16 @@ An array that stores the liquidity index numbers for each address, is updated af
 ### **Functions**
 - xWithdraw
 
-Requires Listing Address
-Requires withdrawal amount
-Requires index
-Finds Liquidity Address on Listing Address
-Fetches `x-liquidity`, `x-ratio`, `xAllocation`, `price`
-Pays requested amount of xLiquid has enough token units, else fails. 
+Requires withdrawal amount,
+Requires index,
+Fetches `x-liquidity`, `x-ratio`, `xAllocation`, `price`,
+Pays requested amount of xLiquid,
+
+If the liquidity contract has insufficient Token-A units, the calculates a compensation as: 
+
+`deficit / price` 
+
+Compensation is paid in Token-B or simply pays whatever is available. 
 
 When a withdrawal leaves `0` allocation then the liquidity slot is erased and the liquidity index is updated,
 Forfeits unclaimed fees if slot is erased. 
@@ -199,6 +203,8 @@ Forfeits unclaimed fees if slot is erased.
 - yWithdraw
 
 Same as xWithdraw but deals with Y-Type liquidity slots and their details.
+
+Compensation is calculated as: `deficit * price`. 
 
 
 - update (Router only)
