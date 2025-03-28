@@ -4,17 +4,7 @@ pragma solidity ^0.8.1;
 // Version: 0.0.13
 
 import "./imports/SafeERC20.sol";
-import "./MFPLiquidLibrary.sol"; // Import to use PreparedWithdrawal
-
-interface IMFPListing {
-    function volumeBalances(uint256 listingId) external view returns (
-        uint256 xBalance,
-        uint256 yBalance,
-        uint256 xVolume,
-        uint256 yVolume
-    );
-    function prices(uint256 listingId) external view returns (uint256);
-}
+import "./MFP-LiquidLibrary.sol"; // Import to use PreparedWithdrawal
 
 contract MFPLiquidityTemplate {
     using SafeERC20 for IERC20;
