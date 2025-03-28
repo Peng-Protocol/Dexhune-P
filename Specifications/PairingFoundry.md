@@ -402,6 +402,17 @@ Determines the `Listing Agent` contract.
 ## **MFP-Agent**
 The listing agent, creates new Listing and Liquidity contracts, stores `validation` details for the router to retrieve or update.  
 
+### *** Libraries 
+The MFP Agent uses "library contracts" and inherits logic from said libraries which it uses to deploy templates. 
+
+- **MFP-ListingLibrary**
+
+Stores the Listing Template, allows deployment using provided encoded "salt". 
+
+- **MFP-LiquidityLibrary**
+
+Stores the Liquidity Template, allows deployment using provided encoded "salt". 
+
 ### **Data**
 
 - **Listing Validation**
@@ -410,8 +421,6 @@ A struct for listing validation entries,
 Same mapping
 Listing Address ;  (address),
 Listed Token(s) ;  (address, address), 
-Balances ; (xBalance, yBalance),
-Liquids : (xLiquid, yLiquid), 
 Index : (uint256), 
 
 Each listing validation mapping is queryable by listing address or index. 
@@ -424,11 +433,11 @@ An array that stores each listing validation entry by index number and token add
 
 Stores the total number of listings made. Is increased whenever a new listing is made. 
 
+- tokenAddresses 
+
+Stores listed token addresses against an index, is an array. 
+
 ### **Functions**
-- writeValidationSlot (Router Only)
-
-Writes data into a validation slot, either creates a new slot or updates an existing one. 
-
 - setRouter (ownerOnly) 
 
 Determines the router address, the router can update various mappings and possible arrays. 
