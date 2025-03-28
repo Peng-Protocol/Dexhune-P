@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.10
+// Version: 0.0.11 
 
 import "./imports/SafeERC20.sol";
 
@@ -305,29 +305,29 @@ contract MFPLiquidityTemplate {
         return (feeShare, updates);
     }
 
-    // View functions
-    function liquidityDetails() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees) {
+    // View functions (renamed to avoid overlap)
+    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees) {
         LiquidityDetails memory details = liquidityDetails[listingId];
         return (details.xLiquid, details.yLiquid, details.xFees, details.yFees);
     }
 
-    function activeXLiquiditySlots() external view returns (uint256[] memory) {
+    function activeXLiquiditySlotsView() external view returns (uint256[] memory) {
         return activeXLiquiditySlots[listingId];
     }
 
-    function activeYLiquiditySlots() external view returns (uint256[] memory) {
+    function activeYLiquiditySlotsView() external view returns (uint256[] memory) {
         return activeYLiquiditySlots[listingId];
     }
 
-    function userIndex(address user) external view returns (uint256[] memory) {
+    function userIndexView(address user) external view returns (uint256[] memory) {
         return userIndex[user];
     }
 
-    function getXSlot(uint256 index) external view returns (Slot memory) {
+    function getXSlotView(uint256 index) external view returns (Slot memory) {
         return xLiquiditySlots[listingId][index];
     }
 
-    function getYSlot(uint256 index) external view returns (Slot memory) {
+    function getYSlotView(uint256 index) external view returns (Slot memory) {
         return yLiquiditySlots[listingId][index];
     }
 }

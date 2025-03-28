@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.10
+// Version: 0.0.11
 
 import "./imports/SafeERC20.sol";
 
@@ -250,34 +250,34 @@ contract MFPListingTemplate {
         }
     }
 
-    // View functions
-    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
+    // View functions (renamed to avoid overlap)
+    function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
         VolumeBalance memory bal = volumeBalances[listingId];
         return (bal.xBalance, bal.yBalance, bal.xVolume, bal.yVolume);
     }
 
-    function price() external view returns (uint256) {
+    function listingPriceView() external view returns (uint256) {
         return prices[listingId];
     }
 
-    function pendingBuyOrders() external view returns (uint256[] memory) {
+    function pendingBuyOrdersView() external view returns (uint256[] memory) {
         return pendingBuyOrders[listingId];
     }
 
-    function pendingSellOrders() external view returns (uint256[] memory) {
+    function pendingSellOrdersView() external view returns (uint256[] memory) {
         return pendingSellOrders[listingId];
     }
 
-    function makerPendingOrders(address maker) external view returns (uint256[] memory) {
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory) {
         return makerPendingOrders[maker];
     }
 
-    function getHistoricalData(uint256 index) external view returns (HistoricalData memory) {
+    function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory) {
         require(index < historicalData[listingId].length, "Invalid index");
         return historicalData[listingId][index];
     }
 
-    function historicalDataLength() external view returns (uint256) {
+    function historicalDataLengthView() external view returns (uint256) {
         return historicalData[listingId].length;
     }
 }
