@@ -182,31 +182,6 @@ A mapping that stores the index numbers of all liquidity slots, indexes are quer
 An array that stores the liquidity index numbers for each address, is updated after every user deposit or withdrawal. Is queryable. 
 
 ### **Functions**
-- xWithdraw
-
-Requires withdrawal amount,
-Requires index,
-Fetches `x-liquidity`, `x-ratio`, `xAllocation`, `price`,
-Pays requested amount of xLiquid,
-
-If the liquidity contract has insufficient Token-A units, the calculates a compensation as: 
-
-`deficit / price` 
-
-Compensation is paid in Token-B or simply pays whatever is available. 
-
-When a withdrawal leaves `0` allocation then the liquidity slot is erased and the liquidity index is updated,
-Forfeits unclaimed fees if slot is erased. 
-
-
-
-- yWithdraw
-
-Same as xWithdraw but deals with Y-Type liquidity slots and their details.
-
-Compensation is calculated as: `deficit * price`. 
-
-
 - update (Router only)
 
 Changes the details of up to (100) arrays or mappings, either creating - updating or clearing entries for liquidity slots, historical data etc,  
@@ -364,7 +339,29 @@ Calculates and stores Ratio as;
 
 Fetches yVolume from Listing Address. 
 
+- xWithdraw
 
+Requires withdrawal amount,
+Requires index,
+Fetches `x-liquidity`, `x-ratio`, `xAllocation`, `price`,
+Pays requested amount of xLiquid,
+
+If the liquidity contract has insufficient Token-A units, the calculates a compensation as: 
+
+`deficit / price` 
+
+Compensation is paid in Token-B or simply pays whatever is available. 
+
+When a withdrawal leaves `0` allocation then the liquidity slot is erased and the liquidity index is updated,
+Forfeits unclaimed fees if slot is erased. 
+
+
+
+- yWithdraw
+
+Same as xWithdraw but deals with Y-Type liquidity slots and their details.
+
+Compensation is calculated as: `deficit * price`. 
 
 - claimFees 
 
@@ -472,7 +469,10 @@ E4 : If an order with 200 `TOKEN-0` was settled for (100) `TOKEN-1` using `settl
 
 E5 : If an order with 200 `TOKEN-0` was stored in xBalance, and was then settled using settleLiquid, this deducts the stored amount from xBalance and adds it to xLiquid, while deducting the respective `TOKEN-1` amount from yLiquid to settle the associated orders. Vice versa for `TOKEN-1` with yBalance and yLiquid. 
 
-E6 & E7 : We don't talk about E6 & 7 
+E6 : Someone sends (1000) units of Token-A to the listing contract, existing balances were (50) and (10), price is (5). Balances after the transfer are; (1050) and (10), price is (105), this affects future or pending orders. 
+
+E7 : A user places an order for (50) Token-A, but the token has tax on transfer active, the amount is taxed 10%, leaving (45), the contract correctly checks balances before and after transfering the stated order amount, therefore the recorded principal will be (45) and not (50).
+Likewise when settlement is triggered the contract checks how much was filled after each transfer for sells, settling (45) instead of (50), this is recorded in `filled` for each order. 
 
 E8 : If a user attempted to sell (1000) `TOKEN-1` at a price of `1` but liquidity fees are active, their actual order will be subtracted by 0.05% equalling; 999.5, the 0.5 `TOKEN-0` fee is sent to the Liquidity contract and recorded under `yFees`. 
 

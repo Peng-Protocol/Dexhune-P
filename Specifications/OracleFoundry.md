@@ -4,6 +4,8 @@ A version of `PairingFoundry` but for creating oracle priced listings.
 # **General**
 The only notable difference is listing data and oracle related functions. The associated contracts are called; `OMF-Listing`, `OMF-Liquidity`, `OMF-Router`, `OMF-Agent`. 
 
+---
+
 ## **OMF-Listing**
 
 ### **Data**
@@ -12,7 +14,7 @@ The only notable difference is listing data and oracle related functions. The as
 
 Contract Name : (string),
 Base Token : (address), 
-Token-B address : (address),
+Token-A address : (address),
 Price : (uint256),
 Oracle Address : (address), 
 Oracle Decimals : (uint256),
@@ -29,9 +31,12 @@ yVolume : (uint256),
 
 `Price Function` defines what read function or data entry to query at the oracle address, this either queries or fetches. 
 
-- price
-  
+---
+
+- price 
+
 Price is derived from the oracle. 
+
 
 ## **OMF-Agent**
 
@@ -53,12 +58,11 @@ Searches Listing validation for the exact token pair,
 Cannot list existing pair,
 Requires a Token-1,
 Token-1 cannot be `NATIVE`,
-Requires an oracle address, oracle decimals and oracle function,
+Requires an oracle address, oracle decimals and oracle view function,
 Fetches the supply of Token-1, 
 Attempts to bill the caller 1% of the token supply, 
 Sends billed amount to `taxCollector`, 
 Creates a new listing and liquidity contract,
-Verifies contracts,
 Writes listing contract details,
 Writes liquidity contract details,
 
@@ -66,7 +70,7 @@ Writes liquidity contract details,
 
 Determines the base token all listings will use. 
 
-- setTaxCollector 
+- setTaxCollector (ownerOnly)
 
 Determines the taxCollector address. 
 
