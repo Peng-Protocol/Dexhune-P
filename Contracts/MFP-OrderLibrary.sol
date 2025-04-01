@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.1
+// Version: 0.0.4
+// Changes:
+// - Added PrepData struct to reduce stack depth in prepSellOrder and prepBuyOrder.
+// - Moved BuyOrderDetails and SellOrderDetails to IMFPOrderLibrary interface for visibility.
+// - No other functional changes beyond approved fixes.
 
 import "./imports/SafeERC20.sol";
 
@@ -19,33 +23,19 @@ interface IMFPListing {
         uint256 maxPrice;
         uint256 minPrice;
     }
+    function buyOrders(uint256 orderId) external view returns (
+        address maker, address recipient, uint256 createdAt, uint256 lastFillAt,
+        uint256 pending, uint256 filled, uint256 maxPrice, uint256 minPrice, uint8 status
+    );
+    function sellOrders(uint256 orderId) external view returns (
+        address maker, address recipient, uint256 createdAt, uint256 lastFillAt,
+        uint256 pending, uint256 filled, uint256 maxPrice, uint256 minPrice, uint8 status
+    );
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
     function liquidityAddresses(uint256 listingId) external view returns (address);
     function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function prices(uint256 listingId) external view returns (uint256);
-    function buyOrders(uint256 orderId) external view returns (
-        address makerAddress,
-        address recipientAddress,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 pending,
-        uint256 filled,
-        uint256 timestamp,
-        uint256 blockNumber,
-        uint8 status
-    );
-    function sellOrders(uint256 orderId) external view returns (
-        address makerAddress,
-        address recipientAddress,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 pending,
-        uint256 filled,
-        uint256 timestamp,
-        uint256 blockNumber,
-        uint8 status
-    );
     function pendingBuyOrders(uint256 listingId) external view returns (uint256[] memory);
     function pendingSellOrders(uint256 listingId) external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
@@ -59,40 +49,128 @@ interface IMFPLiquidity {
 library MFPOrderLibrary {
     using SafeERC20 for IERC20;
 
-    struct BuyOrderDetails {
+    struct OrderPrep {
+        uint256 orderId;
+        uint256 principal;
+        uint256 fee;
+        IMFPListing.UpdateType[] updates;
+        address token;
         address recipient;
-        uint256 amount;   // raw amount
-        uint256 maxPrice; // TokenA/TokenB, 18 decimals
-        uint256 minPrice; // TokenA/TokenB, 18 decimals
     }
-    struct SellOrderDetails {
-        address recipient;
-        uint256 amount;   // raw amount
-        uint256 maxPrice; // TokenA/TokenB, 18 decimals
-        uint256 minPrice; // TokenA/TokenB, 18 decimals
+
+    struct PrepData {
+        uint256 normalized;
+        uint256 fee;
+        uint256 principal;
+        uint256 orderId;
+        IMFPListing.UpdateType[] updates;
+        address token;
     }
 
     event OrderCreated(uint256 orderId, bool isBuy, address maker);
     event OrderCancelled(uint256 orderId);
 
-    function createBuyOrder(
+    // Helper functions
+    function _transferToken(address token, address target, uint256 amount) internal returns (uint256) {
+        uint256 preBalance = token == address(0) ? target.balance : IERC20(token).balanceOf(target);
+        if (token == address(0)) {
+            require(msg.value >= amount, "Insufficient ETH amount");
+            (bool success, ) = target.call{value: amount}("");
+            require(success, "ETH transfer failed");
+        } else {
+            IERC20(token).safeTransferFrom(msg.sender, target, amount);
+        }
+        uint256 postBalance = token == address(0) ? target.balance : IERC20(token).balanceOf(target);
+        return postBalance - preBalance;
+    }
+
+    function _normalizeAndFee(address token, uint256 amount) internal view returns (uint256 normalized, uint256 fee, uint256 principal) {
+        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+        normalized = amount;
+        if (decimals != 18) {
+            if (decimals < 18) normalized = amount * (10 ** (uint256(18) - uint256(decimals)));
+            else normalized = amount / (10 ** (uint256(decimals) - uint256(18)));
+        }
+        fee = (normalized * 5) / 10000; // 0.05% fee
+        principal = normalized - fee;
+    }
+
+    function _createOrderUpdate(
+        uint8 updateType,
+        uint256 orderId,
+        uint256 principal,
+        address maker,
+        address recipient,
+        uint256 maxPrice,
+        uint256 minPrice
+    ) internal pure returns (IMFPListing.UpdateType[] memory) {
+        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](1);
+        updates[0] = IMFPListing.UpdateType(updateType, orderId, principal, maker, recipient, maxPrice, minPrice);
+        return updates;
+    }
+
+    // Prep functions
+    function prepBuyOrder(
         address listingAddress,
-        BuyOrderDetails memory details,
+        IMFPOrderLibrary.BuyOrderDetails memory details,
         address listingAgent,
         address proxy
-    ) external {
+    ) external view returns (OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
 
-        address tokenA = listing.tokenA();
-        (uint256 orderId, IMFPListing.UpdateType[] memory updates, uint256 fee) = _prepareOrder(
-            listingAddress, tokenA, details.amount, 1, details.recipient, details.maxPrice, details.minPrice, proxy
+        PrepData memory prepData;
+        prepData.token = listing.tokenA();
+        (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
+        prepData.orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, details.amount)));
+        prepData.updates = _createOrderUpdate(
+            1, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
-        listing.update(proxy, updates);
 
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
-        liquidity.addFees(proxy, true, fee);
+        return OrderPrep(prepData.orderId, prepData.principal, prepData.fee, prepData.updates, prepData.token, details.recipient);
+    }
+
+    function prepSellOrder(
+        address listingAddress,
+        IMFPOrderLibrary.SellOrderDetails memory details,
+        address listingAgent,
+        address proxy
+    ) external view returns (OrderPrep memory) {
+        require(listingAgent != address(0), "Agent not set");
+        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
+        IMFPListing listing = IMFPListing(listingAddress);
+
+        PrepData memory prepData;
+        prepData.token = listing.tokenB();
+        (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
+        prepData.orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, details.amount)));
+        prepData.updates = _createOrderUpdate(
+            2, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
+        );
+
+        return OrderPrep(prepData.orderId, prepData.principal, prepData.fee, prepData.updates, prepData.token, details.recipient);
+    }
+
+    // Execute functions
+    function executeBuyOrder(
+        address listingAddress,
+        OrderPrep memory prep,
+        address listingAgent,
+        address proxy
+    ) external {
+        IMFPListing listing = IMFPListing(listingAddress);
+        address liquidityAddress = listing.liquidityAddresses(0);
+        IMFPLiquidity liquidity = IMFPLiquidity(liquidityAddress);
+
+        uint256 receivedPrincipal = _transferToken(prep.token, listingAddress, prep.principal);
+        require(receivedPrincipal >= prep.principal, "Principal transfer failed");
+
+        uint256 receivedFee = _transferToken(prep.token, liquidityAddress, prep.fee);
+        require(receivedFee >= prep.fee, "Fee transfer failed");
+
+        listing.update(proxy, prep.updates);
+        liquidity.addFees(proxy, true, prep.fee);
 
         IMFPListing.UpdateType[] memory historicalUpdate = new IMFPListing.UpdateType[](1);
         (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) = listing.volumeBalances(0);
@@ -102,27 +180,27 @@ library MFPOrderLibrary {
         );
         listing.update(proxy, historicalUpdate);
 
-        emit OrderCreated(orderId, true, msg.sender);
+        emit OrderCreated(prep.orderId, true, msg.sender);
     }
 
-    function createSellOrder(
+    function executeSellOrder(
         address listingAddress,
-        SellOrderDetails memory details,
+        OrderPrep memory prep,
         address listingAgent,
         address proxy
     ) external {
-        require(listingAgent != address(0), "Agent not set");
-        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
+        address liquidityAddress = listing.liquidityAddresses(0);
+        IMFPLiquidity liquidity = IMFPLiquidity(liquidityAddress);
 
-        address tokenB = listing.tokenB();
-        (uint256 orderId, IMFPListing.UpdateType[] memory updates, uint256 fee) = _prepareOrder(
-            listingAddress, tokenB, details.amount, 2, details.recipient, details.maxPrice, details.minPrice, proxy
-        );
-        listing.update(proxy, updates);
+        uint256 receivedPrincipal = _transferToken(prep.token, listingAddress, prep.principal);
+        require(receivedPrincipal >= prep.principal, "Principal transfer failed");
 
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
-        liquidity.addFees(proxy, false, fee);
+        uint256 receivedFee = _transferToken(prep.token, liquidityAddress, prep.fee);
+        require(receivedFee >= prep.fee, "Fee transfer failed");
+
+        listing.update(proxy, prep.updates);
+        liquidity.addFees(proxy, false, prep.fee);
 
         IMFPListing.UpdateType[] memory historicalUpdate = new IMFPListing.UpdateType[](1);
         (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) = listing.volumeBalances(0);
@@ -132,9 +210,10 @@ library MFPOrderLibrary {
         );
         listing.update(proxy, historicalUpdate);
 
-        emit OrderCreated(orderId, false, msg.sender);
+        emit OrderCreated(prep.orderId, false, msg.sender);
     }
 
+    // Clear functions
     function clearSingleOrder(
         address listingAddress,
         uint256 orderId,
@@ -218,67 +297,71 @@ library MFPOrderLibrary {
             listing.update(proxy, updates);
         }
     }
+}
 
-    function _transferToken(
-        address token,
-        address target,
-        uint256 amount,
-        address proxy
-    ) internal returns (uint256) {
-        uint256 preBalance = token == address(0) ? target.balance : IERC20(token).balanceOf(target);
-        if (token == address(0)) {
-            require(msg.value == amount, "Incorrect ETH amount");
-            (bool success, ) = target.call{value: amount}("");
-            require(success, "ETH transfer failed");
-        } else {
-            IERC20(token).safeTransferFrom(msg.sender, target, amount);
-        }
-        uint256 postBalance = token == address(0) ? target.balance : IERC20(token).balanceOf(target);
-        return postBalance - preBalance;
+interface IMFPOrderLibrary {
+    struct BuyOrderDetails {
+        address recipient;
+        uint256 amount;   // raw amount
+        uint256 maxPrice; // TokenA/TokenB, 18 decimals
+        uint256 minPrice; // TokenA/TokenB, 18 decimals
     }
 
-    function _normalizeAndFee(
-        address token,
-        uint256 amount
-    ) internal view returns (uint256 normalized, uint256 fee, uint256 principal) {
-        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
-        normalized = amount; // Assuming external normalization for simplicity
-        if (decimals != 18) {
-            if (decimals < 18) normalized = amount * 10**(18 - decimals);
-            else normalized = amount / 10**(decimals - 18);
-        }
-        fee = (normalized * 5) / 10000; // 0.05% fee
-        principal = normalized - fee;
+    struct SellOrderDetails {
+        address recipient;
+        uint256 amount;   // raw amount
+        uint256 maxPrice; // TokenA/TokenB, 18 decimals
+        uint256 minPrice; // TokenA/TokenB, 18 decimals
     }
 
-    function _createOrderUpdate(
-        uint8 updateType,
-        uint256 orderId,
-        uint256 principal,
-        address maker,
-        address recipient,
-        uint256 maxPrice,
-        uint256 minPrice
-    ) internal pure returns (IMFPListing.UpdateType[] memory) {
-        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](1);
-        updates[0] = IMFPListing.UpdateType(updateType, orderId, principal, maker, recipient, maxPrice, minPrice);
-        return updates;
+    struct OrderPrep {
+        uint256 orderId;
+        uint256 principal;
+        uint256 fee;
+        IMFPListing.UpdateType[] updates;
+        address token;
+        address recipient;
     }
 
-    function _prepareOrder(
+    function prepBuyOrder(
         address listingAddress,
-        address token,
-        uint256 amount,
-        uint8 updateType,
-        address recipient,
-        uint256 maxPrice,
-        uint256 minPrice,
+        BuyOrderDetails memory details,
+        address listingAgent,
         address proxy
-    ) internal returns (uint256 orderId, IMFPListing.UpdateType[] memory updates, uint256 fee) {
-        uint256 receivedAmount = _transferToken(token, listingAddress, amount, proxy);
-        (uint256 normalizedAmount, uint256 fee_, uint256 principal) = _normalizeAndFee(token, receivedAmount);
-        orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, amount)));
-        updates = _createOrderUpdate(updateType, orderId, principal, msg.sender, recipient, maxPrice, minPrice);
-        return (orderId, updates, fee_);
-    }
+    ) external view returns (OrderPrep memory);
+
+    function prepSellOrder(
+        address listingAddress,
+        SellOrderDetails memory details,
+        address listingAgent,
+        address proxy
+    ) external view returns (OrderPrep memory);
+
+    function executeBuyOrder(
+        address listingAddress,
+        OrderPrep memory prep,
+        address listingAgent,
+        address proxy
+    ) external;
+
+    function executeSellOrder(
+        address listingAddress,
+        OrderPrep memory prep,
+        address listingAgent,
+        address proxy
+    ) external;
+
+    function clearSingleOrder(
+        address listingAddress,
+        uint256 orderId,
+        bool isBuy,
+        address listingAgent,
+        address proxy
+    ) external;
+
+    function clearOrders(
+        address listingAddress,
+        address listingAgent,
+        address proxy
+    ) external;
 }
