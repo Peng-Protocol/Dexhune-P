@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.12
+// Version: 0.0.13 (Updated)
 // Changes:
-// - Added SettlementData struct to reduce stack depth in settlement functions.
-// - Modified prepBuyLiquid and prepSellLiquid to use SettlementData for balance and price calculations.
-// - Updated executeBuyLiquid and executeSellLiquid to use SettlementData and processOrder helper.
-// - Added processOrder internal helper to handle individual order execution and update creation.
+// - Removed timestamp from IMFPListing.UpdateType struct, as MFPListingTemplate handles it automatically.
+// - Updated executeBuyLiquid and executeSellLiquid to exclude timestamp in historical updates (type 3).
+// - Side effects: Simplified calldata; aligns with MFPListingTemplate’s self-contained timestamp logic.
 
 import "./imports/SafeERC20.sol";
 
@@ -17,7 +16,7 @@ interface IMFP {
 
 interface IMFPListing {
     struct UpdateType {
-        uint8 updateType;
+        uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
         uint256 index;
         uint256 value;
         address addr;
@@ -37,8 +36,6 @@ interface IMFPListing {
         uint256 minPrice,
         uint256 pending,
         uint256 filled,
-        uint256 timestamp,
-        uint256 blockNumber,
         uint8 status
     );
     function sellOrders(uint256 orderId) external view returns (
@@ -48,8 +45,6 @@ interface IMFPListing {
         uint256 minPrice,
         uint256 pending,
         uint256 filled,
-        uint256 timestamp,
-        uint256 blockNumber,
         uint8 status
     );
     function pendingBuyOrders(uint256 listingId) external view returns (uint256[] memory);
@@ -122,20 +117,15 @@ library MFPLiquidLibrary {
         SettlementData memory data;
         uint256 currentPrice = listing.prices(0);
 
-        // Populate SettlementData and calculate total amount
         (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
         for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
-            (
-                address makerAddress,
-                address recipientAddress,
-                uint256 maxPrice,
-                uint256 minPrice,
-                uint256 pending,
-                ,
-                ,
-                ,
-                uint8 status
-            ) = listing.sellOrders(pendingOrders[i]);
+            address makerAddress;
+            address recipientAddress;
+            uint256 maxPrice;
+            uint256 minPrice;
+            uint256 pending;
+            uint8 status;
+            (makerAddress, recipientAddress, maxPrice, minPrice, pending, , status) = listing.sellOrders(pendingOrders[i]);
             if (status == 1 && pending > 0 && currentPrice >= minPrice && currentPrice <= maxPrice) {
                 uint256 available = data.xBalance > pending ? pending : data.xBalance;
                 if (available > 0) {
@@ -146,21 +136,16 @@ library MFPLiquidLibrary {
             }
         }
 
-        // Adjust amounts with impact price
         if (updateCount > 0) {
             data.impactPrice = calculateImpactPrice(data.xBalance, data.yBalance, data.totalAmount, true);
             for (uint256 i = 0; i < updateCount; i++) {
-                (
-                    address makerAddress,
-                    address recipient,
-                    uint256 maxPrice,
-                    uint256 minPrice,
-                    uint256 pending,
-                    ,
-                    ,
-                    ,
-                    uint8 status
-                ) = listing.sellOrders(updates[i].orderId);
+                address makerAddress;
+                address recipient;
+                uint256 maxPrice;
+                uint256 minPrice;
+                uint256 pending;
+                uint8 status;
+                (makerAddress, recipient, maxPrice, minPrice, pending, , status) = listing.sellOrders(updates[i].orderId);
                 if (data.impactPrice >= minPrice && data.impactPrice <= maxPrice) {
                     updates[i].amount = pending;
                 } else if (data.impactPrice > maxPrice) {
@@ -185,20 +170,15 @@ library MFPLiquidLibrary {
         SettlementData memory data;
         uint256 currentPrice = listing.prices(0);
 
-        // Populate SettlementData and calculate total amount
         (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
         for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
-            (
-                address makerAddress,
-                address recipientAddress,
-                uint256 maxPrice,
-                uint256 minPrice,
-                uint256 pending,
-                ,
-                ,
-                ,
-                uint8 status
-            ) = listing.buyOrders(pendingOrders[i]);
+            address makerAddress;
+            address recipientAddress;
+            uint256 maxPrice;
+            uint256 minPrice;
+            uint256 pending;
+            uint8 status;
+            (makerAddress, recipientAddress, maxPrice, minPrice, pending, , status) = listing.buyOrders(pendingOrders[i]);
             if (status == 1 && pending > 0 && currentPrice >= minPrice && currentPrice <= maxPrice) {
                 uint256 available = data.yBalance > pending ? pending : data.yBalance;
                 if (available > 0) {
@@ -209,21 +189,16 @@ library MFPLiquidLibrary {
             }
         }
 
-        // Adjust amounts with impact price
         if (updateCount > 0) {
             data.impactPrice = calculateImpactPrice(data.xBalance, data.yBalance, data.totalAmount, false);
             for (uint256 i = 0; i < updateCount; i++) {
-                (
-                    address makerAddress,
-                    address recipient,
-                    uint256 maxPrice,
-                    uint256 minPrice,
-                    uint256 pending,
-                    ,
-                    ,
-                    ,
-                    uint8 status
-                ) = listing.buyOrders(updates[i].orderId);
+                address makerAddress;
+                address recipient;
+                uint256 maxPrice;
+                uint256 minPrice;
+                uint256 pending;
+                uint8 status;
+                (makerAddress, recipient, maxPrice, minPrice, pending, , status) = listing.buyOrders(updates[i].orderId);
                 if (data.impactPrice >= minPrice && data.impactPrice <= maxPrice) {
                     updates[i].amount = pending;
                 } else if (data.impactPrice < minPrice) {
@@ -274,7 +249,6 @@ library MFPLiquidLibrary {
         uint256 updateCount = 0;
         SettlementData memory data;
 
-        // Populate SettlementData
         (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
         for (uint256 i = 0; i < preparedUpdates.length; i++) {
             if (preparedUpdates[i].amount > 0) {
@@ -282,7 +256,6 @@ library MFPLiquidLibrary {
             }
         }
 
-        // Execute with impact price
         if (data.totalAmount > 0) {
             data.impactPrice = calculateImpactPrice(data.xBalance, data.yBalance, data.totalAmount, true);
             address token = listing.tokenA();
@@ -305,7 +278,11 @@ library MFPLiquidLibrary {
             );
             updateCount++;
 
-            (uint256 newXBal, uint256 newYBal, uint256 xVol, uint256 yVol) = listing.volumeBalances(0);
+            uint256 newXBal;
+            uint256 newYBal;
+            uint256 xVol;
+            uint256 yVol;
+            (newXBal, newYBal, xVol, yVol) = listing.volumeBalances(0);
             updates[updateCount] = IMFPListing.UpdateType(
                 3,
                 0,
@@ -331,7 +308,6 @@ library MFPLiquidLibrary {
         uint256 updateCount = 0;
         SettlementData memory data;
 
-        // Populate SettlementData
         (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
         for (uint256 i = 0; i < preparedUpdates.length; i++) {
             if (preparedUpdates[i].amount > 0) {
@@ -339,7 +315,6 @@ library MFPLiquidLibrary {
             }
         }
 
-        // Execute with impact price
         if (data.totalAmount > 0) {
             data.impactPrice = calculateImpactPrice(data.xBalance, data.yBalance, data.totalAmount, false);
             address token = listing.tokenB();
@@ -362,7 +337,11 @@ library MFPLiquidLibrary {
             );
             updateCount++;
 
-            (uint256 newXBal, uint256 newYBal, uint256 xVol, uint256 yVol) = listing.volumeBalances(0);
+            uint256 newXBal;
+            uint256 newYBal;
+            uint256 xVol;
+            uint256 yVol;
+            (newXBal, newYBal, xVol, yVol) = listing.volumeBalances(0);
             updates[updateCount] = IMFPListing.UpdateType(
                 3,
                 0,
@@ -402,20 +381,26 @@ library MFPLiquidLibrary {
     }
 
     function xClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external {
-        (address listingAddress, ) = IMFP(listingAgent).listingValidationByIndex(listingId);
+        address listingAddress;
+        uint256 index;
+        (listingAddress, index) = IMFP(listingAgent).listingValidationByIndex(listingId);
         require(listingAddress != address(0), "Invalid listing ID");
         IMFPListing listing = IMFPListing(listingAddress);
         IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
-        (, , uint256 xVolume, ) = listing.volumeBalances(0);
+        uint256 xVolume;
+        (, , xVolume, ) = listing.volumeBalances(0);
         liquidity.claimFees(proxy, liquidityIndex, true, xVolume);
     }
 
     function yClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external {
-        (address listingAddress, ) = IMFP(listingAgent).listingValidationByIndex(listingId);
+        address listingAddress;
+        uint256 index;
+        (listingAddress, index) = IMFP(listingAgent).listingValidationByIndex(listingId);
         require(listingAddress != address(0), "Invalid listing ID");
         IMFPListing listing = IMFPListing(listingAddress);
         IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
-        (, , , uint256 yVolume) = listing.volumeBalances(0);
+        uint256 yVolume;
+        (, , , yVolume) = listing.volumeBalances(0);
         liquidity.claimFees(proxy, liquidityIndex, false, yVolume);
     }
 

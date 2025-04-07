@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.4
+// Version: 0.0.5 (Updated)
 // Changes:
-// - Added PrepData struct to reduce stack depth in prepSellOrder and prepBuyOrder.
-// - Moved BuyOrderDetails and SellOrderDetails to IMFPOrderLibrary interface for visibility.
-// - No other functional changes beyond approved fixes.
+// - Removed timestamp from IMFPListing.UpdateType struct, as MFPListingTemplate handles it automatically.
+// - Updated executeBuyOrder and executeSellOrder to exclude timestamp in historical updates (type 3).
+// - Side effects: Simplified calldata; aligns with MFPListingTemplate’s self-contained timestamp logic.
 
 import "./imports/SafeERC20.sol";
 
@@ -24,12 +24,12 @@ interface IMFPListing {
         uint256 minPrice;
     }
     function buyOrders(uint256 orderId) external view returns (
-        address maker, address recipient, uint256 createdAt, uint256 lastFillAt,
-        uint256 pending, uint256 filled, uint256 maxPrice, uint256 minPrice, uint8 status
+        address maker, address recipient, uint256 maxPrice, uint256 minPrice,
+        uint256 pending, uint256 filled, uint8 status
     );
     function sellOrders(uint256 orderId) external view returns (
-        address maker, address recipient, uint256 createdAt, uint256 lastFillAt,
-        uint256 pending, uint256 filled, uint256 maxPrice, uint256 minPrice, uint8 status
+        address maker, address recipient, uint256 maxPrice, uint256 minPrice,
+        uint256 pending, uint256 filled, uint8 status
     );
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
@@ -173,7 +173,11 @@ library MFPOrderLibrary {
         liquidity.addFees(proxy, true, prep.fee);
 
         IMFPListing.UpdateType[] memory historicalUpdate = new IMFPListing.UpdateType[](1);
-        (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) = listing.volumeBalances(0);
+        uint256 xBalance;
+        uint256 yBalance;
+        uint256 xVolume;
+        uint256 yVolume;
+        (xBalance, yBalance, xVolume, yVolume) = listing.volumeBalances(0);
         historicalUpdate[0] = IMFPListing.UpdateType(
             3, 0, listing.prices(0), address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
@@ -203,7 +207,11 @@ library MFPOrderLibrary {
         liquidity.addFees(proxy, false, prep.fee);
 
         IMFPListing.UpdateType[] memory historicalUpdate = new IMFPListing.UpdateType[](1);
-        (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) = listing.volumeBalances(0);
+        uint256 xBalance;
+        uint256 yBalance;
+        uint256 xVolume;
+        uint256 yVolume;
+        (xBalance, yBalance, xVolume, yVolume) = listing.volumeBalances(0);
         historicalUpdate[0] = IMFPListing.UpdateType(
             3, 0, listing.prices(0), address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
@@ -228,13 +236,21 @@ library MFPOrderLibrary {
         uint256 refundAmount;
         address token;
         if (isBuy) {
-            (address maker, address recipient, , , uint256 pending, , , , uint8 status) = listing.buyOrders(orderId);
+            address maker;
+            address recipient;
+            uint256 pending;
+            uint8 status;
+            (maker, recipient, , , pending, , status) = listing.buyOrders(orderId);
             require(status == 1 || status == 2, "Order not active");
             refundTo = recipient != address(0) ? recipient : maker;
             refundAmount = pending;
             token = listing.tokenA();
         } else {
-            (address maker, address recipient, , , uint256 pending, , , , uint8 status) = listing.sellOrders(orderId);
+            address maker;
+            address recipient;
+            uint256 pending;
+            uint8 status;
+            (maker, recipient, , , pending, , status) = listing.sellOrders(orderId);
             require(status == 1 || status == 2, "Order not active");
             refundTo = recipient != address(0) ? recipient : maker;
             refundAmount = pending;
@@ -267,7 +283,11 @@ library MFPOrderLibrary {
         uint256 updateCount = 0;
 
         for (uint256 i = 0; i < buyOrders.length; i++) {
-            (address maker, address recipient, , , uint256 pending, , , , uint8 status) = listing.buyOrders(buyOrders[i]);
+            address maker;
+            address recipient;
+            uint256 pending;
+            uint8 status;
+            (maker, recipient, , , pending, , status) = listing.buyOrders(buyOrders[i]);
             if (status == 1 || status == 2) {
                 address refundTo = recipient != address(0) ? recipient : maker;
                 if (pending > 0) {
@@ -280,7 +300,11 @@ library MFPOrderLibrary {
         }
 
         for (uint256 i = 0; i < sellOrders.length; i++) {
-            (address maker, address recipient, , , uint256 pending, , , , uint8 status) = listing.sellOrders(sellOrders[i]);
+            address maker;
+            address recipient;
+            uint256 pending;
+            uint8 status;
+            (maker, recipient, , , pending, , status) = listing.sellOrders(sellOrders[i]);
             if (status == 1 || status == 2) {
                 address refundTo = recipient != address(0) ? recipient : maker;
                 if (pending > 0) {

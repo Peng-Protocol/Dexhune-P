@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.4
+// Version: 0.0.13 (Updated)
 // Changes:
-// - Updated to use IMFPOrderLibrary.BuyOrderDetails/SellOrderDetails from latest MFPOrderLibrary.
-// - Libraries (MFPOrderLibrary, MFPSettlementLibrary, MFPLiquidLibrary) treated as standalone contracts via interfaces.
-// - Maintained ETH splitting in buyOrder/sellOrder for principal and fee transfers.
+// - Removed emergencyWithdraw and settlementAgent; no fund recovery needed in router.
+// - Added Ownable import from "./imports/Ownable.sol"; inherited Ownable, setters restricted to onlyOwner, initial owner is deployer.
+// - Removed imports of MFPOrderLibrary, MFPLiquidLibrary, and MFPSettlementLibrary; using external addresses set post-deployment.
+// - Moved interfaces (IMFP, IMFPListing, etc.) outside contract to fix parser error.
+// - Ensured IMFPListing.UpdateType excludes timestamp, aligning with MFPListingTemplate.sol v0.0.11's automatic handling.
+// - Updated IMFPSettlementLibrary to match MFPSettlementLibrary.sol v0.0.24 (prep/execute functions).
+// - Added safety checks for library and listingAgent addresses in all functions.
+// - Side effects: Fully configurable post-deployment; reduced bytecode size; compatible with MFPAgent.sol v0.0.11 and updated libraries.
 
-import "./imports/ReentrancyGuard.sol";
 import "./imports/SafeERC20.sol";
+import "./imports/Ownable.sol";
 
+// Interfaces defined outside contract
 interface IMFP {
-    function listingAgent() external view returns (address);
     function isValidListing(address listingAddress) external view returns (bool);
+    function listingValidationByIndex(uint256 listingId) external view returns (address listingAddress, uint256 index);
 }
 
 interface IMFPListing {
@@ -26,12 +32,12 @@ interface IMFPListing {
         uint256 minPrice;
     }
     function buyOrders(uint256 orderId) external view returns (
-        address maker, address recipient, uint256 createdAt, uint256 lastFillAt,
-        uint256 pending, uint256 filled, uint256 maxPrice, uint256 minPrice, uint8 status
+        address maker, address recipient, uint256 maxPrice, uint256 minPrice,
+        uint256 pending, uint256 filled, uint8 status
     );
     function sellOrders(uint256 orderId) external view returns (
-        address maker, address recipient, uint256 createdAt, uint256 lastFillAt,
-        uint256 pending, uint256 filled, uint256 maxPrice, uint256 minPrice, uint8 status
+        address maker, address recipient, uint256 maxPrice, uint256 minPrice,
+        uint256 pending, uint256 filled, uint8 status
     );
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
@@ -44,22 +50,18 @@ interface IMFPListing {
     function transact(address caller, address token, uint256 amount, address recipient) external;
 }
 
-interface IMFPLiquidity {
-    function addFees(address caller, bool isX, uint256 fee) external;
-}
-
 interface IMFPOrderLibrary {
     struct BuyOrderDetails {
         address recipient;
-        uint256 amount;   // raw amount
-        uint256 maxPrice; // TokenA/TokenB, 18 decimals
-        uint256 minPrice; // TokenA/TokenB, 18 decimals
+        uint256 amount;
+        uint256 maxPrice;
+        uint256 minPrice;
     }
     struct SellOrderDetails {
         address recipient;
-        uint256 amount;   // raw amount
-        uint256 maxPrice; // TokenA/TokenB, 18 decimals
-        uint256 minPrice; // TokenA/TokenB, 18 decimals
+        uint256 amount;
+        uint256 maxPrice;
+        uint256 minPrice;
     }
     struct OrderPrep {
         uint256 orderId;
@@ -69,285 +71,170 @@ interface IMFPOrderLibrary {
         address token;
         address recipient;
     }
-    function prepBuyOrder(
-        address listingAddress,
-        BuyOrderDetails memory details,
-        address listingAgent,
-        address proxy
-    ) external view returns (OrderPrep memory);
-    function prepSellOrder(
-        address listingAddress,
-        SellOrderDetails memory details,
-        address listingAgent,
-        address proxy
-    ) external view returns (OrderPrep memory);
-    function executeBuyOrder(
-        address listingAddress,
-        OrderPrep memory prep,
-        address listingAgent,
-        address proxy
-    ) external;
-    function executeSellOrder(
-        address listingAddress,
-        OrderPrep memory prep,
-        address listingAgent,
-        address proxy
-    ) external;
-    function clearSingleOrder(
-        address listingAddress,
-        uint256 orderId,
-        bool isBuy,
-        address listingAgent,
-        address proxy
-    ) external;
-    function clearOrders(
-        address listingAddress,
-        address listingAgent,
-        address proxy
-    ) external;
-}
-
-interface IMFPSettlementLibrary {
-    struct SettlementData {
-        uint256 orderCount;
-        uint256[] orderIds;
-        PreparedUpdate[] updates;
-        address tokenA;
-        address tokenB;
-    }
-    struct PreparedUpdate {
-        uint256 orderId;
-        uint256 value;
-        address recipient;
-    }
-    function prepBuyOrders(
-        address listingAddress,
-        uint256[] memory orderIds,
-        address listingAgent,
-        address proxy
-    ) external view returns (SettlementData memory);
-    function executeBuyOrders(
-        address listingAddress,
-        SettlementData memory data,
-        address listingAgent,
-        address proxy
-    ) external;
-    function prepSellOrders(
-        address listingAddress,
-        uint256[] memory orderIds,
-        address listingAgent,
-        address proxy
-    ) external view returns (SettlementData memory);
-    function executeSellOrders(
-        address listingAddress,
-        SettlementData memory data,
-        address listingAgent,
-        address proxy
-    ) external;
+    function prepBuyOrder(address listingAddress, BuyOrderDetails memory details, address listingAgent, address proxy) external view returns (OrderPrep memory);
+    function prepSellOrder(address listingAddress, SellOrderDetails memory details, address listingAgent, address proxy) external view returns (OrderPrep memory);
+    function executeBuyOrder(address listingAddress, OrderPrep memory prep, address listingAgent, address proxy) external;
+    function executeSellOrder(address listingAddress, OrderPrep memory prep, address listingAgent, address proxy) external;
+    function clearSingleOrder(address listingAddress, uint256 orderId, bool isBuy, address listingAgent, address proxy) external;
+    function clearOrders(address listingAddress, address listingAgent, address proxy) external;
 }
 
 interface IMFPLiquidLibrary {
-    struct SettlementData {
-        uint256 orderCount;
-        uint256[] orderIds;
-        PreparedUpdate[] updates;
-        address tokenA;
-        address tokenB;
-    }
     struct PreparedUpdate {
         uint256 orderId;
-        uint256 value;
+        bool isBuy;
+        uint256 amount;
         address recipient;
     }
-    function prepBuyLiquid(
-        address listingAddress,
-        uint256[] memory orderIds,
-        address listingAgent,
-        address proxy
-    ) external view returns (SettlementData memory);
-    function executeBuyLiquid(
-        address listingAddress,
-        SettlementData memory data,
-        address listingAgent,
-        address proxy
-    ) external;
-    function prepSellLiquid(
-        address listingAddress,
-        uint256[] memory orderIds,
-        address listingAgent,
-        address proxy
-    ) external view returns (SettlementData memory);
-    function executeSellLiquid(
-        address listingAddress,
-        SettlementData memory data,
-        address listingAgent,
-        address proxy
-    ) external;
+    struct PreparedWithdrawal {
+        uint256 amountA;
+        uint256 amountB;
+    }
+    function prepBuyLiquid(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory);
+    function prepSellLiquid(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory);
+    function executeBuyLiquid(address listingAddress, address listingAgent, address proxy, PreparedUpdate[] memory preparedUpdates) external;
+    function executeSellLiquid(address listingAddress, address listingAgent, address proxy, PreparedUpdate[] memory preparedUpdates) external;
     function xDeposit(address listingAddress, uint256 amount, address listingAgent, address proxy) external;
     function yDeposit(address listingAddress, uint256 amount, address listingAgent, address proxy) external;
+    function xClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external;
+    function yClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external;
+    function xWithdraw(address listingAddress, uint256 amount, uint256 index, address listingAgent, address proxy) external returns (PreparedWithdrawal memory);
+    function yWithdraw(address listingAddress, uint256 amount, uint256 index, address listingAgent, address proxy) external returns (PreparedWithdrawal memory);
 }
 
-contract MFPProxyRouter is ReentrancyGuard {
+interface IMFPSettlementLibrary {
+    struct PreparedUpdate {
+        uint256 orderId;
+        bool isBuy;
+        uint256 amount;
+        address recipient;
+    }
+    function prepBuyOrders(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory);
+    function prepSellOrders(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory);
+    function executeBuyOrders(address listingAddress, address proxy, PreparedUpdate[] memory preparedUpdates) external;
+    function executeSellOrders(address listingAddress, address proxy, PreparedUpdate[] memory preparedUpdates) external;
+}
+
+contract MFPProxyRouter is Ownable {
     using SafeERC20 for IERC20;
 
-    IMFP public immutable controller;
+    address public listingAgent;
+    address public orderLibrary;
+    address public liquidLibrary;
+    address public settlementLibrary;
 
-    constructor(address _controller) {
-        require(_controller != address(0), "Controller not set");
-        controller = IMFP(_controller);
+    // Setter functions restricted to owner
+    function setListingAgent(address _listingAgent) external onlyOwner {
+        require(_listingAgent != address(0), "Invalid listing agent address");
+        listingAgent = _listingAgent;
     }
 
-    event ListingUpdated(address indexed listingAddress);
-
-    function buyOrder(
-        address listingAddress,
-        IMFPOrderLibrary.BuyOrderDetails memory details
-    ) external payable nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPOrderLibrary orderLibrary = IMFPOrderLibrary(listingAgent);
-
-        IMFPOrderLibrary.OrderPrep memory prep = orderLibrary.prepBuyOrder(
-            listingAddress, details, listingAgent, address(this)
-        );
-
-        uint256 totalValue = prep.principal + prep.fee;
-        if (prep.token == address(0)) {
-            require(msg.value >= totalValue, "Insufficient ETH value");
-        }
-
-        orderLibrary.executeBuyOrder(listingAddress, prep, listingAgent, address(this));
-
-        if (msg.value > totalValue) {
-            (bool success, ) = msg.sender.call{value: msg.value - totalValue}("");
-            require(success, "ETH refund failed");
-        }
+    function setOrderLibrary(address _orderLibrary) external onlyOwner {
+        require(_orderLibrary != address(0), "Invalid order library address");
+        orderLibrary = _orderLibrary;
     }
 
-    function sellOrder(
-        address listingAddress,
-        IMFPOrderLibrary.SellOrderDetails memory details
-    ) external payable nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPOrderLibrary orderLibrary = IMFPOrderLibrary(listingAgent);
-
-        IMFPOrderLibrary.OrderPrep memory prep = orderLibrary.prepSellOrder(
-            listingAddress, details, listingAgent, address(this)
-        );
-
-        uint256 totalValue = prep.principal + prep.fee;
-        if (prep.token == address(0)) {
-            require(msg.value >= totalValue, "Insufficient ETH value");
-        }
-
-        orderLibrary.executeSellOrder(listingAddress, prep, listingAgent, address(this));
-
-        if (msg.value > totalValue) {
-            (bool success, ) = msg.sender.call{value: msg.value - totalValue}("");
-            require(success, "ETH refund failed");
-        }
+    function setLiquidLibrary(address _liquidLibrary) external onlyOwner {
+        require(_liquidLibrary != address(0), "Invalid liquid library address");
+        liquidLibrary = _liquidLibrary;
     }
 
-    function settleBuyOrders(
-        address listingAddress,
-        uint256[] memory orderIds
-    ) external nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPSettlementLibrary settlementLibrary = IMFPSettlementLibrary(listingAgent);
-        IMFPSettlementLibrary.SettlementData memory data = settlementLibrary.prepBuyOrders(
-            listingAddress, orderIds, listingAgent, address(this)
-        );
-        if (data.orderCount > 0) {
-            settlementLibrary.executeBuyOrders(listingAddress, data, listingAgent, address(this));
-            emit ListingUpdated(listingAddress);
-        }
+    function setSettlementLibrary(address _settlementLibrary) external onlyOwner {
+        require(_settlementLibrary != address(0), "Invalid settlement library address");
+        settlementLibrary = _settlementLibrary;
     }
 
-    function settleSellOrders(
-        address listingAddress,
-        uint256[] memory orderIds
-    ) external nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPSettlementLibrary settlementLibrary = IMFPSettlementLibrary(listingAgent);
-        IMFPSettlementLibrary.SettlementData memory data = settlementLibrary.prepSellOrders(
-            listingAddress, orderIds, listingAgent, address(this)
-        );
-        if (data.orderCount > 0) {
-            settlementLibrary.executeSellOrders(listingAddress, data, listingAgent, address(this));
-            emit ListingUpdated(listingAddress);
-        }
+    // Order functions
+    function buyOrder(address listingAddress, IMFPOrderLibrary.BuyOrderDetails memory details) external payable {
+        require(orderLibrary != address(0), "Order library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepBuyOrder(listingAddress, details, listingAgent, address(this));
+        IMFPOrderLibrary(orderLibrary).executeBuyOrder(listingAddress, prep, listingAgent, address(this));
     }
 
-    function settleBuyLiquid(
-        address listingAddress,
-        uint256[] memory orderIds
-    ) external nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPLiquidLibrary liquidLibrary = IMFPLiquidLibrary(listingAgent);
-        IMFPLiquidLibrary.SettlementData memory data = liquidLibrary.prepBuyLiquid(
-            listingAddress, orderIds, listingAgent, address(this)
-        );
-        if (data.orderCount > 0) {
-            liquidLibrary.executeBuyLiquid(listingAddress, data, listingAgent, address(this));
-            emit ListingUpdated(listingAddress);
+    function sellOrder(address listingAddress, IMFPOrderLibrary.SellOrderDetails memory details) external payable {
+        require(orderLibrary != address(0), "Order library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepSellOrder(listingAddress, details, listingAgent, address(this));
+        IMFPOrderLibrary(orderLibrary).executeSellOrder(listingAddress, prep, listingAgent, address(this));
+    }
+
+    // Liquidity functions
+    function buyLiquid(address listingAddress) external {
+        require(liquidLibrary != address(0), "Liquid library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPLiquidLibrary.PreparedUpdate[] memory updates = IMFPLiquidLibrary(liquidLibrary).prepBuyLiquid(listingAddress, listingAgent);
+        IMFPLiquidLibrary(liquidLibrary).executeBuyLiquid(listingAddress, listingAgent, address(this), updates);
+    }
+
+    function sellLiquid(address listingAddress) external {
+        require(liquidLibrary != address(0), "Liquid library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPLiquidLibrary.PreparedUpdate[] memory updates = IMFPLiquidLibrary(liquidLibrary).prepSellLiquid(listingAddress, listingAgent);
+        IMFPLiquidLibrary(liquidLibrary).executeSellLiquid(listingAddress, listingAgent, address(this), updates);
+    }
+
+    // Settlement functions
+    function settleBuy(address listingAddress) external {
+        require(settlementLibrary != address(0), "Settlement library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPSettlementLibrary.PreparedUpdate[] memory updates = IMFPSettlementLibrary(settlementLibrary).prepBuyOrders(listingAddress, listingAgent);
+        IMFPSettlementLibrary(settlementLibrary).executeBuyOrders(listingAddress, address(this), updates);
+    }
+
+    function settleSell(address listingAddress) external {
+        require(settlementLibrary != address(0), "Settlement library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPSettlementLibrary.PreparedUpdate[] memory updates = IMFPSettlementLibrary(settlementLibrary).prepSellOrders(listingAddress, listingAgent);
+        IMFPSettlementLibrary(settlementLibrary).executeSellOrders(listingAddress, address(this), updates);
+    }
+
+    // Order clearing functions
+    function clearSingleOrder(address listingAddress, uint256 orderId, bool isBuy) external {
+        require(orderLibrary != address(0), "Order library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPOrderLibrary(orderLibrary).clearSingleOrder(listingAddress, orderId, isBuy, listingAgent, address(this));
+    }
+
+    function clearOrders(address listingAddress) external {
+        require(orderLibrary != address(0), "Order library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        IMFPOrderLibrary(orderLibrary).clearOrders(listingAddress, listingAgent, address(this));
+    }
+
+    // Deposit functions
+    function deposit(address listingAddress, bool isX, uint256 amount) external payable {
+        require(liquidLibrary != address(0), "Liquid library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        if (isX) {
+            IMFPLiquidLibrary(liquidLibrary).xDeposit(listingAddress, amount, listingAgent, address(this));
+        } else {
+            IMFPLiquidLibrary(liquidLibrary).yDeposit(listingAddress, amount, listingAgent, address(this));
         }
     }
 
-    function settleSellLiquid(
-        address listingAddress,
-        uint256[] memory orderIds
-    ) external nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPLiquidLibrary liquidLibrary = IMFPLiquidLibrary(listingAgent);
-        IMFPLiquidLibrary.SettlementData memory data = liquidLibrary.prepSellLiquid(
-            listingAddress, orderIds, listingAgent, address(this)
-        );
-        if (data.orderCount > 0) {
-            liquidLibrary.executeSellLiquid(listingAddress, data, listingAgent, address(this));
-            emit ListingUpdated(listingAddress);
+    // Fee claiming functions
+    function claimFees(uint256 listingId, uint256 liquidityIndex, bool isX) external {
+        require(liquidLibrary != address(0), "Liquid library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        if (isX) {
+            IMFPLiquidLibrary(liquidLibrary).xClaimFees(listingId, liquidityIndex, listingAgent, address(this));
+        } else {
+            IMFPLiquidLibrary(liquidLibrary).yClaimFees(listingId, liquidityIndex, listingAgent, address(this));
         }
     }
 
-    function xDeposit(address listingAddress, uint256 amount) external payable nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPLiquidLibrary liquidLibrary = IMFPLiquidLibrary(listingAgent);
-        IMFPListing listing = IMFPListing(listingAddress);
-        address token = listing.tokenA();
-        if (token == address(0)) {
-            require(msg.value >= amount, "Insufficient ETH deposit");
+    // Withdrawal functions
+    function withdraw(address listingAddress, bool isX, uint256 amount, uint256 index) external {
+        require(liquidLibrary != address(0), "Liquid library not set");
+        require(listingAgent != address(0), "Listing agent not set");
+        if (isX) {
+            IMFPLiquidLibrary(liquidLibrary).xWithdraw(listingAddress, amount, index, listingAgent, address(this));
+        } else {
+            IMFPLiquidLibrary(liquidLibrary).yWithdraw(listingAddress, amount, index, listingAgent, address(this));
         }
-        liquidLibrary.xDeposit(listingAddress, amount, listingAgent, address(this));
-        emit ListingUpdated(listingAddress);
     }
 
-    function yDeposit(address listingAddress, uint256 amount) external payable nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPLiquidLibrary liquidLibrary = IMFPLiquidLibrary(listingAgent);
-        IMFPListing listing = IMFPListing(listingAddress);
-        address token = listing.tokenB();
-        if (token == address(0)) {
-            require(msg.value >= amount, "Insufficient ETH deposit");
-        }
-        liquidLibrary.yDeposit(listingAddress, amount, listingAgent, address(this));
-        emit ListingUpdated(listingAddress);
-    }
-
-    function clearSingleOrder(
-        address listingAddress,
-        uint256 orderId,
-        bool isBuy
-    ) external nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPOrderLibrary orderLibrary = IMFPOrderLibrary(listingAgent);
-        orderLibrary.clearSingleOrder(listingAddress, orderId, isBuy, listingAgent, address(this));
-        emit ListingUpdated(listingAddress);
-    }
-
-    function clearOrders(address listingAddress) external nonReentrant {
-        address listingAgent = controller.listingAgent();
-        IMFPOrderLibrary orderLibrary = IMFPOrderLibrary(listingAgent);
-        orderLibrary.clearOrders(listingAddress, listingAgent, address(this));
-        emit ListingUpdated(listingAddress);
-    }
-
+    // ETH receive function
     receive() external payable {}
 }

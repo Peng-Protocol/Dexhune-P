@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.11
+// Version: 0.0.11 (Updated)
+// Changes:
+// - Removed timestamp and blockNumber from BuyOrder and SellOrder structs.
+// - Added timestamp field to HistoricalData struct for historical volume tracking.
+// - Updated update function to include block.timestamp in historical updates (type 3).
+// - Side effects: Interface definitions in other contracts (e.g., IMFPListing) need adjustment
+//   to match the updated BuyOrder and SellOrder structs; no other functional impacts detected.
 
 import "./imports/SafeERC20.sol";
 
@@ -37,8 +43,6 @@ contract MFPListingTemplate {
         uint256 minPrice;
         uint256 pending;
         uint256 filled;
-        uint256 timestamp;
-        uint256 blockNumber;
         uint8 status; // 0 = cancelled, 1 = pending, 2 = partially filled, 3 = filled
     }
 
@@ -49,8 +53,6 @@ contract MFPListingTemplate {
         uint256 minPrice;
         uint256 pending;
         uint256 filled;
-        uint256 timestamp;
-        uint256 blockNumber;
         uint8 status;
     }
 
@@ -60,6 +62,7 @@ contract MFPListingTemplate {
         uint256 yBalance;
         uint256 xVolume;
         uint256 yVolume;
+        uint256 timestamp; // Added for historical volume tracking
     }
 
     mapping(uint256 => VolumeBalance) public volumeBalances;
@@ -110,8 +113,8 @@ contract MFPListingTemplate {
             if (u.updateType == 0) { // Balance update
                 if (u.index == 0) balances.xBalance = u.value;       // Set xBalance
                 else if (u.index == 1) balances.yBalance = u.value;  // Set yBalance
-                else if (u.index == 2) balances.xVolume += u.value;  // Increase xVolume (unused currently)
-                else if (u.index == 3) balances.yVolume += u.value;  // Increase yVolume (unused currently)
+                else if (u.index == 2) balances.xVolume += u.value;  // Increase xVolume
+                else if (u.index == 3) balances.yVolume += u.value;  // Increase yVolume
             } else if (u.updateType == 1) { // Buy order update
                 BuyOrder storage order = buyOrders[u.index];
                 if (order.makerAddress == address(0)) { // New order
@@ -120,8 +123,6 @@ contract MFPListingTemplate {
                     order.maxPrice = u.maxPrice;
                     order.minPrice = u.minPrice;
                     order.pending = u.value;
-                    order.timestamp = block.timestamp;
-                    order.blockNumber = block.number;
                     order.status = 1;
                     pendingBuyOrders[listingId].push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
@@ -153,8 +154,6 @@ contract MFPListingTemplate {
                     order.maxPrice = u.maxPrice;
                     order.minPrice = u.minPrice;
                     order.pending = u.value;
-                    order.timestamp = block.timestamp;
-                    order.blockNumber = block.number;
                     order.status = 1;
                     pendingSellOrders[listingId].push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
@@ -182,7 +181,8 @@ contract MFPListingTemplate {
                 historicalData[listingId].push(HistoricalData(
                     u.value, // price
                     u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1), // xBalance, yBalance
-                    u.minPrice >> 128, u.minPrice & ((1 << 128) - 1)  // xVolume, yVolume
+                    u.minPrice >> 128, u.minPrice & ((1 << 128) - 1), // xVolume, yVolume
+                    block.timestamp // Added timestamp for historical volume
                 ));
             }
         }

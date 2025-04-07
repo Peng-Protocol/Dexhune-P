@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.22
+// Version: 0.0.24 (Updated)
 // Changes:
-// - Added SettlementData struct to reduce stack depth in settlement functions.
-// - Modified prepBuyOrders and prepSellOrders to use SettlementData for balance and price calculations.
-// - Updated executeBuyOrders and executeSellOrders to use SettlementData and processOrder helper.
-// - Added processOrder internal helper to handle individual order execution and update creation.
+// - Removed timestamp from IMFPListing.UpdateType struct, as MFPListingTemplate handles it automatically.
+// - Updated IMFPListing.buyOrders and sellOrders to remove timestamp and blockNumber, aligning with MFPListingTemplate v0.0.11.
+// - Adjusted prepBuyOrders and prepSellOrders to unpack 7 return values instead of 9.
+// - Side effects: Ensures compatibility with MFPListingTemplate; simplifies calldata.
 
 import "./imports/SafeERC20.sol";
 
@@ -16,7 +16,7 @@ interface IMFP {
 
 interface IMFPListing {
     struct UpdateType {
-        uint8 updateType;
+        uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
         uint256 index;
         uint256 value;
         address addr;
@@ -35,8 +35,6 @@ interface IMFPListing {
         uint256 minPrice,
         uint256 pending,
         uint256 filled,
-        uint256 timestamp,
-        uint256 blockNumber,
         uint8 status
     );
     function sellOrders(uint256 orderId) external view returns (
@@ -46,8 +44,6 @@ interface IMFPListing {
         uint256 minPrice,
         uint256 pending,
         uint256 filled,
-        uint256 timestamp,
-        uint256 blockNumber,
         uint8 status
     );
     function pendingBuyOrders(uint256 listingId) external view returns (uint256[] memory);
@@ -106,8 +102,6 @@ library MFPSettlementLibrary {
                 uint256 minPrice,
                 uint256 pending,
                 ,
-                ,
-                ,
                 uint8 status
             ) = listing.buyOrders(pendingOrders[i]);
             if (status == 1 && pending > 0 && currentPrice >= minPrice && currentPrice <= maxPrice) {
@@ -130,8 +124,6 @@ library MFPSettlementLibrary {
                     uint256 maxPrice,
                     uint256 minPrice,
                     uint256 pending,
-                    ,
-                    ,
                     ,
                     uint8 status
                 ) = listing.buyOrders(updates[i].orderId);
@@ -169,8 +161,6 @@ library MFPSettlementLibrary {
                 uint256 minPrice,
                 uint256 pending,
                 ,
-                ,
-                ,
                 uint8 status
             ) = listing.sellOrders(pendingOrders[i]);
             if (status == 1 && pending > 0 && currentPrice >= minPrice && currentPrice <= maxPrice) {
@@ -193,8 +183,6 @@ library MFPSettlementLibrary {
                     uint256 maxPrice,
                     uint256 minPrice,
                     uint256 pending,
-                    ,
-                    ,
                     ,
                     uint8 status
                 ) = listing.sellOrders(updates[i].orderId);
