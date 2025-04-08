@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.11 (Updated)
+// Version: 0.0.12 (Updated)
 // Changes:
-// - Removed timestamp and blockNumber from BuyOrder and SellOrder structs.
-// - Added timestamp field to HistoricalData struct for historical volume tracking.
-// - Updated update function to include block.timestamp in historical updates (type 3).
-// - Side effects: Interface definitions in other contracts (e.g., IMFPListing) need adjustment
+// - Removed timestamp and blockNumber from BuyOrder and SellOrder structs (from v0.0.11).
+// - Added timestamp field to HistoricalData struct for historical volume tracking (from v0.0.11).
+// - Updated update function to include block.timestamp in historical updates (type 3) (from v0.0.11).
+// - Added getHistoricalDataByNearestTimestamp view function to return HistoricalData entry with closest timestamp (new in v0.0.12).
+// - Side effects: Interface definitions in other contracts (e.g., IMFPListing) 
 //   to match the updated BuyOrder and SellOrder structs; no other functional impacts detected.
 
 import "./imports/SafeERC20.sol";
@@ -279,5 +280,24 @@ contract MFPListingTemplate {
 
     function historicalDataLengthView() external view returns (uint256) {
         return historicalData[listingId].length;
+    }
+
+    function getHistoricalDataByNearestTimestamp(uint256 targetTimestamp) external view returns (HistoricalData memory) {
+        require(historicalData[listingId].length > 0, "No historical data");
+        uint256 minDiff = type(uint256).max;
+        uint256 closestIndex = 0;
+        for (uint256 i = 0; i < historicalData[listingId].length; i++) {
+            uint256 diff;
+            if (targetTimestamp >= historicalData[listingId][i].timestamp) {
+                diff = targetTimestamp - historicalData[listingId][i].timestamp;
+            } else {
+                diff = historicalData[listingId][i].timestamp - targetTimestamp;
+            }
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestIndex = i;
+            }
+        }
+        return historicalData[listingId][closestIndex];
     }
 }
