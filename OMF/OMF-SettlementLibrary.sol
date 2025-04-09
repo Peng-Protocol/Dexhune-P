@@ -1,13 +1,53 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.4
+// Version: 0.0.5 (Updated)
 // Changes:
-// - Fixed E7: Added tax-on-transfer checks in executeBuyOrders/executeSellOrders.
-// - Fixed E1: Inverted price for buy orders (tokenBAmount = tokenAAmount / price).
-// - Fixed E2: Removed redundant decimal conversion, relying on OMFListingTemplate.getPrice().
+// - Fixed E7: Added tax-on-transfer checks in executeBuyOrders/executeSellOrders (from v0.0.4).
+// - Fixed E1: Inverted price for buy orders (tokenBAmount = tokenAAmount / price) (from v0.0.4).
+// - Fixed E2: Removed redundant decimal conversion, relying on OMFListingTemplate.getPrice() (from v0.0.4).
+// - Updated for OMFListingTemplate v0.0.7: 7-field BuyOrder/SellOrder, token0/baseToken, added yVolume tracking (new in v0.0.5).
+// - Fixed assembly errors in prepBuyOrders/prepSellOrders: Correctly set data.updates length using data.orderCount (previous revision).
+// - Fixed stack-too-deep in execute$order and prep$order: Added ExecutionState and PrepState structs with helper functions (this revision).
 
 import "./imports/SafeERC20.sol";
+
+interface IOMFListing {
+    struct UpdateType {
+        uint8 updateType;
+        uint256 index;
+        uint256 value;
+        address addr;
+        address recipient;
+        uint256 maxPrice;
+        uint256 minPrice;
+    }
+    function token0() external view returns (address);
+    function baseToken() external view returns (address);
+    function getPrice() external view returns (uint256);
+    function buyOrders(uint256 orderId) external view returns (
+        address makerAddress,
+        address recipientAddress,
+        uint256 maxPrice,
+        uint256 minPrice,
+        uint256 pending,
+        uint256 filled,
+        uint8 status
+    );
+    function sellOrders(uint256 orderId) external view returns (
+        address makerAddress,
+        address recipientAddress,
+        uint256 maxPrice,
+        uint256 minPrice,
+        uint256 pending,
+        uint256 filled,
+        uint8 status
+    );
+    function pendingBuyOrdersView() external view returns (uint256[] memory);
+    function pendingSellOrdersView() external view returns (uint256[] memory);
+    function update(address caller, UpdateType[] memory updates) external;
+    function transact(address caller, address token, uint256 amount, address recipient) external;
+}
 
 library OMFSettlementLibrary {
     using SafeERC20 for IERC20;
@@ -22,8 +62,19 @@ library OMFSettlementLibrary {
         uint256 orderCount;
         uint256[] orderIds;
         PreparedUpdate[] updates;
-        address tokenA;
-        address tokenB;
+        address token0;    // Token-0 (listed token)
+        address baseToken; // Token-1 (reference token)
+    }
+
+    struct PrepState {
+        uint256 price;
+        IOMFListing listing;
+    }
+
+    struct ExecutionState {
+        uint256 totalBaseToken;
+        uint256 price;
+        IERC20 baseToken;
     }
 
     function prepBuyOrders(
@@ -37,19 +88,40 @@ library OMFSettlementLibrary {
         SettlementData memory data;
         data.orderIds = pendingOrders;
         data.updates = new PreparedUpdate[](pendingOrders.length);
-        data.tokenA = listing.tokenA();
-        data.tokenB = listing.tokenB();
-        uint256 price = listing.getPrice(); // Normalized to 18 decimals
+        data.token0 = listing.token0();
+        data.baseToken = listing.baseToken();
 
+        PrepState memory state = PrepState(listing.getPrice(), listing);
+        processPrepBuyOrders(data, pendingOrders, state);
+
+        assembly {
+            let updatesPtr := add(data, 0x40) // Offset to data.updates
+            let count := mload(data)          // data.orderCount at offset 0x00
+            mstore(updatesPtr, count)         // Set length of data.updates
+        }
+        return data;
+    }
+
+    function processPrepBuyOrders(
+        SettlementData memory data,
+        uint256[] memory pendingOrders,
+        PrepState memory state
+    ) internal view {
         for (uint256 i = 0; i < pendingOrders.length; i++) {
-            (, , , , uint256 pending, , uint256 maxPrice, uint256 minPrice, uint8 status) = listing.buyOrders(pendingOrders[i]);
-            if (status == 1 && pending > 0 && price >= minPrice && price <= maxPrice) {
-                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, address(0));
+            (
+                address maker,
+                address recipient,
+                uint256 maxPrice,
+                uint256 minPrice,
+                uint256 pending,
+                uint256 filled,
+                uint8 status
+            ) = state.listing.buyOrders(pendingOrders[i]);
+            if (status == 1 && pending > 0 && state.price >= minPrice && state.price <= maxPrice) {
+                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, recipient);
                 data.orderCount++;
             }
         }
-        assembly { mstore(data.updates, mstore(data.orderIds, data.orderCount)) }
-        return data;
     }
 
     function executeBuyOrders(
@@ -59,29 +131,41 @@ library OMFSettlementLibrary {
         address proxy
     ) external {
         IOMFListing listing = IOMFListing(listingAddress);
-        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](data.orderCount);
-        uint256 totalTokenA;
-        uint256 totalTokenB;
-        uint256 price = listing.getPrice(); // Normalized to 18 decimals
+        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](data.orderCount + 1);
+        ExecutionState memory state = ExecutionState(0, listing.getPrice(), IERC20(data.baseToken));
 
         for (uint256 i = 0; i < data.orderCount; i++) {
             PreparedUpdate memory update = data.updates[i];
-            (, address recipient, , , uint256 pending, , , , ) = listing.buyOrders(update.orderId);
-            uint256 tokenAAmount = pending; // TokenA to spend (baseToken)
-            uint256 tokenBAmount = (tokenAAmount * 1e18) / price; // E1: TokenB = TokenA / price
-            totalTokenA += tokenAAmount;
-            totalTokenB += tokenBAmount;
-            uint256 preBalance = IERC20(data.tokenB).balanceOf(recipient);
-            listing.transact(proxy, data.tokenB, tokenBAmount, recipient);
-            uint256 postBalance = IERC20(data.tokenB).balanceOf(recipient);
-            uint256 actualReceived = postBalance - preBalance;
-            uint256 adjustedValue = (actualReceived * price) / 1e18; // E7: Adjust TokenA spent
-            updates[i] = IOMFListing.UpdateType(
-                1, update.orderId, pending > adjustedValue ? pending - adjustedValue : 0, address(0), recipient, 0, 0
-            );
+            processBuyOrder(listing, updates, i, update, state, proxy);
         }
 
-        if (data.orderCount > 0) listing.update(proxy, updates);
+        if (data.orderCount > 0) {
+            updates[data.orderCount] = IOMFListing.UpdateType(0, 3, state.totalBaseToken, data.baseToken, address(0), 0, 0); // yVolume
+            listing.update(proxy, updates);
+        }
+    }
+
+    function processBuyOrder(
+        IOMFListing listing,
+        IOMFListing.UpdateType[] memory updates,
+        uint256 index,
+        PreparedUpdate memory update,
+        ExecutionState memory state,
+        address proxy
+    ) internal {
+        (, address recipient, , , uint256 pending, , ) = listing.buyOrders(update.orderId);
+        uint256 baseTokenAmount = pending; // baseToken to spend
+        uint256 token0Amount = (baseTokenAmount * 1e18) / state.price; // token0 to receive
+        state.totalBaseToken += baseTokenAmount;
+
+        uint256 preBalance = state.baseToken.balanceOf(recipient);
+        listing.transact(proxy, address(state.baseToken), token0Amount, recipient);
+        uint256 postBalance = state.baseToken.balanceOf(recipient);
+        uint256 actualReceived = postBalance - preBalance;
+        uint256 adjustedValue = (actualReceived * state.price) / 1e18; // Adjust baseToken spent
+        updates[index] = IOMFListing.UpdateType(
+            1, update.orderId, pending > adjustedValue ? pending - adjustedValue : 0, address(0), recipient, 0, 0
+        );
     }
 
     function prepSellOrders(
@@ -95,19 +179,40 @@ library OMFSettlementLibrary {
         SettlementData memory data;
         data.orderIds = pendingOrders;
         data.updates = new PreparedUpdate[](pendingOrders.length);
-        data.tokenA = listing.tokenA();
-        data.tokenB = listing.tokenB();
-        uint256 price = listing.getPrice();
+        data.token0 = listing.token0();
+        data.baseToken = listing.baseToken();
 
+        PrepState memory state = PrepState(listing.getPrice(), listing);
+        processPrepSellOrders(data, pendingOrders, state);
+
+        assembly {
+            let updatesPtr := add(data, 0x40) // Offset to data.updates
+            let count := mload(data)          // data.orderCount at offset 0x00
+            mstore(updatesPtr, count)         // Set length of data.updates
+        }
+        return data;
+    }
+
+    function processPrepSellOrders(
+        SettlementData memory data,
+        uint256[] memory pendingOrders,
+        PrepState memory state
+    ) internal view {
         for (uint256 i = 0; i < pendingOrders.length; i++) {
-            (, , , , uint256 pending, , uint256 maxPrice, uint256 minPrice, uint8 status) = listing.sellOrders(pendingOrders[i]);
-            if (status == 1 && pending > 0 && price >= minPrice && price <= maxPrice) {
-                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, address(0));
+            (
+                address maker,
+                address recipient,
+                uint256 maxPrice,
+                uint256 minPrice,
+                uint256 pending,
+                uint256 filled,
+                uint8 status
+            ) = state.listing.sellOrders(pendingOrders[i]);
+            if (status == 1 && pending > 0 && state.price >= minPrice && state.price <= maxPrice) {
+                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, recipient);
                 data.orderCount++;
             }
         }
-        assembly { mstore(data.updates, mstore(data.orderIds, data.orderCount)) }
-        return data;
     }
 
     function executeSellOrders(
@@ -118,54 +223,39 @@ library OMFSettlementLibrary {
     ) external {
         IOMFListing listing = IOMFListing(listingAddress);
         IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](data.orderCount + 1);
-        uint256 totalTokenA;
-        uint256 totalTokenB;
-        uint256 price = listing.getPrice();
+        ExecutionState memory state = ExecutionState(0, listing.getPrice(), IERC20(data.baseToken));
 
         for (uint256 i = 0; i < data.orderCount; i++) {
             PreparedUpdate memory update = data.updates[i];
-            (, address recipient, , , uint256 pending, , , , ) = listing.sellOrders(update.orderId);
-            uint256 tokenAAmount = pending; // TokenA to send (Token-1)
-            uint256 tokenBAmount = (tokenAAmount * price) / 1e18; // TokenB to receive
-            totalTokenA += tokenAAmount;
-            totalTokenB += tokenBAmount;
-            uint256 preBalance = IERC20(data.tokenB).balanceOf(recipient);
-            listing.transact(proxy, data.tokenB, tokenBAmount, recipient);
-            uint256 postBalance = IERC20(data.tokenB).balanceOf(recipient);
-            uint256 actualReceived = postBalance - preBalance;
-            uint256 adjustedValue = (actualReceived * 1e18) / price; // E7: Adjust TokenA sent
-            updates[i] = IOMFListing.UpdateType(
-                2, update.orderId, pending > adjustedValue ? pending - adjustedValue : 0, address(0), recipient, 0, 0
-            );
+            processSellOrder(listing, updates, i, update, state, proxy);
         }
 
-        updates[data.orderCount] = IOMFListing.UpdateType(0, 0, totalTokenB, data.tokenB, address(0), 0, 0);
-        if (data.orderCount > 0) listing.update(proxy, updates);
+        if (data.orderCount > 0) {
+            updates[data.orderCount] = IOMFListing.UpdateType(0, 1, state.totalBaseToken, data.baseToken, address(0), 0, 0); // yBalance
+            listing.update(proxy, updates);
+        }
     }
-}
 
-interface IOMFListing {
-    struct UpdateType {
-        uint8 updateType;
-        uint256 index;
-        uint256 value;
-        address addr;
-        address recipient;
-        uint256 maxPrice;
-        uint256 minPrice;
+    function processSellOrder(
+        IOMFListing listing,
+        IOMFListing.UpdateType[] memory updates,
+        uint256 index,
+        PreparedUpdate memory update,
+        ExecutionState memory state,
+        address proxy
+    ) internal {
+        (, address recipient, , , uint256 pending, , ) = listing.sellOrders(update.orderId);
+        uint256 token0Amount = pending; // token0 to send
+        uint256 baseTokenAmount = (token0Amount * state.price) / 1e18; // baseToken to receive
+        state.totalBaseToken += baseTokenAmount;
+
+        uint256 preBalance = state.baseToken.balanceOf(recipient);
+        listing.transact(proxy, address(state.baseToken), baseTokenAmount, recipient);
+        uint256 postBalance = state.baseToken.balanceOf(recipient);
+        uint256 actualReceived = postBalance - preBalance;
+        uint256 adjustedValue = (actualReceived * 1e18) / state.price; // Adjust token0 sent
+        updates[index] = IOMFListing.UpdateType(
+            2, update.orderId, pending > adjustedValue ? pending - adjustedValue : 0, address(0), recipient, 0, 0
+        );
     }
-    function tokenA() external view returns (address);
-    function tokenB() external view returns (address);
-    function getPrice() external view returns (uint256);
-    function oracleDecimals() external view returns (uint8);
-    function buyOrders(uint256 orderId) external view returns (
-        address, address, uint256, uint256, uint256, uint256, uint256, uint256, uint8
-    );
-    function sellOrders(uint256 orderId) external view returns (
-        address, address, uint256, uint256, uint256, uint256, uint256, uint256, uint8
-    );
-    function pendingBuyOrdersView() external view returns (uint256[] memory);
-    function pendingSellOrdersView() external view returns (uint256[] memory);
-    function update(address caller, UpdateType[] memory updates) external;
-    function transact(address caller, address token, uint256 amount, address recipient) external;
 }

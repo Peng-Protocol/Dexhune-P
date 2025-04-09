@@ -1,13 +1,43 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.3
+// Version: 0.0.4 (Updated)
 // Changes:
 // - Clarified tokenA as Token-0 (listed token) and baseToken as Token-1 (reference token).
-// - No functional changes needed; comments updated for clarity.
+// - Moved IOMFListingTemplate and IOMFLiquidityTemplate interfaces to top level to fix ParserError (previous revision).
+// - Moved IOMFListingLibrary and IOMFLiquidityLibrary interfaces to top level to fix ParserError (previous revision).
+// - Added IOMFListing interface and updated listToken to use it for liquidityAddresses call (previous revision).
+// - Refactored listToken and prepListing: Moved executeListing into prepListing, use state variable for listingAddress (this revision).
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
+
+interface IOMFListingTemplate {
+    function setRouter(address _routerAddress) external;
+    function setListingId(uint256 _listingId) external;
+    function setLiquidityAddress(address _liquidityAddress) external;
+    function setTokens(address _tokenA, address _tokenB) external;
+    function setOracleDetails(address oracle, uint8 decimals, bytes4 viewFunction) external;
+}
+
+interface IOMFLiquidityTemplate {
+    function setRouter(address _routerAddress) external;
+    function setListingId(uint256 _listingId) external;
+    function setListingAddress(address _listingAddress) external;
+    function setTokens(address _tokenA, address _tokenB) external;
+}
+
+interface IOMFListingLibrary {
+    function deploy(bytes32 salt) external returns (address);
+}
+
+interface IOMFLiquidityLibrary {
+    function deploy(bytes32 salt) external returns (address);
+}
+
+interface IOMFListing {
+    function liquidityAddresses(uint256 listingId) external view returns (address);
+}
 
 contract OMFAgent is Ownable {
     using SafeERC20 for IERC20;
@@ -81,21 +111,6 @@ contract OMFAgent is Ownable {
         uint8 oracleDecimals,
         bytes4 oracleViewFunction
     ) internal {
-        interface IOMFListingTemplate {
-            function setRouter(address _routerAddress) external;
-            function setListingId(uint256 _listingId) external;
-            function setLiquidityAddress(address _liquidityAddress) external;
-            function setTokens(address _tokenA, address _tokenB) external;
-            function setOracleDetails(address oracle, uint8 decimals, bytes4 viewFunction) external;
-        }
-
-        interface IOMFLiquidityTemplate {
-            function setRouter(address _routerAddress) external;
-            function setListingId(uint256 _listingId) external;
-            function setListingAddress(address _listingAddress) external;
-            function setTokens(address _tokenA, address _tokenB) external;
-        }
-
         IOMFListingTemplate(listingAddress).setRouter(routerAddress);
         IOMFListingTemplate(listingAddress).setListingId(listingId);
         IOMFListingTemplate(listingAddress).setLiquidityAddress(liquidityAddress);
@@ -113,7 +128,7 @@ contract OMFAgent is Ownable {
         address oracleAddress,
         uint8 oracleDecimals,
         bytes4 oracleViewFunction
-    ) public view returns (PrepData memory) {
+    ) public returns (address) {
         require(baseToken != address(0), "Base token not set");
         require(tokenA != baseToken, "Identical tokens");
         require(tokenA != address(0), "TokenA cannot be NATIVE");
@@ -129,17 +144,11 @@ contract OMFAgent is Ownable {
         bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, baseToken, listingCount));
         bytes32 liquiditySalt = keccak256(abi.encodePacked(baseToken, tokenA, listingCount));
 
-        return PrepData(tax, listingSalt, liquiditySalt, tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
+        PrepData memory prep = PrepData(tax, listingSalt, liquiditySalt, tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
+        return executeListing(prep);
     }
 
-    function executeListing(PrepData memory prep) external {
-        interface IOMFListingLibrary {
-            function deploy(bytes32 salt) external returns (address);
-        }
-        interface IOMFLiquidityLibrary {
-            function deploy(bytes32 salt) external returns (address);
-        }
-
+    function executeListing(PrepData memory prep) internal returns (address) {
         address listingAddress = IOMFListingLibrary(listingLibraryAddress).deploy(prep.listingSalt);
         address liquidityAddress = IOMFLiquidityLibrary(liquidityLibraryAddress).deploy(prep.liquiditySalt);
 
@@ -165,6 +174,7 @@ contract OMFAgent is Ownable {
 
         emit ListingCreated(prep.tokenA, baseToken, listingAddress, liquidityAddress, listingCount);
         listingCount++;
+        return listingAddress;
     }
 
     function listToken(
@@ -173,9 +183,10 @@ contract OMFAgent is Ownable {
         uint8 oracleDecimals,
         bytes4 oracleViewFunction
     ) external returns (address listingAddress, address liquidityAddress) {
-        PrepData memory prep = prepListing(tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
-        executeListing(prep);
-        return (getListing[tokenA][baseToken], IOMFListingTemplate(getListing[tokenA][baseToken]).liquidityAddresses(0));
+        address deployedListing = prepListing(tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
+        listingAddress = deployedListing;
+        liquidityAddress = IOMFListing(deployedListing).liquidityAddresses(0);
+        return (listingAddress, liquidityAddress);
     }
 
     function allListingsLength() external view returns (uint256) {
