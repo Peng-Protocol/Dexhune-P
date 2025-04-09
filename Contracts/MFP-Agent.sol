@@ -5,6 +5,28 @@ pragma solidity ^0.8.1;
 
 import "./imports/Ownable.sol";
 
+interface IMFPListingTemplate {
+    function setRouter(address _routerAddress) external;
+    function setListingId(uint256 _listingId) external;
+    function setLiquidityAddress(address _liquidityAddress) external;
+    function setTokens(address _tokenA, address _tokenB) external;
+}
+
+interface IMFPLiquidityTemplate {
+    function setRouter(address _routerAddress) external;
+    function setListingId(uint256 _listingId) external;
+    function setListingAddress(address _listingAddress) external;
+    function setTokens(address _tokenA, address _tokenB) external;
+}
+
+interface IMFPListingLibrary {
+    function deploy(bytes32 salt) external returns (address);
+}
+
+interface IMFPLiquidityLibrary {
+    function deploy(bytes32 salt) external returns (address);
+}
+
 contract MFPAgent is Ownable {
     address public routerAddress;
     address public listingLibraryAddress;
@@ -48,21 +70,6 @@ contract MFPAgent is Ownable {
         address tokenB,
         uint256 listingId
     ) internal {
-        // Interface for calling set$ functions on deployed templates
-        interface IMFPListingTemplate {
-            function setRouter(address _routerAddress) external;
-            function setListingId(uint256 _listingId) external;
-            function setLiquidityAddress(address _liquidityAddress) external;
-            function setTokens(address _tokenA, address _tokenB) external;
-        }
-
-        interface IMFPLiquidityTemplate {
-            function setRouter(address _routerAddress) external;
-            function setListingId(uint256 _listingId) external;
-            function setListingAddress(address _listingAddress) external;
-            function setTokens(address _tokenA, address _tokenB) external;
-        }
-
         IMFPListingTemplate(listingAddress).setRouter(routerAddress);
         IMFPListingTemplate(listingAddress).setListingId(listingId);
         IMFPListingTemplate(listingAddress).setLiquidityAddress(liquidityAddress);
@@ -80,15 +87,6 @@ contract MFPAgent is Ownable {
         require(routerAddress != address(0), "Router not set");
         require(listingLibraryAddress != address(0), "Listing library not set");
         require(liquidityLibraryAddress != address(0), "Liquidity library not set");
-
-        // Interface for library deploy functions
-        interface IMFPListingLibrary {
-            function deploy(bytes32 salt) external returns (address);
-        }
-
-        interface IMFPLiquidityLibrary {
-            function deploy(bytes32 salt) external returns (address);
-        }
 
         bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, tokenB, listingCount));
         bytes32 liquiditySalt = keccak256(abi.encodePacked(tokenB, tokenA, listingCount));
@@ -116,8 +114,43 @@ contract MFPAgent is Ownable {
 
     function listNative(address token, bool isA) external returns (address listingAddress, address liquidityAddress) {
         address nativeAddress = address(0);
-        (address tokenA, address tokenB) = isA ? (nativeAddress, token) : (token, nativeAddress);
-        (listingAddress, liquidityAddress) = listToken(tokenA, tokenB);
+        address tokenA;
+        address tokenB;
+        if (isA) {
+            tokenA = nativeAddress;
+            tokenB = token;
+        } else {
+            tokenA = token;
+            tokenB = nativeAddress;
+        }
+
+        require(tokenA != tokenB, "Identical tokens");
+        require(getListing[tokenA][tokenB] == address(0), "Pair already listed");
+        require(routerAddress != address(0), "Router not set");
+        require(listingLibraryAddress != address(0), "Listing library not set");
+        require(liquidityLibraryAddress != address(0), "Liquidity library not set");
+
+        bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, tokenB, listingCount));
+        bytes32 liquiditySalt = keccak256(abi.encodePacked(tokenB, tokenA, listingCount));
+
+        listingAddress = IMFPListingLibrary(listingLibraryAddress).deploy(listingSalt);
+        liquidityAddress = IMFPLiquidityLibrary(liquidityLibraryAddress).deploy(liquiditySalt);
+
+        _initializePair(listingAddress, liquidityAddress, tokenA, tokenB, listingCount);
+
+        getListing[tokenA][tokenB] = listingAddress;
+        allListings.push(listingAddress);
+
+        if (!tokenExists(tokenA)) {
+            allListedTokens.push(tokenA);
+        }
+        if (!tokenExists(tokenB)) {
+            allListedTokens.push(tokenB);
+        }
+
+        emit ListingCreated(tokenA, tokenB, listingAddress, liquidityAddress, listingCount);
+        listingCount++;
+
         return (listingAddress, liquidityAddress);
     }
 

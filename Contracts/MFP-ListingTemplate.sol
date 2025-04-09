@@ -1,24 +1,25 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.12 (Updated)
+// Version: 0.0.13 (Updated)
 // Changes:
-// - Removed timestamp and blockNumber from BuyOrder and SellOrder structs (from v0.0.11).
-// - Added timestamp field to HistoricalData struct for historical volume tracking (from v0.0.11).
-// - Updated update function to include block.timestamp in historical updates (type 3) (from v0.0.11).
-// - Added getHistoricalDataByNearestTimestamp view function to return HistoricalData entry with closest timestamp (new in v0.0.12).
-// - Side effects: Interface definitions in other contracts (e.g., IMFPListing) 
-//   to match the updated BuyOrder and SellOrder structs; no other functional impacts detected.
+// - Added mapping(uint256 => uint256) nextOrderId to track incremental order IDs per listing (new in v0.0.13).
+// - Added getNextOrderId view function to return and increment nextOrderId (new in v0.0.13).
+// - Incremented nextOrderId in update function for new buy/sell orders (new in v0.0.13).
+// - Added ReentrancyGuard import and inheritance; applied nonReentrant to transact and update (new in v0.0.13).
+// - Side effects: Order IDs now sequential instead of hashed; interfaces (e.g., IMFPOrderLibrary) must pass orderId explicitly.
 
 import "./imports/SafeERC20.sol";
+import "./imports/ReentrancyGuard.sol";
 
-contract MFPListingTemplate {
+contract MFPListingTemplate is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     address public routerAddress;
     address public tokenA;
     address public tokenB;
     uint256 public listingId;
+    mapping(uint256 => uint256) public nextOrderId; // Tracks next order ID per listing
 
     struct UpdateType {
         uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
@@ -63,7 +64,7 @@ contract MFPListingTemplate {
         uint256 yBalance;
         uint256 xVolume;
         uint256 yVolume;
-        uint256 timestamp; // Added for historical volume tracking
+        uint256 timestamp;
     }
 
     mapping(uint256 => VolumeBalance) public volumeBalances;
@@ -78,6 +79,29 @@ contract MFPListingTemplate {
 
     event OrderUpdated(uint256 listingId, uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 listingId, uint256 xBalance, uint256 yBalance);
+
+    // Helper functions
+    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount * 10 ** (uint256(18) - uint256(decimals));
+        else return amount / 10 ** (uint256(decimals) - uint256(18));
+    }
+
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10 ** (uint256(18) - uint256(decimals));
+        else return amount * 10 ** (uint256(decimals) - uint256(18));
+    }
+
+    function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
+        for (uint256 i = 0; i < orders.length; i++) {
+            if (orders[i] == orderId) {
+                orders[i] = orders[orders.length - 1];
+                orders.pop();
+                break;
+            }
+        }
+    }
 
     // One-time setup functions
     function setRouter(address _routerAddress) external {
@@ -105,17 +129,18 @@ contract MFPListingTemplate {
         tokenB = _tokenB;
     }
 
-    function update(address caller, UpdateType[] memory updates) external {
+    // Core functions
+    function update(address caller, UpdateType[] memory updates) external nonReentrant {
         require(caller == routerAddress, "Router only");
         VolumeBalance storage balances = volumeBalances[listingId];
 
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 0) { // Balance update
-                if (u.index == 0) balances.xBalance = u.value;       // Set xBalance
-                else if (u.index == 1) balances.yBalance = u.value;  // Set yBalance
-                else if (u.index == 2) balances.xVolume += u.value;  // Increase xVolume
-                else if (u.index == 3) balances.yVolume += u.value;  // Increase yVolume
+                if (u.index == 0) balances.xBalance = u.value;
+                else if (u.index == 1) balances.yBalance = u.value;
+                else if (u.index == 2) balances.xVolume += u.value;
+                else if (u.index == 3) balances.yVolume += u.value;
             } else if (u.updateType == 1) { // Buy order update
                 BuyOrder storage order = buyOrders[u.index];
                 if (order.makerAddress == address(0)) { // New order
@@ -127,8 +152,9 @@ contract MFPListingTemplate {
                     order.status = 1;
                     pendingBuyOrders[listingId].push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
-                    balances.yBalance += u.value; // Deposit increases yBalance
-                    balances.yVolume += u.value;  // Track order volume
+                    balances.yBalance += u.value;
+                    balances.yVolume += u.value;
+                    nextOrderId[listingId] = u.index + 1; // Increment for next order
                     emit OrderUpdated(listingId, u.index, true, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
@@ -139,7 +165,7 @@ contract MFPListingTemplate {
                     require(order.pending >= u.value, "Insufficient pending");
                     order.pending -= u.value;
                     order.filled += u.value;
-                    balances.xBalance -= u.value; // Reduce xBalance on fill
+                    balances.xBalance -= u.value;
                     order.status = order.pending == 0 ? 3 : 2;
                     if (order.pending == 0) {
                         removePendingOrder(pendingBuyOrders[listingId], u.index);
@@ -158,8 +184,9 @@ contract MFPListingTemplate {
                     order.status = 1;
                     pendingSellOrders[listingId].push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
-                    balances.xBalance += u.value; // Deposit increases xBalance
-                    balances.xVolume += u.value;  // Track order volume
+                    balances.xBalance += u.value;
+                    balances.xVolume += u.value;
+                    nextOrderId[listingId] = u.index + 1; // Increment for next order
                     emit OrderUpdated(listingId, u.index, false, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
@@ -170,7 +197,7 @@ contract MFPListingTemplate {
                     require(order.pending >= u.value, "Insufficient pending");
                     order.pending -= u.value;
                     order.filled += u.value;
-                    balances.yBalance -= u.value; // Reduce yBalance on fill
+                    balances.yBalance -= u.value;
                     order.status = order.pending == 0 ? 3 : 2;
                     if (order.pending == 0) {
                         removePendingOrder(pendingSellOrders[listingId], u.index);
@@ -180,10 +207,10 @@ contract MFPListingTemplate {
                 }
             } else if (u.updateType == 3) { // Historical data
                 historicalData[listingId].push(HistoricalData(
-                    u.value, // price
-                    u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1), // xBalance, yBalance
-                    u.minPrice >> 128, u.minPrice & ((1 << 128) - 1), // xVolume, yVolume
-                    block.timestamp // Added timestamp for historical volume
+                    u.value,
+                    u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1),
+                    u.minPrice >> 128, u.minPrice & ((1 << 128) - 1),
+                    block.timestamp
                 ));
             }
         }
@@ -194,7 +221,7 @@ contract MFPListingTemplate {
         emit BalancesUpdated(listingId, balances.xBalance, balances.yBalance);
     }
 
-    function transact(address caller, address token, uint256 amount, address recipient) external {
+    function transact(address caller, address token, uint256 amount, address recipient) external nonReentrant {
         require(caller == routerAddress, "Router only");
         VolumeBalance storage balances = volumeBalances[listingId];
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
@@ -229,29 +256,11 @@ contract MFPListingTemplate {
         emit BalancesUpdated(listingId, balances.xBalance, balances.yBalance);
     }
 
-    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount * 10**(18 - decimals);
-        else return amount / 10**(decimals - 18);
+    // View functions
+    function getNextOrderId(uint256 _listingId) external view returns (uint256) {
+        return nextOrderId[_listingId];
     }
 
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
-    }
-
-    function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
-        for (uint256 i = 0; i < orders.length; i++) {
-            if (orders[i] == orderId) {
-                orders[i] = orders[orders.length - 1];
-                orders.pop();
-                break;
-            }
-        }
-    }
-
-    // View functions (renamed to avoid overlap)
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
         VolumeBalance memory bal = volumeBalances[listingId];
         return (bal.xBalance, bal.yBalance, bal.xVolume, bal.yVolume);
