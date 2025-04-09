@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.13
+// Version: 0.0.15 (Updated)
+// Changes:
+// - Added ReentrancyGuard import and inheritance (new in v0.0.15).
+// - Added nonReentrant modifier to transact, deposit, xExecuteOut, yExecuteOut, and claimFees (new in v0.0.15).
+// - Side effects: Prevents reentrancy attacks during token/ETH transfers; no other logic changes.
 
 import "./imports/SafeERC20.sol";
-import "./MFP-LiquidLibrary.sol"; // Import to use PreparedWithdrawal
+import "./imports/ReentrancyGuard.sol";
 
-contract MFPLiquidityTemplate {
+interface IMFPListing {
+    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
+    function prices(uint256 listingId) external view returns (uint256);
+}
+
+contract MFPLiquidityTemplate is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     address public routerAddress;
@@ -38,6 +47,11 @@ contract MFPLiquidityTemplate {
         address recipient;// not used
     }
 
+    struct PreparedWithdrawal {
+        uint256 amountA;
+        uint256 amountB;
+    }
+
     mapping(uint256 => LiquidityDetails) public liquidityDetails;
     mapping(uint256 => mapping(uint256 => Slot)) public xLiquiditySlots;
     mapping(uint256 => mapping(uint256 => Slot)) public yLiquiditySlots;
@@ -48,6 +62,35 @@ contract MFPLiquidityTemplate {
     event LiquidityUpdated(uint256 listingId, uint256 xLiquid, uint256 yLiquid);
     event FeesUpdated(uint256 listingId, uint256 xFees, uint256 yFees);
     event FeesClaimed(uint256 listingId, uint256 liquidityIndex, uint256 xFees, uint256 yFees);
+
+    // Helper functions
+    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount * 10**(18 - decimals);
+        else return amount / 10**(decimals - 18);
+    }
+
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10**(18 - decimals);
+        else return amount * 10**(decimals - 18);
+    }
+
+    function _claimFeeShare(
+        uint256 volume,
+        uint256 dVolume,
+        uint256 liquid,
+        uint256 allocation,
+        uint256 fees
+    ) private pure returns (uint256 feeShare, UpdateType[] memory updates) {
+        updates = new UpdateType[](2);
+        uint256 contributedVolume = volume > dVolume ? volume - dVolume : 0;
+        uint256 feesAccrued = (contributedVolume * 5) / 10000;
+        uint256 liquidityContribution = liquid > 0 ? (allocation * 1e18) / liquid : 0;
+        feeShare = (feesAccrued * liquidityContribution) / 1e18;
+        feeShare = feeShare > fees ? fees : feeShare;
+        return (feeShare, updates);
+    }
 
     // One-time setup functions
     function setRouter(address _routerAddress) external {
@@ -75,6 +118,7 @@ contract MFPLiquidityTemplate {
         tokenB = _tokenB;
     }
 
+    // Core functions
     function update(address caller, UpdateType[] memory updates) external {
         require(caller == routerAddress, "Router only");
         LiquidityDetails storage details = liquidityDetails[listingId];
@@ -143,7 +187,7 @@ contract MFPLiquidityTemplate {
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
-    function transact(address caller, address token, uint256 amount, address recipient) external {
+    function transact(address caller, address token, uint256 amount, address recipient) external nonReentrant {
         require(caller == routerAddress, "Router only");
         LiquidityDetails storage details = liquidityDetails[listingId];
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
@@ -173,7 +217,7 @@ contract MFPLiquidityTemplate {
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
-    function deposit(address caller, address token, uint256 amount) external payable {
+    function deposit(address caller, address token, uint256 amount) external payable nonReentrant {
         require(caller == routerAddress, "Router only");
         require(token == tokenA || token == tokenB, "Invalid token");
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
@@ -193,7 +237,7 @@ contract MFPLiquidityTemplate {
         this.update(caller, updates);
     }
 
-    function xPrepOut(address caller, uint256 amount, uint256 index) external returns (MFPLiquidLibrary.PreparedWithdrawal memory) {
+    function xPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory) {
         require(caller == routerAddress, "Router only");
         LiquidityDetails storage details = liquidityDetails[listingId];
         Slot storage slot = xLiquiditySlots[listingId][index];
@@ -206,14 +250,14 @@ contract MFPLiquidityTemplate {
         if (deficit > 0) {
             uint256 currentPrice = IMFPListing(listingAddress).prices(0);
             require(currentPrice > 0, "Price cannot be zero");
-            uint256 compensation = (deficit * 1e18) / currentPrice; // Normalize to 18 decimals for division
+            uint256 compensation = (deficit * 1e18) / currentPrice;
             withdrawAmountB = compensation > details.yLiquid ? details.yLiquid : compensation;
         }
 
-        return MFPLiquidLibrary.PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
+        return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
     }
 
-    function yPrepOut(address caller, uint256 amount, uint256 index) external returns (MFPLiquidLibrary.PreparedWithdrawal memory) {
+    function yPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory) {
         require(caller == routerAddress, "Router only");
         LiquidityDetails storage details = liquidityDetails[listingId];
         Slot storage slot = yLiquiditySlots[listingId][index];
@@ -226,24 +270,22 @@ contract MFPLiquidityTemplate {
         if (deficit > 0) {
             uint256 currentPrice = IMFPListing(listingAddress).prices(0);
             require(currentPrice > 0, "Price cannot be zero");
-            uint256 compensation = (deficit * currentPrice) / 1e18; // Normalize to 18 decimals for multiplication
+            uint256 compensation = (deficit * currentPrice) / 1e18;
             withdrawAmountA = compensation > details.xLiquid ? details.xLiquid : compensation;
         }
 
-        return MFPLiquidLibrary.PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
+        return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
     }
 
-    function xExecuteOut(address caller, uint256 index, MFPLiquidLibrary.PreparedWithdrawal memory withdrawal) external {
+    function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external nonReentrant {
         require(caller == routerAddress, "Router only");
         Slot storage slot = xLiquiditySlots[listingId][index];
         LiquidityDetails storage details = liquidityDetails[listingId];
 
-        // Update slot allocation and liquidity
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(2, index, slot.allocation - withdrawal.amountA, slot.depositor, address(0));
         this.update(caller, updates);
 
-        // Transfer tokenA (main) and tokenB (compensation)
         if (withdrawal.amountA > 0) {
             uint8 decimalsA = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
             this.transact(caller, tokenA, denormalize(withdrawal.amountA, decimalsA), slot.depositor);
@@ -254,17 +296,15 @@ contract MFPLiquidityTemplate {
         }
     }
 
-    function yExecuteOut(address caller, uint256 index, MFPLiquidLibrary.PreparedWithdrawal memory withdrawal) external {
+    function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external nonReentrant {
         require(caller == routerAddress, "Router only");
         Slot storage slot = yLiquiditySlots[listingId][index];
         LiquidityDetails storage details = liquidityDetails[listingId];
 
-        // Update slot allocation and liquidity
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(3, index, slot.allocation - withdrawal.amountB, slot.depositor, address(0));
         this.update(caller, updates);
 
-        // Transfer tokenB (main) and tokenA (compensation)
         if (withdrawal.amountB > 0) {
             uint8 decimalsB = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
             this.transact(caller, tokenB, denormalize(withdrawal.amountB, decimalsB), slot.depositor);
@@ -275,7 +315,7 @@ contract MFPLiquidityTemplate {
         }
     }
 
-    function claimFees(address caller, uint256 liquidityIndex, bool isX, uint256 volume) external {
+    function claimFees(address caller, uint256 liquidityIndex, bool isX, uint256 volume) external nonReentrant {
         require(caller == routerAddress, "Router only");
         LiquidityDetails storage details = liquidityDetails[listingId];
         Slot storage slot = isX ? xLiquiditySlots[listingId][liquidityIndex] : yLiquiditySlots[listingId][liquidityIndex];
@@ -325,34 +365,6 @@ contract MFPLiquidityTemplate {
         updates[0] = UpdateType(2, liquidityIndex, xSlot.allocation, newDepositor, address(0));
         updates[1] = UpdateType(3, liquidityIndex, xSlot.allocation, newDepositor, address(0));
         this.update(routerAddress, updates);
-    }
-
-    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount * 10**(18 - decimals);
-        else return amount / 10**(decimals - 18);
-    }
-
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
-    }
-
-    function _claimFeeShare(
-        uint256 volume,
-        uint256 dVolume,
-        uint256 liquid,
-        uint256 allocation,
-        uint256 fees
-    ) private pure returns (uint256 feeShare, UpdateType[] memory updates) {
-        updates = new UpdateType[](2);
-        uint256 contributedVolume = volume > dVolume ? volume - dVolume : 0;
-        uint256 feesAccrued = (contributedVolume * 5) / 10000;
-        uint256 liquidityContribution = liquid > 0 ? (allocation * 1e18) / liquid : 0;
-        feeShare = (feesAccrued * liquidityContribution) / 1e18;
-        feeShare = feeShare > fees ? fees : feeShare;
-        return (feeShare, updates);
     }
 
     // View functions

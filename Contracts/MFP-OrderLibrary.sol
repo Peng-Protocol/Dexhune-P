@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.5 (Updated)
+// Version: 0.0.6 (Updated)
 // Changes:
-// - Removed timestamp from IMFPListing.UpdateType struct, as MFPListingTemplate handles it automatically.
-// - Updated executeBuyOrder and executeSellOrder to exclude timestamp in historical updates (type 3).
-// - Side effects: Simplified calldata; aligns with MFPListingTemplate’s self-contained timestamp logic.
+// - Removed keccak256 orderId generation in prepBuyOrder and prepSellOrder; now accepts orderId as an argument (new in v0.0.6).
+// - Updated prepBuyOrder and prepSellOrder to take orderId from caller (router), aligning with MFPListingTemplate’s nextOrderId (new in v0.0.6).
+// - Side effects: Requires MFPProxyRouter to pass orderId; no reentrancy guard added here as it’s handled upstream in MFPListingTemplate.
 
 import "./imports/SafeERC20.sol";
 
@@ -114,7 +114,8 @@ library MFPOrderLibrary {
         address listingAddress,
         IMFPOrderLibrary.BuyOrderDetails memory details,
         address listingAgent,
-        address proxy
+        address proxy,
+        uint256 orderId // Added orderId parameter
     ) external view returns (OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
@@ -123,7 +124,7 @@ library MFPOrderLibrary {
         PrepData memory prepData;
         prepData.token = listing.tokenA();
         (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
-        prepData.orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, details.amount)));
+        prepData.orderId = orderId; // Use passed orderId instead of hashing
         prepData.updates = _createOrderUpdate(
             1, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
@@ -135,7 +136,8 @@ library MFPOrderLibrary {
         address listingAddress,
         IMFPOrderLibrary.SellOrderDetails memory details,
         address listingAgent,
-        address proxy
+        address proxy,
+        uint256 orderId // Added orderId parameter
     ) external view returns (OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
@@ -144,7 +146,7 @@ library MFPOrderLibrary {
         PrepData memory prepData;
         prepData.token = listing.tokenB();
         (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
-        prepData.orderId = uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, details.amount)));
+        prepData.orderId = orderId; // Use passed orderId instead of hashing
         prepData.updates = _createOrderUpdate(
             2, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
@@ -351,14 +353,16 @@ interface IMFPOrderLibrary {
         address listingAddress,
         BuyOrderDetails memory details,
         address listingAgent,
-        address proxy
+        address proxy,
+        uint256 orderId // Added orderId parameter
     ) external view returns (OrderPrep memory);
 
     function prepSellOrder(
         address listingAddress,
         SellOrderDetails memory details,
         address listingAgent,
-        address proxy
+        address proxy,
+        uint256 orderId // Added orderId parameter
     ) external view returns (OrderPrep memory);
 
     function executeBuyOrder(

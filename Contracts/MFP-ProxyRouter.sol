@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.13 (Updated)
+// Version: 0.0.14 (Updated)
 // Changes:
-// - Removed emergencyWithdraw and settlementAgent; no fund recovery needed in router.
-// - Added Ownable import from "./imports/Ownable.sol"; inherited Ownable, setters restricted to onlyOwner, initial owner is deployer.
-// - Removed imports of MFPOrderLibrary, MFPLiquidLibrary, and MFPSettlementLibrary; using external addresses set post-deployment.
-// - Moved interfaces (IMFP, IMFPListing, etc.) outside contract to fix parser error.
-// - Ensured IMFPListing.UpdateType excludes timestamp, aligning with MFPListingTemplate.sol v0.0.11's automatic handling.
-// - Updated IMFPSettlementLibrary to match MFPSettlementLibrary.sol v0.0.24 (prep/execute functions).
-// - Added safety checks for library and listingAgent addresses in all functions.
-// - Side effects: Fully configurable post-deployment; reduced bytecode size; compatible with MFPAgent.sol v0.0.11 and updated libraries.
+// - Added getNextOrderId call to MFPListingTemplate in buyOrder and sellOrder to fetch incremental orderId (new in v0.0.14).
+// - Passed orderId to prepBuyOrder and prepSellOrder in MFPOrderLibrary (new in v0.0.14).
+// - Side effects: Aligns with MFPListingTemplate’s nextOrderId and MFPOrderLibrary’s updated prep functions; no reentrancy guard added here as it’s handled in MFPListingTemplate.
 
 import "./imports/SafeERC20.sol";
 import "./imports/Ownable.sol";
@@ -48,6 +43,7 @@ interface IMFPListing {
     function pendingSellOrders(uint256 listingId) external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
     function transact(address caller, address token, uint256 amount, address recipient) external;
+    function getNextOrderId(uint256 listingId) external view returns (uint256); // Added for orderId fetch
 }
 
 interface IMFPOrderLibrary {
@@ -71,8 +67,8 @@ interface IMFPOrderLibrary {
         address token;
         address recipient;
     }
-    function prepBuyOrder(address listingAddress, BuyOrderDetails memory details, address listingAgent, address proxy) external view returns (OrderPrep memory);
-    function prepSellOrder(address listingAddress, SellOrderDetails memory details, address listingAgent, address proxy) external view returns (OrderPrep memory);
+    function prepBuyOrder(address listingAddress, BuyOrderDetails memory details, address listingAgent, address proxy, uint256 orderId) external view returns (OrderPrep memory);
+    function prepSellOrder(address listingAddress, SellOrderDetails memory details, address listingAgent, address proxy, uint256 orderId) external view returns (OrderPrep memory);
     function executeBuyOrder(address listingAddress, OrderPrep memory prep, address listingAgent, address proxy) external;
     function executeSellOrder(address listingAddress, OrderPrep memory prep, address listingAgent, address proxy) external;
     function clearSingleOrder(address listingAddress, uint256 orderId, bool isBuy, address listingAgent, address proxy) external;
@@ -148,14 +144,16 @@ contract MFPProxyRouter is Ownable {
     function buyOrder(address listingAddress, IMFPOrderLibrary.BuyOrderDetails memory details) external payable {
         require(orderLibrary != address(0), "Order library not set");
         require(listingAgent != address(0), "Listing agent not set");
-        IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepBuyOrder(listingAddress, details, listingAgent, address(this));
+        uint256 orderId = IMFPListing(listingAddress).getNextOrderId(0); // Fetch next orderId
+        IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepBuyOrder(listingAddress, details, listingAgent, address(this), orderId);
         IMFPOrderLibrary(orderLibrary).executeBuyOrder(listingAddress, prep, listingAgent, address(this));
     }
 
     function sellOrder(address listingAddress, IMFPOrderLibrary.SellOrderDetails memory details) external payable {
         require(orderLibrary != address(0), "Order library not set");
         require(listingAgent != address(0), "Listing agent not set");
-        IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepSellOrder(listingAddress, details, listingAgent, address(this));
+        uint256 orderId = IMFPListing(listingAddress).getNextOrderId(0); // Fetch next orderId
+        IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepSellOrder(listingAddress, details, listingAgent, address(this), orderId);
         IMFPOrderLibrary(orderLibrary).executeSellOrder(listingAddress, prep, listingAgent, address(this));
     }
 
