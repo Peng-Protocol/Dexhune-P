@@ -8,12 +8,12 @@ import "./imports/ReentrancyGuard.sol";
 import "./imports/SafeERC20.sol";
 
 interface IMFPRouter {
-    function createBuyOrder(address listingAddress, BuyOrderDetails memory details) external payable;
-    function createSellOrder(address listingAddress, SellOrderDetails memory details) external payable;
-    function settleBuyOrders(address listingAddress) external;
-    function settleSellOrders(address listingAddress) external;
-    function settleBuyLiquid(address listingAddress) external;
-    function settleSellLiquid(address listingAddress) external;
+    function buyOrder(address listingAddress, BuyOrderDetails memory details) external payable;
+    function sellOrder(address listingAddress, SellOrderDetails memory details) external payable;
+    function settleBuy(address listingAddress) external;
+    function settleSell(address listingAddress) external;
+    function buyLiquid(address listingAddress) external;
+    function sellLiquid(address listingAddress) external;
     function clearSingleOrder(address listingAddress, uint256 orderId, bool isBuy) external;
 
     struct BuyOrderDetails {
@@ -36,13 +36,16 @@ interface IMFPListing {
     function tokenB() external view returns (address);
     function makerPendingOrders(address maker) external view returns (uint256[] memory);
     function buyOrders(uint256 orderId) external view returns (
-        address, address, uint256, uint256, uint256, uint256, uint256, uint256, uint8
+        address maker, address recipient, uint256 maxPrice, uint256 minPrice,
+        uint256 pending, uint256 filled, uint8 status
     );
     function sellOrders(uint256 orderId) external view returns (
-        address, address, uint256, uint256, uint256, uint256, uint256, uint256, uint8
+        address maker, address recipient, uint256 maxPrice, uint256 minPrice,
+        uint256 pending, uint256 filled, uint8 status
     );
     function prices(uint256 listingId) external view returns (uint256);
-    function transact(uint256 listingId, address tokenAddress, uint256 amount, address recipient) external;
+    function transact(address caller, address tokenAddress, uint256 amount, address recipient) external;
+    function getNextOrderId(uint256 listingId) external view returns (uint256);
 }
 
 contract Multihopper is Ownable, ReentrancyGuard {
@@ -129,8 +132,8 @@ contract Multihopper is Ownable, ReentrancyGuard {
     function denormalizeForToken(uint256 amount, address token) internal view returns (uint256) {
         uint8 decimals = getTokenDecimals(token);
         if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
+        else if (decimals < 18) return amount / 10**(18 - uint8(decimals));
+        else return amount * 10**(uint8(decimals) - 18);
     }
 
     function computeRoute(address[] memory listingAddresses, address startToken, address endToken)
@@ -176,9 +179,9 @@ contract Multihopper is Ownable, ReentrancyGuard {
         internal view returns (uint256 pending, uint256 filled, uint8 status)
     {
         if (isBuy) {
-            (, , , , pending, filled, , , status) = IMFPListing(listing).buyOrders(orderId);
+            (, , , , pending, filled, status) = IMFPListing(listing).buyOrders(orderId);
         } else {
-            (, , , , pending, filled, , , status) = IMFPListing(listing).sellOrders(orderId);
+            (, , , , pending, filled, status) = IMFPListing(listing).sellOrders(orderId);
         }
     }
 
@@ -189,19 +192,18 @@ contract Multihopper is Ownable, ReentrancyGuard {
         bytes memory data;
         if (isBuy) {
             data = settleType == 0
-                ? abi.encodeWithSelector(router.settleBuyOrders.selector, listing)
-                : abi.encodeWithSelector(router.settleBuyLiquid.selector, listing);
+                ? abi.encodeWithSelector(router.settleBuy.selector, listing)
+                : abi.encodeWithSelector(router.buyLiquid.selector, listing);
         } else {
             data = settleType == 0
-                ? abi.encodeWithSelector(router.settleSellOrders.selector, listing)
-                : abi.encodeWithSelector(router.settleSellLiquid.selector, listing);
+                ? abi.encodeWithSelector(router.settleSell.selector, listing)
+                : abi.encodeWithSelector(router.sellLiquid.selector, listing);
         }
         (success, ) = address(router).call(data);
     }
 
     function setRouter(address _routerAddress) external onlyOwner {
         require(_routerAddress != address(0), "Invalid router address");
-        require(routerAddress == address(0), "Router already set");
         routerAddress = _routerAddress;
     }
 
@@ -232,31 +234,32 @@ contract Multihopper is Ownable, ReentrancyGuard {
         uint8 settleType
     ) internal returns (uint256 orderId, bool success, uint256 pending, uint256 filled, uint8 status) {
         IMFPListing listingContract = IMFPListing(execData.listing);
+        orderId = listingContract.getNextOrderId(0); // Fetch before order creation
         if (execData.isBuy) {
             IMFPRouter.BuyOrderDetails memory details = IMFPRouter.BuyOrderDetails(
                 execData.recipient, denormalizeForToken(execData.principal, execData.currentToken), execData.priceLimit, 0
             );
             if (execData.currentToken == address(0)) {
-                router.createBuyOrder{value: execData.principal}(execData.listing, details);
+                router.buyOrder{value: execData.principal}(execData.listing, details);
             } else {
                 IERC20(execData.currentToken).safeTransferFrom(sender, address(this), execData.principal);
                 IERC20(execData.currentToken).safeApprove(address(router), execData.principal);
-                router.createBuyOrder(execData.listing, details);
+                router.buyOrder(execData.listing, details);
             }
         } else {
             IMFPRouter.SellOrderDetails memory details = IMFPRouter.SellOrderDetails(
                 execData.recipient, denormalizeForToken(execData.principal, execData.currentToken), 0, execData.priceLimit
             );
             if (execData.currentToken == address(0)) {
-                router.createSellOrder{value: execData.principal}(execData.listing, details);
+                router.sellOrder{value: execData.principal}(execData.listing, details);
             } else {
                 IERC20(execData.currentToken).safeTransferFrom(sender, address(this), execData.principal);
                 IERC20(execData.currentToken).safeApprove(address(router), execData.principal);
-                router.createSellOrder(execData.listing, details);
+                router.sellOrder(execData.listing, details);
             }
         }
         uint256[] memory pendingOrders = listingContract.makerPendingOrders(execData.isBuy ? execData.recipient : sender);
-        orderId = pendingOrders[pendingOrders.length - 1];
+        orderId = pendingOrders[pendingOrders.length - 1]; // Confirm orderId after creation
         success = safeSettle(execData.listing, orderId, execData.isBuy, settleType);
         (pending, filled, status) = checkOrderStatus(execData.listing, orderId, execData.isBuy);
     }
@@ -286,7 +289,7 @@ contract Multihopper is Ownable, ReentrancyGuard {
                 hopID[prepData.hopId] = StalledHop({
                     stage: uint8(i),
                     currentListing: execData.listing,
-                    orderID: orderId,
+                    orderID: orderId, // Store confirmed orderId
                     minPrice: execData.isBuy ? 0 : execData.priceLimit,
                     maxPrice: execData.isBuy ? execData.priceLimit : 0,
                     hopMaker: msg.sender,
@@ -354,19 +357,20 @@ contract Multihopper is Ownable, ReentrancyGuard {
         address startToken
     ) internal returns (uint256 orderId, bool success, uint256 pending, uint256 filled, uint8 status) {
         IMFPListing listingContract = IMFPListing(execData.listing);
+        orderId = listingContract.getNextOrderId(0); // Fetch before order creation
         if (execData.isBuy) {
             IMFPRouter.BuyOrderDetails memory details = IMFPRouter.BuyOrderDetails(
                 execData.recipient, denormalizeForToken(execData.principal, startToken), execData.priceLimit, 0
             );
-            router.createBuyOrder(execData.listing, details);
+            router.buyOrder(execData.listing, details);
         } else {
             IMFPRouter.SellOrderDetails memory details = IMFPRouter.SellOrderDetails(
                 execData.recipient, denormalizeForToken(execData.principal, startToken), 0, execData.priceLimit
             );
-            router.createSellOrder(execData.listing, details);
+            router.sellOrder(execData.listing, details);
         }
         uint256[] memory pendingOrders = listingContract.makerPendingOrders(execData.recipient);
-        orderId = pendingOrders[pendingOrders.length - 1];
+        orderId = pendingOrders[pendingOrders.length - 1]; // Confirm orderId after creation
         success = safeSettle(execData.listing, orderId, execData.isBuy, execData.settleType);
         (pending, filled, status) = checkOrderStatus(execData.listing, orderId, execData.isBuy);
     }
@@ -409,7 +413,7 @@ contract Multihopper is Ownable, ReentrancyGuard {
 
             if (pending > 0 || !success) {
                 hop.currentListing = execData.listing;
-                hop.orderID = orderId;
+                hop.orderID = orderId; // Store confirmed orderId for new stalled order
                 hop.stage = uint8(nextStage);
                 hop.principalAmount = filled;
                 address[] memory newRemaining = new address[](hop.remainingListings.length - 1);
@@ -454,12 +458,12 @@ contract Multihopper is Ownable, ReentrancyGuard {
         if (filled > 0) {
             address targetToken = isBuy ? listing.tokenA() : listing.tokenB();
             uint256 rawFilled = denormalizeForToken(filled, targetToken);
-            listing.transact(0, targetToken, rawFilled, msg.sender);
+            listing.transact(msg.sender, targetToken, rawFilled, msg.sender);
         }
         if (pending > 0) {
             address principalToken = isBuy ? listing.tokenB() : listing.tokenA();
             uint256 rawPending = denormalizeForToken(pending, principalToken);
-            listing.transact(0, principalToken, rawPending, msg.sender);
+            listing.transact(msg.sender, principalToken, rawPending, msg.sender);
         }
 
         hop.hopStatus = 2;
