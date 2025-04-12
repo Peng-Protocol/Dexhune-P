@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.13 (Updated)
+// Version: 0.0.14 (Updated)
 // Changes:
-// - Removed timestamp from IMFPListing.UpdateType struct, as MFPListingTemplate handles it automatically.
-// - Updated executeBuyLiquid and executeSellLiquid to exclude timestamp in historical updates (type 3).
-// - Side effects: Simplified calldata; aligns with MFPListingTemplate’s self-contained timestamp logic.
+// - Added getListingIdFromLiquidity to fetch listingId from IMFPLiquidity (new in v0.0.14).
+// - Updated prepBuyLiquid, prepSellLiquid to use listing.getListingId() instead of 0 for prices, volumeBalances (new in v0.0.14).
+// - Updated executeBuyLiquid, executeSellLiquid to fetch listingId for volumeBalances (new in v0.0.14).
+// - Modified xClaimFees, yClaimFees to accept listingAddress, fetch listingId from IMFPLiquidity, validate listingAddress (new in v0.0.14).
+// - Updated IMFPListing interface: added getListingId (new in v0.0.14).
+// - Updated IMFPLiquidity interface: claimFees accepts listingAddress; added getListingId (new in v0.0.14).
+// - Side effects: Ensures correct listingId usage; aligns with MFPLiquidityTemplate’s claimFees; prevents mismatches.
 
 import "./imports/SafeERC20.sol";
 
@@ -51,6 +55,7 @@ interface IMFPListing {
     function pendingSellOrders(uint256 listingId) external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
     function transact(address caller, address token, uint256 amount, address recipient) external;
+    function getListingId() external view returns (uint256);
 }
 
 interface IMFPLiquidity {
@@ -63,13 +68,14 @@ interface IMFPLiquidity {
     }
     function deposit(address caller, address token, uint256 amount) external payable;
     function updateLiquidity(address caller, bool isX, uint256 amount) external;
-    function claimFees(address caller, uint256 liquidityIndex, bool isX, uint256 volume) external;
+    function claimFees(address caller, address listingAddress, uint256 liquidityIndex, bool isX, uint256 volume) external;
     function xPrepOut(address caller, uint256 amount, uint256 index) external returns (MFPLiquidLibrary.PreparedWithdrawal memory);
     function yPrepOut(address caller, uint256 amount, uint256 index) external returns (MFPLiquidLibrary.PreparedWithdrawal memory);
     function xExecuteOut(address caller, uint256 index, MFPLiquidLibrary.PreparedWithdrawal memory withdrawal) external;
     function yExecuteOut(address caller, uint256 index, MFPLiquidLibrary.PreparedWithdrawal memory withdrawal) external;
     function getXSlotView(uint256 index) external view returns (Slot memory);
     function getYSlotView(uint256 index) external view returns (Slot memory);
+    function getListingId() external view returns (uint256);
 }
 
 library MFPLiquidLibrary {
@@ -94,6 +100,18 @@ library MFPLiquidLibrary {
         uint256 impactPrice;
     }
 
+    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount * 10**(18 - decimals);
+        else return amount / 10**(decimals - 18);
+    }
+
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10**(18 - decimals);
+        else return amount * 10**(decimals - 18);
+    }
+
     function calculateImpactPrice(uint256 xBalance, uint256 yBalance, uint256 totalAmount, bool isBuy) internal pure returns (uint256) {
         uint256 newXBalance;
         uint256 newYBalance;
@@ -108,16 +126,22 @@ library MFPLiquidLibrary {
         return (newXBalance * 1e18) / newYBalance;
     }
 
+    function getListingIdFromLiquidity(address liquidityAddress, address listingAgent) internal view returns (uint256) {
+        require(IMFP(listingAgent).isValidListing(liquidityAddress), "Invalid listing");
+        return IMFPLiquidity(liquidityAddress).getListingId();
+    }
+
     function prepBuyLiquid(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory) {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory pendingOrders = listing.pendingSellOrders(0);
+        uint256 listingId = listing.getListingId();
+        uint256[] memory pendingOrders = listing.pendingSellOrders(listingId);
         PreparedUpdate[] memory updates = new PreparedUpdate[](pendingOrders.length < 100 ? pendingOrders.length : 100);
         uint256 updateCount = 0;
         SettlementData memory data;
-        uint256 currentPrice = listing.prices(0);
+        uint256 currentPrice = listing.prices(listingId);
 
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(listingId);
         for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
             address makerAddress;
             address recipientAddress;
@@ -164,13 +188,14 @@ library MFPLiquidLibrary {
     function prepSellLiquid(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory) {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory pendingOrders = listing.pendingBuyOrders(0);
+        uint256 listingId = listing.getListingId();
+        uint256[] memory pendingOrders = listing.pendingBuyOrders(listingId);
         PreparedUpdate[] memory updates = new PreparedUpdate[](pendingOrders.length < 100 ? pendingOrders.length : 100);
         uint256 updateCount = 0;
         SettlementData memory data;
-        uint256 currentPrice = listing.prices(0);
+        uint256 currentPrice = listing.prices(listingId);
 
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(listingId);
         for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
             address makerAddress;
             address recipientAddress;
@@ -243,13 +268,15 @@ library MFPLiquidLibrary {
     }
 
     function executeBuyLiquid(address listingAddress, address listingAgent, address proxy, PreparedUpdate[] memory preparedUpdates) external {
+        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        uint256 listingId = listing.getListingId();
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
         IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](preparedUpdates.length + 2);
         uint256 updateCount = 0;
         SettlementData memory data;
 
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(listingId);
         for (uint256 i = 0; i < preparedUpdates.length; i++) {
             if (preparedUpdates[i].amount > 0) {
                 data.totalAmount += preparedUpdates[i].amount;
@@ -282,7 +309,7 @@ library MFPLiquidLibrary {
             uint256 newYBal;
             uint256 xVol;
             uint256 yVol;
-            (newXBal, newYBal, xVol, yVol) = listing.volumeBalances(0);
+            (newXBal, newYBal, xVol, yVol) = listing.volumeBalances(listingId);
             updates[updateCount] = IMFPListing.UpdateType(
                 3,
                 0,
@@ -302,13 +329,15 @@ library MFPLiquidLibrary {
     }
 
     function executeSellLiquid(address listingAddress, address listingAgent, address proxy, PreparedUpdate[] memory preparedUpdates) external {
+        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        uint256 listingId = listing.getListingId();
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
         IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](preparedUpdates.length + 2);
         uint256 updateCount = 0;
         SettlementData memory data;
 
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(listingId);
         for (uint256 i = 0; i < preparedUpdates.length; i++) {
             if (preparedUpdates[i].amount > 0) {
                 data.totalAmount += preparedUpdates[i].amount;
@@ -341,7 +370,7 @@ library MFPLiquidLibrary {
             uint256 newYBal;
             uint256 xVol;
             uint256 yVol;
-            (newXBal, newYBal, xVol, yVol) = listing.volumeBalances(0);
+            (newXBal, newYBal, xVol, yVol) = listing.volumeBalances(listingId);
             updates[updateCount] = IMFPListing.UpdateType(
                 3,
                 0,
@@ -363,7 +392,7 @@ library MFPLiquidLibrary {
     function xDeposit(address listingAddress, uint256 amount, address listingAgent, address proxy) external {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listing.getListingId()));
         if (listing.tokenA() != address(0)) {
             IERC20(listing.tokenA()).safeTransferFrom(msg.sender, address(liquidity), amount);
         }
@@ -373,41 +402,37 @@ library MFPLiquidLibrary {
     function yDeposit(address listingAddress, uint256 amount, address listingAgent, address proxy) external {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listing.getListingId()));
         if (listing.tokenB() != address(0)) {
             IERC20(listing.tokenB()).safeTransferFrom(msg.sender, address(liquidity), amount);
         }
         liquidity.deposit(proxy, listing.tokenB(), amount);
     }
 
-    function xClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external {
-        address listingAddress;
-        uint256 index;
-        (listingAddress, index) = IMFP(listingAgent).listingValidationByIndex(listingId);
-        require(listingAddress != address(0), "Invalid listing ID");
+    function xClaimFees(address listingAddress, uint256 liquidityIndex, address listingAgent, address proxy) external {
+        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        uint256 listingId = listing.getListingId();
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
         uint256 xVolume;
-        (, , xVolume, ) = listing.volumeBalances(0);
-        liquidity.claimFees(proxy, liquidityIndex, true, xVolume);
+        (, , xVolume, ) = listing.volumeBalances(listingId);
+        liquidity.claimFees(proxy, listingAddress, liquidityIndex, true, xVolume);
     }
 
-    function yClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external {
-        address listingAddress;
-        uint256 index;
-        (listingAddress, index) = IMFP(listingAgent).listingValidationByIndex(listingId);
-        require(listingAddress != address(0), "Invalid listing ID");
+    function yClaimFees(address listingAddress, uint256 liquidityIndex, address listingAgent, address proxy) external {
+        require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        uint256 listingId = listing.getListingId();
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listingId));
         uint256 yVolume;
-        (, , , yVolume) = listing.volumeBalances(0);
-        liquidity.claimFees(proxy, liquidityIndex, false, yVolume);
+        (, , , yVolume) = listing.volumeBalances(listingId);
+        liquidity.claimFees(proxy, listingAddress, liquidityIndex, false, yVolume);
     }
 
     function xWithdraw(address listingAddress, uint256 amount, uint256 index, address listingAgent, address proxy) external returns (PreparedWithdrawal memory) {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listing.getListingId()));
         
         IMFPLiquidity.Slot memory slot = liquidity.getXSlotView(index);
         require(slot.depositor == msg.sender, "Not depositor");
@@ -421,7 +446,7 @@ library MFPLiquidLibrary {
     function yWithdraw(address listingAddress, uint256 amount, uint256 index, address listingAgent, address proxy) external returns (PreparedWithdrawal memory) {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(0));
+        IMFPLiquidity liquidity = IMFPLiquidity(listing.liquidityAddresses(listing.getListingId()));
         
         IMFPLiquidity.Slot memory slot = liquidity.getYSlotView(index);
         require(slot.depositor == msg.sender, "Not depositor");
@@ -430,17 +455,5 @@ library MFPLiquidLibrary {
         liquidity.yExecuteOut(proxy, index, preparedWithdrawal);
         
         return preparedWithdrawal;
-    }
-
-    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount * 10**(18 - decimals);
-        else return amount / 10**(decimals - 18);
-    }
-
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
     }
 }

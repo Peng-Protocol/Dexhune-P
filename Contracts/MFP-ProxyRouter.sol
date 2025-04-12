@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.14 (Updated)
+// Version: 0.0.15 (Updated)
 // Changes:
-// - Added getNextOrderId call to MFPListingTemplate in buyOrder and sellOrder to fetch incremental orderId (new in v0.0.14).
-// - Passed orderId to prepBuyOrder and prepSellOrder in MFPOrderLibrary (new in v0.0.14).
-// - Side effects: Aligns with MFPListingTemplate’s nextOrderId and MFPOrderLibrary’s updated prep functions; no reentrancy guard added here as it’s handled in MFPListingTemplate.
+// - Updated claimFees to pass listingAddress instead of listingId (new in v0.0.15).
+// - Updated IMFPLiquidLibrary interface: xClaimFees, yClaimFees accept listingAddress (new in v0.0.15).
+// - Side effects: Aligns with MFPLiquidLibrary’s updated claimFees; prevents listingId mismatches.
 
 import "./imports/SafeERC20.sol";
 import "./imports/Ownable.sol";
 
-// Interfaces defined outside contract
 interface IMFP {
     function isValidListing(address listingAddress) external view returns (bool);
     function listingValidationByIndex(uint256 listingId) external view returns (address listingAddress, uint256 index);
@@ -43,7 +42,7 @@ interface IMFPListing {
     function pendingSellOrders(uint256 listingId) external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
     function transact(address caller, address token, uint256 amount, address recipient) external;
-    function getNextOrderId(uint256 listingId) external view returns (uint256); // Added for orderId fetch
+    function getNextOrderId(uint256 listingId) external view returns (uint256);
 }
 
 interface IMFPOrderLibrary {
@@ -92,8 +91,8 @@ interface IMFPLiquidLibrary {
     function executeSellLiquid(address listingAddress, address listingAgent, address proxy, PreparedUpdate[] memory preparedUpdates) external;
     function xDeposit(address listingAddress, uint256 amount, address listingAgent, address proxy) external;
     function yDeposit(address listingAddress, uint256 amount, address listingAgent, address proxy) external;
-    function xClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external;
-    function yClaimFees(uint256 listingId, uint256 liquidityIndex, address listingAgent, address proxy) external;
+    function xClaimFees(address listingAddress, uint256 liquidityIndex, address listingAgent, address proxy) external;
+    function yClaimFees(address listingAddress, uint256 liquidityIndex, address listingAgent, address proxy) external;
     function xWithdraw(address listingAddress, uint256 amount, uint256 index, address listingAgent, address proxy) external returns (PreparedWithdrawal memory);
     function yWithdraw(address listingAddress, uint256 amount, uint256 index, address listingAgent, address proxy) external returns (PreparedWithdrawal memory);
 }
@@ -119,7 +118,6 @@ contract MFPProxyRouter is Ownable {
     address public liquidLibrary;
     address public settlementLibrary;
 
-    // Setter functions restricted to owner
     function setListingAgent(address _listingAgent) external onlyOwner {
         require(_listingAgent != address(0), "Invalid listing agent address");
         listingAgent = _listingAgent;
@@ -140,11 +138,10 @@ contract MFPProxyRouter is Ownable {
         settlementLibrary = _settlementLibrary;
     }
 
-    // Order functions
     function buyOrder(address listingAddress, IMFPOrderLibrary.BuyOrderDetails memory details) external payable {
         require(orderLibrary != address(0), "Order library not set");
         require(listingAgent != address(0), "Listing agent not set");
-        uint256 orderId = IMFPListing(listingAddress).getNextOrderId(0); // Fetch next orderId
+        uint256 orderId = IMFPListing(listingAddress).getNextOrderId(0);
         IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepBuyOrder(listingAddress, details, listingAgent, address(this), orderId);
         IMFPOrderLibrary(orderLibrary).executeBuyOrder(listingAddress, prep, listingAgent, address(this));
     }
@@ -152,12 +149,11 @@ contract MFPProxyRouter is Ownable {
     function sellOrder(address listingAddress, IMFPOrderLibrary.SellOrderDetails memory details) external payable {
         require(orderLibrary != address(0), "Order library not set");
         require(listingAgent != address(0), "Listing agent not set");
-        uint256 orderId = IMFPListing(listingAddress).getNextOrderId(0); // Fetch next orderId
+        uint256 orderId = IMFPListing(listingAddress).getNextOrderId(0);
         IMFPOrderLibrary.OrderPrep memory prep = IMFPOrderLibrary(orderLibrary).prepSellOrder(listingAddress, details, listingAgent, address(this), orderId);
         IMFPOrderLibrary(orderLibrary).executeSellOrder(listingAddress, prep, listingAgent, address(this));
     }
 
-    // Liquidity functions
     function buyLiquid(address listingAddress) external {
         require(liquidLibrary != address(0), "Liquid library not set");
         require(listingAgent != address(0), "Listing agent not set");
@@ -172,7 +168,6 @@ contract MFPProxyRouter is Ownable {
         IMFPLiquidLibrary(liquidLibrary).executeSellLiquid(listingAddress, listingAgent, address(this), updates);
     }
 
-    // Settlement functions
     function settleBuy(address listingAddress) external {
         require(settlementLibrary != address(0), "Settlement library not set");
         require(listingAgent != address(0), "Listing agent not set");
@@ -187,7 +182,6 @@ contract MFPProxyRouter is Ownable {
         IMFPSettlementLibrary(settlementLibrary).executeSellOrders(listingAddress, address(this), updates);
     }
 
-    // Order clearing functions
     function clearSingleOrder(address listingAddress, uint256 orderId, bool isBuy) external {
         require(orderLibrary != address(0), "Order library not set");
         require(listingAgent != address(0), "Listing agent not set");
@@ -200,7 +194,6 @@ contract MFPProxyRouter is Ownable {
         IMFPOrderLibrary(orderLibrary).clearOrders(listingAddress, listingAgent, address(this));
     }
 
-    // Deposit functions
     function deposit(address listingAddress, bool isX, uint256 amount) external payable {
         require(liquidLibrary != address(0), "Liquid library not set");
         require(listingAgent != address(0), "Listing agent not set");
@@ -211,18 +204,16 @@ contract MFPProxyRouter is Ownable {
         }
     }
 
-    // Fee claiming functions
-    function claimFees(uint256 listingId, uint256 liquidityIndex, bool isX) external {
+    function claimFees(address listingAddress, uint256 liquidityIndex, bool isX) external {
         require(liquidLibrary != address(0), "Liquid library not set");
         require(listingAgent != address(0), "Listing agent not set");
         if (isX) {
-            IMFPLiquidLibrary(liquidLibrary).xClaimFees(listingId, liquidityIndex, listingAgent, address(this));
+            IMFPLiquidLibrary(liquidLibrary).xClaimFees(listingAddress, liquidityIndex, listingAgent, address(this));
         } else {
-            IMFPLiquidLibrary(liquidLibrary).yClaimFees(listingId, liquidityIndex, listingAgent, address(this));
+            IMFPLiquidLibrary(liquidLibrary).yClaimFees(listingAddress, liquidityIndex, listingAgent, address(this));
         }
     }
 
-    // Withdrawal functions
     function withdraw(address listingAddress, bool isX, uint256 amount, uint256 index) external {
         require(liquidLibrary != address(0), "Liquid library not set");
         require(listingAgent != address(0), "Listing agent not set");
@@ -233,6 +224,5 @@ contract MFPProxyRouter is Ownable {
         }
     }
 
-    // ETH receive function
     receive() external payable {}
 }

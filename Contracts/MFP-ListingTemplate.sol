@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.13 (Updated)
+// Version: 0.0.14 (Updated)
 // Changes:
-// - Added mapping(uint256 => uint256) nextOrderId to track incremental order IDs per listing (new in v0.0.13).
-// - Added getNextOrderId view function to return and increment nextOrderId (new in v0.0.13).
-// - Incremented nextOrderId in update function for new buy/sell orders (new in v0.0.13).
-// - Added ReentrancyGuard import and inheritance; applied nonReentrant to transact and update (new in v0.0.13).
-// - Side effects: Order IDs now sequential instead of hashed; interfaces (e.g., IMFPOrderLibrary) must pass orderId explicitly.
+// - Added getListingId view function to return listingId (new in v0.0.14).
+// - Side effects: Enables MFPLiquidLibrary to fetch correct listingId for price and balance queries.
 
 import "./imports/SafeERC20.sol";
 import "./imports/ReentrancyGuard.sol";
@@ -80,7 +77,6 @@ contract MFPListingTemplate is ReentrancyGuard {
     event OrderUpdated(uint256 listingId, uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 listingId, uint256 xBalance, uint256 yBalance);
 
-    // Helper functions
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount * 10 ** (uint256(18) - uint256(decimals));
@@ -103,7 +99,6 @@ contract MFPListingTemplate is ReentrancyGuard {
         }
     }
 
-    // One-time setup functions
     function setRouter(address _routerAddress) external {
         require(routerAddress == address(0), "Router already set");
         require(_routerAddress != address(0), "Invalid router address");
@@ -129,7 +124,6 @@ contract MFPListingTemplate is ReentrancyGuard {
         tokenB = _tokenB;
     }
 
-    // Core functions
     function update(address caller, UpdateType[] memory updates) external nonReentrant {
         require(caller == routerAddress, "Router only");
         VolumeBalance storage balances = volumeBalances[listingId];
@@ -154,7 +148,7 @@ contract MFPListingTemplate is ReentrancyGuard {
                     makerPendingOrders[u.addr].push(u.index);
                     balances.yBalance += u.value;
                     balances.yVolume += u.value;
-                    nextOrderId[listingId] = u.index + 1; // Increment for next order
+                    nextOrderId[listingId] = u.index + 1;
                     emit OrderUpdated(listingId, u.index, true, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
@@ -186,7 +180,7 @@ contract MFPListingTemplate is ReentrancyGuard {
                     makerPendingOrders[u.addr].push(u.index);
                     balances.xBalance += u.value;
                     balances.xVolume += u.value;
-                    nextOrderId[listingId] = u.index + 1; // Increment for next order
+                    nextOrderId[listingId] = u.index + 1;
                     emit OrderUpdated(listingId, u.index, false, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
@@ -256,7 +250,10 @@ contract MFPListingTemplate is ReentrancyGuard {
         emit BalancesUpdated(listingId, balances.xBalance, balances.yBalance);
     }
 
-    // View functions
+    function getListingId() external view returns (uint256) {
+        return listingId;
+    }
+
     function getNextOrderId(uint256 _listingId) external view returns (uint256) {
         return nextOrderId[_listingId];
     }

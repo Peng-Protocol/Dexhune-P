@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.6 (Updated)
+// Version: 0.0.7 (Updated)
 // Changes:
-// - Removed keccak256 orderId generation in prepBuyOrder and prepSellOrder; now accepts orderId as an argument (new in v0.0.6).
-// - Updated prepBuyOrder and prepSellOrder to take orderId from caller (router), aligning with MFPListingTemplate’s nextOrderId (new in v0.0.6).
-// - Side effects: Requires MFPProxyRouter to pass orderId; no reentrancy guard added here as it’s handled upstream in MFPListingTemplate.
+// - Removed listingId from liquidityAddresses, volumeBalances, prices, pendingBuyOrders, pendingSellOrders calls; uses updated IMFPListing interface (new in v0.0.7).
+// - Updated clearOrders to use pendingBuyOrders(), pendingSellOrders() without listingId (new in v0.0.7).
+// - Updated IMFPListing interface to remove listingId parameters (new in v0.0.7).
+// - Side effects: Aligns with MFPListingTemplate’s stored listingId; ensures clearOrders targets correct listing.
 
 import "./imports/SafeERC20.sol";
 
@@ -33,11 +34,11 @@ interface IMFPListing {
     );
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
-    function liquidityAddresses(uint256 listingId) external view returns (address);
-    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
-    function prices(uint256 listingId) external view returns (uint256);
-    function pendingBuyOrders(uint256 listingId) external view returns (uint256[] memory);
-    function pendingSellOrders(uint256 listingId) external view returns (uint256[] memory);
+    function liquidityAddresses() external view returns (address);
+    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
+    function prices() external view returns (uint256);
+    function pendingBuyOrders() external view returns (uint256[] memory);
+    function pendingSellOrders() external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
     function transact(address caller, address token, uint256 amount, address recipient) external;
 }
@@ -115,7 +116,7 @@ library MFPOrderLibrary {
         IMFPOrderLibrary.BuyOrderDetails memory details,
         address listingAgent,
         address proxy,
-        uint256 orderId // Added orderId parameter
+        uint256 orderId
     ) external view returns (OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
@@ -124,7 +125,7 @@ library MFPOrderLibrary {
         PrepData memory prepData;
         prepData.token = listing.tokenA();
         (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
-        prepData.orderId = orderId; // Use passed orderId instead of hashing
+        prepData.orderId = orderId;
         prepData.updates = _createOrderUpdate(
             1, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
@@ -137,7 +138,7 @@ library MFPOrderLibrary {
         IMFPOrderLibrary.SellOrderDetails memory details,
         address listingAgent,
         address proxy,
-        uint256 orderId // Added orderId parameter
+        uint256 orderId
     ) external view returns (OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
@@ -146,7 +147,7 @@ library MFPOrderLibrary {
         PrepData memory prepData;
         prepData.token = listing.tokenB();
         (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
-        prepData.orderId = orderId; // Use passed orderId instead of hashing
+        prepData.orderId = orderId;
         prepData.updates = _createOrderUpdate(
             2, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
@@ -162,7 +163,7 @@ library MFPOrderLibrary {
         address proxy
     ) external {
         IMFPListing listing = IMFPListing(listingAddress);
-        address liquidityAddress = listing.liquidityAddresses(0);
+        address liquidityAddress = listing.liquidityAddresses();
         IMFPLiquidity liquidity = IMFPLiquidity(liquidityAddress);
 
         uint256 receivedPrincipal = _transferToken(prep.token, listingAddress, prep.principal);
@@ -179,9 +180,10 @@ library MFPOrderLibrary {
         uint256 yBalance;
         uint256 xVolume;
         uint256 yVolume;
-        (xBalance, yBalance, xVolume, yVolume) = listing.volumeBalances(0);
+        (xBalance, yBalance, xVolume, yVolume) = listing.volumeBalances();
         historicalUpdate[0] = IMFPListing.UpdateType(
-            3, 0, listing.prices(0), address(0), address(0),
+            3, 0, listing.prices(),
+            address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
         );
         listing.update(proxy, historicalUpdate);
@@ -196,7 +198,7 @@ library MFPOrderLibrary {
         address proxy
     ) external {
         IMFPListing listing = IMFPListing(listingAddress);
-        address liquidityAddress = listing.liquidityAddresses(0);
+        address liquidityAddress = listing.liquidityAddresses();
         IMFPLiquidity liquidity = IMFPLiquidity(liquidityAddress);
 
         uint256 receivedPrincipal = _transferToken(prep.token, listingAddress, prep.principal);
@@ -213,9 +215,10 @@ library MFPOrderLibrary {
         uint256 yBalance;
         uint256 xVolume;
         uint256 yVolume;
-        (xBalance, yBalance, xVolume, yVolume) = listing.volumeBalances(0);
+        (xBalance, yBalance, xVolume, yVolume) = listing.volumeBalances();
         historicalUpdate[0] = IMFPListing.UpdateType(
-            3, 0, listing.prices(0), address(0), address(0),
+            3, 0, listing.prices(),
+            address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
         );
         listing.update(proxy, historicalUpdate);
@@ -271,12 +274,12 @@ library MFPOrderLibrary {
     function clearOrders(
         address listingAddress,
         address listingAgent,
-        address proxy
+        address bracket
     ) external {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory buyOrders = listing.pendingBuyOrders(0);
-        uint256[] memory sellOrders = listing.pendingSellOrders(0);
+        uint256[] memory buyOrders = listing.pendingBuyOrders();
+        uint256[] memory sellOrders = listing.pendingSellOrders();
 
         uint256 totalOrders = buyOrders.length + sellOrders.length;
         if (totalOrders == 0) return;
@@ -293,7 +296,7 @@ library MFPOrderLibrary {
             if (status == 1 || status == 2) {
                 address refundTo = recipient != address(0) ? recipient : maker;
                 if (pending > 0) {
-                    listing.transact(proxy, listing.tokenA(), pending, refundTo);
+                    listing.transact(bracket, listing.tokenA(), pending, refundTo);
                 }
                 updates[updateCount] = _createOrderUpdate(1, buyOrders[i], 0, address(0), address(0), 0, 0)[0];
                 updateCount++;
@@ -310,7 +313,7 @@ library MFPOrderLibrary {
             if (status == 1 || status == 2) {
                 address refundTo = recipient != address(0) ? recipient : maker;
                 if (pending > 0) {
-                    listing.transact(proxy, listing.tokenB(), pending, refundTo);
+                    listing.transact(bracket, listing.tokenB(), pending, refundTo);
                 }
                 updates[updateCount] = _createOrderUpdate(2, sellOrders[i], 0, address(0), address(0), 0, 0)[0];
                 updateCount++;
@@ -320,7 +323,7 @@ library MFPOrderLibrary {
 
         if (updateCount > 0) {
             assembly { mstore(updates, updateCount) }
-            listing.update(proxy, updates);
+            listing.update(bracket, updates);
         }
     }
 }
@@ -354,7 +357,7 @@ interface IMFPOrderLibrary {
         BuyOrderDetails memory details,
         address listingAgent,
         address proxy,
-        uint256 orderId // Added orderId parameter
+        uint256 orderId
     ) external view returns (OrderPrep memory);
 
     function prepSellOrder(
@@ -362,7 +365,7 @@ interface IMFPOrderLibrary {
         SellOrderDetails memory details,
         address listingAgent,
         address proxy,
-        uint256 orderId // Added orderId parameter
+        uint256 orderId
     ) external view returns (OrderPrep memory);
 
     function executeBuyOrder(

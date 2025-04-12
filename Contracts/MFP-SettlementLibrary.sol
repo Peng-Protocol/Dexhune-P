@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.24 (Updated)
+// Version: 0.0.25 (Updated)
 // Changes:
-// - Removed timestamp from IMFPListing.UpdateType struct, as MFPListingTemplate handles it automatically.
-// - Updated IMFPListing.buyOrders and sellOrders to remove timestamp and blockNumber, aligning with MFPListingTemplate v0.0.11.
-// - Adjusted prepBuyOrders and prepSellOrders to unpack 7 return values instead of 9.
-// - Side effects: Ensures compatibility with MFPListingTemplate; simplifies calldata.
+// - Removed listingId from pendingBuyOrders, pendingSellOrders, volumeBalances, prices calls; uses updated IMFPListing interface (new in v0.0.25).
+// - Updated prepBuyOrders, prepSellOrders, executeBuyOrders, executeSellOrders to remove listingId parameters (new in v0.0.25).
+// - Updated IMFPListing interface to remove listingId parameters (new in v0.0.25).
+// - Side effects: Aligns with MFPListingTemplate’s stored listingId; maintains settlement logic.
 
 import "./imports/SafeERC20.sol";
 
@@ -26,8 +26,8 @@ interface IMFPListing {
     }
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
-    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
-    function prices(uint256 listingId) external view returns (uint256);
+    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
+    function prices() external view returns (uint256);
     function buyOrders(uint256 orderId) external view returns (
         address makerAddress,
         address recipientAddress,
@@ -46,8 +46,8 @@ interface IMFPListing {
         uint256 filled,
         uint8 status
     );
-    function pendingBuyOrders(uint256 listingId) external view returns (uint256[] memory);
-    function pendingSellOrders(uint256 listingId) external view returns (uint256[] memory);
+    function pendingBuyOrders() external view returns (uint256[] memory);
+    function pendingSellOrders() external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
     function transact(address caller, address token, uint256 amount, address recipient) external;
 }
@@ -86,14 +86,14 @@ library MFPSettlementLibrary {
     function prepBuyOrders(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory) {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory pendingOrders = listing.pendingBuyOrders(0);
+        uint256[] memory pendingOrders = listing.pendingBuyOrders();
         PreparedUpdate[] memory updates = new PreparedUpdate[](pendingOrders.length < 100 ? pendingOrders.length : 100);
         uint256 updateCount = 0;
         SettlementData memory data;
-        uint256 currentPrice = listing.prices(0);
+        uint256 currentPrice = listing.prices();
 
         // Populate SettlementData and calculate total amount
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances();
         for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
             (
                 address makerAddress,
@@ -145,14 +145,14 @@ library MFPSettlementLibrary {
     function prepSellOrders(address listingAddress, address listingAgent) external view returns (PreparedUpdate[] memory) {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory pendingOrders = listing.pendingSellOrders(0);
+        uint256[] memory pendingOrders = listing.pendingSellOrders();
         PreparedUpdate[] memory updates = new PreparedUpdate[](pendingOrders.length < 100 ? pendingOrders.length : 100);
         uint256 updateCount = 0;
         SettlementData memory data;
-        uint256 currentPrice = listing.prices(0);
+        uint256 currentPrice = listing.prices();
 
         // Populate SettlementData and calculate total amount
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances();
         for (uint256 i = 0; i < pendingOrders.length && i < 100; i++) {
             (
                 address makerAddress,
@@ -234,7 +234,7 @@ library MFPSettlementLibrary {
         SettlementData memory data;
 
         // Populate SettlementData
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances();
         for (uint256 i = 0; i < preparedUpdates.length; i++) {
             if (preparedUpdates[i].amount > 0) {
                 data.totalAmount += preparedUpdates[i].amount;
@@ -278,7 +278,7 @@ library MFPSettlementLibrary {
         SettlementData memory data;
 
         // Populate SettlementData
-        (data.xBalance, data.yBalance, , ) = listing.volumeBalances(0);
+        (data.xBalance, data.yBalance, , ) = listing.volumeBalances();
         for (uint256 i = 0; i < preparedUpdates.length; i++) {
             if (preparedUpdates[i].amount > 0) {
                 data.totalAmount += preparedUpdates[i].amount;

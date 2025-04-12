@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.15 (Updated)
+// Version: 0.0.16 (Updated)
 // Changes:
-// - Added ReentrancyGuard import and inheritance (new in v0.0.15).
-// - Added nonReentrant modifier to transact, deposit, xExecuteOut, yExecuteOut, and claimFees (new in v0.0.15).
-// - Side effects: Prevents reentrancy attacks during token/ETH transfers; no other logic changes.
+// - Fixed TypeError in validateListing: added listingId to volumeBalances call, destructured tuple to access xBalance (new in v0.0.16).
+// - Updated claimFees to accept listingAddress, validate via IMFP.isValidListing, use stored listingId (new in v0.0.16).
+// - Added getListingId view function to align with MFPListingTemplate v0.0.14 (new in v0.0.16).
+// - Added ReentrancyGuard import and inheritance (from v0.0.15).
+// - Added nonReentrant to transact, deposit, xExecuteOut, yExecuteOut, claimFees (from v0.0.15).
+// - Side effects: Prevents reentrancy; aligns with MFPLiquidLibrary’s claimFees; ensures correct listingId usage.
 
 import "./imports/SafeERC20.sol";
 import "./imports/ReentrancyGuard.sol";
 
+interface IMFP {
+    function isValidListing(address listingAddress) external view returns (bool);
+}
+
 interface IMFPListing {
     function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function prices(uint256 listingId) external view returns (uint256);
+    function getListingId() external view returns (uint256);
 }
 
 contract MFPLiquidityTemplate is ReentrancyGuard {
@@ -248,7 +256,7 @@ contract MFPLiquidityTemplate is ReentrancyGuard {
         uint256 withdrawAmountB = 0;
 
         if (deficit > 0) {
-            uint256 currentPrice = IMFPListing(listingAddress).prices(0);
+            uint256 currentPrice = IMFPListing(listingAddress).prices(listingId);
             require(currentPrice > 0, "Price cannot be zero");
             uint256 compensation = (deficit * 1e18) / currentPrice;
             withdrawAmountB = compensation > details.yLiquid ? details.yLiquid : compensation;
@@ -268,7 +276,7 @@ contract MFPLiquidityTemplate is ReentrancyGuard {
         uint256 withdrawAmountA = 0;
 
         if (deficit > 0) {
-            uint256 currentPrice = IMFPListing(listingAddress).prices(0);
+            uint256 currentPrice = IMFPListing(listingAddress).prices(listingId);
             require(currentPrice > 0, "Price cannot be zero");
             uint256 compensation = (deficit * currentPrice) / 1e18;
             withdrawAmountA = compensation > details.xLiquid ? details.xLiquid : compensation;
@@ -315,8 +323,10 @@ contract MFPLiquidityTemplate is ReentrancyGuard {
         }
     }
 
-    function claimFees(address caller, uint256 liquidityIndex, bool isX, uint256 volume) external nonReentrant {
+    function claimFees(address caller, address listingAddressParam, uint256 liquidityIndex, bool isX, uint256 volume) external nonReentrant {
         require(caller == routerAddress, "Router only");
+        require(IMFP(routerAddress).isValidListing(listingAddressParam), "Invalid listing");
+        require(listingAddressParam == listingAddress, "Listing address mismatch");
         LiquidityDetails storage details = liquidityDetails[listingId];
         Slot storage slot = isX ? xLiquiditySlots[listingId][liquidityIndex] : yLiquiditySlots[listingId][liquidityIndex];
         require(slot.depositor == msg.sender, "Not depositor");
@@ -332,7 +342,8 @@ contract MFPLiquidityTemplate is ReentrancyGuard {
             updates[1] = UpdateType(isX ? 2 : 3, liquidityIndex, allocation, msg.sender, address(0));
             this.update(caller, updates);
 
-            this.transact(caller, isX ? tokenA : tokenB, feeShare, msg.sender);
+            uint8 decimals = isX ? (tokenA == address(0) ? 18 : IERC20(tokenA).decimals()) : (tokenB == address(0) ? 18 : IERC20(tokenB).decimals());
+            this.transact(caller, isX ? tokenA : tokenB, denormalize(feeShare, decimals), msg.sender);
             emit FeesClaimed(listingId, liquidityIndex, isX ? feeShare : 0, isX ? 0 : feeShare);
         }
     }
@@ -391,5 +402,16 @@ contract MFPLiquidityTemplate is ReentrancyGuard {
 
     function getYSlotView(uint256 index) external view returns (Slot memory) {
         return yLiquiditySlots[listingId][index];
+    }
+
+    function getListingId() external view returns (uint256) {
+        return listingId;
+    }
+
+    function validateListing(address listingAddressParam) external view {
+        require(IMFP(routerAddress).isValidListing(listingAddressParam), "Invalid listing");
+        require(listingAddressParam == listingAddress, "Listing address mismatch");
+        (uint256 xBalance, , , ) = IMFPListing(listingAddress).volumeBalances(listingId);
+        require(xBalance > 0, "Invalid listing");
     }
 }
