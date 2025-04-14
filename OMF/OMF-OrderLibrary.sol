@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.9 (Updated)
+// Version: 0.0.12 (Updated)
 // Changes:
+// - From v0.0.11: Fixed stack-too-deep in clearOrders/clearSingleOrder by introducing ClearOrderState struct and helper functions validateAndPrepareRefund/executeRefundAndUpdate.
+// - From v0.0.10: Updated clearOrders to only clear orders for the user caller (msg.sender) using makerPendingOrdersView.
+// - From v0.0.9: Removed listingId from all functions and interfaces to align with implicit listingId in OMFListingTemplate.
+// - Updated IOMFListing interface: Changed liquidityAddresses() to liquidityAddress().
 // - Added tax-on-transfer adjustment via adjustOrder (from v0.0.6).
 // - Replaced block.timestamp with order counter (from v0.0.6).
 // - Fixed adjustOrder to overwrite original orderId (from v0.0.6).
 // - Updated prep$Order to return orderId (from v0.0.6).
 // - Aligned with OMFListingTemplate v0.0.7 status codes (from v0.0.7).
 // - Removed nextOrderId input, added prep/execute split, normalization, events, refunds, historical updates (from v0.0.8).
-// - Fetch orderId from OMFListingTemplate.nextOrderId() (new in v0.0.9).
-// - Added missing SafeERC20 import to fix DeclarationError (previous revision).
-// - Fixed stack-too-deep in executeBuyOrder/executeSellOrder: Added ExecutionState struct and helper functions (previous revision).
-// - Fixed DeclarationError "state" visibility: Refactored ExecutionState initialization (this revision).
+// - Fetch orderId from OMFListingTemplate.nextOrderId() (from v0.0.9).
+// - Added missing SafeERC20 import to fix DeclarationError (from previous revision).
+// - Fixed stack-too-deep in executeBuyOrder/executeSellOrder: Added ExecutionState struct and helper functions (from previous revision).
+// - Fixed DeclarationError "state" visibility: Refactored ExecutionState initialization (from previous revision).
 
 import "./imports/SafeERC20.sol";
 
@@ -32,19 +36,30 @@ interface IOMFListing {
     }
     function token0() external view returns (address);
     function baseToken() external view returns (address);
-    function liquidityAddresses(uint256 listingId) external view returns (address);
+    function liquidityAddress() external view returns (address);
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function listingPriceView() external view returns (uint256);
     function buyOrders(uint256 orderId) external view returns (
-        address makerAddress, address recipientAddress, uint256 maxPrice, uint256 minPrice,
-        uint256 pending, uint256 filled, uint8 status
+        address makerAddress,
+        address recipientAddress,
+        uint256 maxPrice,
+        uint256 minPrice,
+        uint256 pending,
+        uint256 filled,
+        uint8 status
     );
     function sellOrders(uint256 orderId) external view returns (
-        address makerAddress, address recipientAddress, uint256 maxPrice, uint256 minPrice,
-        uint256 pending, uint256 filled, uint8 status
+        address makerAddress,
+        address recipientAddress,
+        uint256 maxPrice,
+        uint256 minPrice,
+        uint256 pending,
+        uint256 filled,
+        uint8 status
     );
     function pendingBuyOrdersView() external view returns (uint256[] memory);
     function pendingSellOrdersView() external view returns (uint256[] memory);
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
     function transact(address caller, address token, uint256 amount, address recipient) external;
     function nextOrderId() external returns (uint256);
@@ -117,7 +132,8 @@ interface IOMFOrderLibrary {
     function clearOrders(
         address listingAddress,
         address listingAgent,
-        address proxy
+        address proxy,
+        address user
     ) external;
 
     function adjustOrder(
@@ -158,6 +174,16 @@ library OMFOrderLibrary {
         address liquidityAddress;
     }
 
+    struct ClearOrderState {
+        address makerAddress;
+        address recipientAddress;
+        uint256 pending;
+        uint8 status;
+        address refundTo;
+        uint256 refundAmount;
+        address token;
+    }
+
     event OrderCreated(uint256 orderId, bool isBuy, address maker);
     event OrderCancelled(uint256 orderId);
 
@@ -194,13 +220,101 @@ library OMFOrderLibrary {
         return updates;
     }
 
+    // New helper for validating and preparing refund
+    function validateAndPrepareRefund(
+        IOMFListing listing,
+        uint256 orderId,
+        bool isBuy,
+        address user
+    ) internal view returns (ClearOrderState memory orderState, bool isValid) {
+        orderState = ClearOrderState({
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            pending: 0,
+            status: 0,
+            refundTo: address(0),
+            refundAmount: 0,
+            token: address(0)
+        });
+
+        if (isBuy) {
+            (
+                address makerAddress,
+                address recipientAddress,
+                uint256 maxPrice,
+                uint256 minPrice,
+                uint256 pending,
+                uint256 filled,
+                uint8 status
+            ) = listing.buyOrders(orderId);
+            if (status == 1 || status == 2) {
+                if (makerAddress != user) return (orderState, false);
+                orderState.makerAddress = makerAddress;
+                orderState.recipientAddress = recipientAddress;
+                orderState.pending = pending;
+                orderState.status = status;
+                orderState.refundTo = recipientAddress != address(0) ? recipientAddress : makerAddress;
+                orderState.refundAmount = pending;
+                orderState.token = listing.token0();
+                return (orderState, true);
+            }
+        } else {
+            (
+                address makerAddress,
+                address recipientAddress,
+                uint256 maxPrice,
+                uint256 minPrice,
+                uint256 pending,
+                uint256 filled,
+                uint8 status
+            ) = listing.sellOrders(orderId);
+            if (status == 1 || status == 2) {
+                if (makerAddress != user) return (orderState, false);
+                orderState.makerAddress = makerAddress;
+                orderState.recipientAddress = recipientAddress;
+                orderState.pending = pending;
+                orderState.status = status;
+                orderState.refundTo = recipientAddress != address(0) ? recipientAddress : makerAddress;
+                orderState.refundAmount = pending;
+                orderState.token = listing.baseToken();
+                return (orderState, true);
+            }
+        }
+        return (orderState, false);
+    }
+
+    // New helper for executing refund and updating order
+    function executeRefundAndUpdate(
+        IOMFListing listing,
+        address proxy,
+        ClearOrderState memory orderState,
+        IOMFListing.UpdateType[] memory updates,
+        uint256 updateIndex,
+        bool isBuy,
+        uint256 orderId
+    ) internal {
+        if (orderState.refundAmount > 0) {
+            listing.transact(proxy, orderState.token, orderState.refundAmount, orderState.refundTo);
+        }
+        updates[updateIndex] = IOMFListing.UpdateType(
+            isBuy ? 1 : 2,
+            orderId,
+            0,
+            address(0),
+            address(0),
+            0,
+            0
+        );
+        emit OrderCancelled(orderId);
+    }
+
     // Prep functions
     function prepBuyOrder(
         address listingAddress,
         IOMFOrderLibrary.BuyOrderDetails memory details,
         address listingAgent,
         address proxy
-    ) external returns (OrderPrep memory) { // Not view due to nextOrderId() call
+    ) external returns (OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IOMFListing listing = IOMFListing(listingAddress);
@@ -208,7 +322,7 @@ library OMFOrderLibrary {
         PrepData memory prepData;
         prepData.token = listing.token0();
         (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
-        prepData.orderId = listing.nextOrderId(); // Fetch from listing
+        prepData.orderId = listing.nextOrderId();
         prepData.updates = _createOrderUpdate(
             1, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
@@ -221,7 +335,7 @@ library OMFOrderLibrary {
         IOMFOrderLibrary.SellOrderDetails memory details,
         address listingAgent,
         address proxy
-    ) external returns (OrderPrep memory) { // Not view due to nextOrderId() call
+    ) external returns (OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IOMFListing listing = IOMFListing(listingAddress);
@@ -229,7 +343,7 @@ library OMFOrderLibrary {
         PrepData memory prepData;
         prepData.token = listing.baseToken();
         (prepData.normalized, prepData.fee, prepData.principal) = _normalizeAndFee(prepData.token, details.amount);
-        prepData.orderId = listing.nextOrderId(); // Fetch from listing
+        prepData.orderId = listing.nextOrderId();
         prepData.updates = _createOrderUpdate(
             2, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
@@ -245,7 +359,7 @@ library OMFOrderLibrary {
         address proxy
     ) external {
         IOMFListing listing = IOMFListing(listingAddress);
-        address liquidityAddr = listing.liquidityAddresses(0);
+        address liquidityAddr = listing.liquidityAddress();
         ExecutionState memory state = ExecutionState(listing, IOMFLiquidity(liquidityAddr), liquidityAddr);
         processExecuteBuyOrder(prep, state, proxy);
     }
@@ -265,7 +379,12 @@ library OMFOrderLibrary {
         state.liquidity.addFees(proxy, true, prep.fee);
 
         IOMFListing.UpdateType[] memory historicalUpdate = new IOMFListing.UpdateType[](1);
-        (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) = state.listing.listingVolumeBalancesView();
+        (
+            uint256 xBalance,
+            uint256 yBalance,
+            uint256 xVolume,
+            uint256 yVolume
+        ) = state.listing.listingVolumeBalancesView();
         historicalUpdate[0] = IOMFListing.UpdateType(
             3, 0, state.listing.listingPriceView(), address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
@@ -282,7 +401,7 @@ library OMFOrderLibrary {
         address proxy
     ) external {
         IOMFListing listing = IOMFListing(listingAddress);
-        address liquidityAddr = listing.liquidityAddresses(0);
+        address liquidityAddr = listing.liquidityAddress();
         ExecutionState memory state = ExecutionState(listing, IOMFLiquidity(liquidityAddr), liquidityAddr);
         processExecuteSellOrder(prep, state, proxy);
     }
@@ -302,7 +421,12 @@ library OMFOrderLibrary {
         state.liquidity.addFees(proxy, false, prep.fee);
 
         IOMFListing.UpdateType[] memory historicalUpdate = new IOMFListing.UpdateType[](1);
-        (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) = state.listing.listingVolumeBalancesView();
+        (
+            uint256 xBalance,
+            uint256 yBalance,
+            uint256 xVolume,
+            uint256 yVolume
+        ) = state.listing.listingVolumeBalancesView();
         historicalUpdate[0] = IOMFListing.UpdateType(
             3, 0, state.listing.listingPriceView(), address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
@@ -323,71 +447,51 @@ library OMFOrderLibrary {
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IOMFListing listing = IOMFListing(listingAddress);
 
-        address refundTo;
-        uint256 refundAmount;
-        address token;
-        if (isBuy) {
-            (address maker, address recipient, , , uint256 pending, , uint8 status) = listing.buyOrders(orderId);
-            require(status == 1 || status == 2, "Order not active");
-            refundTo = recipient != address(0) ? recipient : maker;
-            refundAmount = pending;
-            token = listing.token0();
-        } else {
-            (address maker, address recipient, , , uint256 pending, , uint8 status) = listing.sellOrders(orderId);
-            require(status == 1 || status == 2, "Order not active");
-            refundTo = recipient != address(0) ? recipient : maker;
-            refundAmount = pending;
-            token = listing.baseToken();
-        }
+        (ClearOrderState memory orderState, bool isValid) = validateAndPrepareRefund(listing, orderId, isBuy, msg.sender);
+        require(isValid, "Order not active or not maker");
 
-        if (refundAmount > 0) {
-            listing.transact(proxy, token, refundAmount, refundTo);
-        }
+        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](1);
+        executeRefundAndUpdate(listing, proxy, orderState, updates, 0, isBuy, orderId);
 
-        IOMFListing.UpdateType[] memory updates = _createOrderUpdate(isBuy ? 1 : 2, orderId, 0, address(0), address(0), 0, 0);
         listing.update(proxy, updates);
-        emit OrderCancelled(orderId);
     }
 
     function clearOrders(
         address listingAddress,
         address listingAgent,
-        address proxy
+        address proxy,
+        address user
     ) external {
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IOMFListing listing = IOMFListing(listingAddress);
-        uint256[] memory buyOrders = listing.pendingBuyOrdersView();
-        uint256[] memory sellOrders = listing.pendingSellOrdersView();
+        (bool success, bytes memory returnData) = listingAddress.staticcall(
+            abi.encodeWithSignature("makerPendingOrdersView(address)", user)
+        );
+        require(success, "Failed to fetch user orders");
+        uint256[] memory userOrders = abi.decode(returnData, (uint256[]));
 
-        uint256 totalOrders = buyOrders.length + sellOrders.length;
-        if (totalOrders == 0) return;
+        if (userOrders.length == 0) return;
 
-        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](totalOrders);
+        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](userOrders.length);
         uint256 updateCount = 0;
 
-        for (uint256 i = 0; i < buyOrders.length; i++) {
-            (address maker, address recipient, , , uint256 pending, , uint8 status) = listing.buyOrders(buyOrders[i]);
-            if (status == 1 || status == 2) {
-                address refundTo = recipient != address(0) ? recipient : maker;
-                if (pending > 0) {
-                    listing.transact(proxy, listing.token0(), pending, refundTo);
-                }
-                updates[updateCount] = _createOrderUpdate(1, buyOrders[i], 0, address(0), address(0), 0, 0)[0];
-                updateCount++;
-                emit OrderCancelled(buyOrders[i]);
-            }
-        }
+        for (uint256 i = 0; i < userOrders.length; i++) {
+            bool isValid;
+            ClearOrderState memory orderState;
 
-        for (uint256 i = 0; i < sellOrders.length; i++) {
-            (address maker, address recipient, , , uint256 pending, , uint8 status) = listing.sellOrders(sellOrders[i]);
-            if (status == 1 || status == 2) {
-                address refundTo = recipient != address(0) ? recipient : maker;
-                if (pending > 0) {
-                    listing.transact(proxy, listing.baseToken(), pending, refundTo);
-                }
-                updates[updateCount] = _createOrderUpdate(2, sellOrders[i], 0, address(0), address(0), 0, 0)[0];
+            // Try buy order
+            (orderState, isValid) = validateAndPrepareRefund(listing, userOrders[i], true, user);
+            if (isValid) {
+                executeRefundAndUpdate(listing, proxy, orderState, updates, updateCount, true, userOrders[i]);
                 updateCount++;
-                emit OrderCancelled(sellOrders[i]);
+                continue;
+            }
+
+            // Try sell order
+            (orderState, isValid) = validateAndPrepareRefund(listing, userOrders[i], false, user);
+            if (isValid) {
+                executeRefundAndUpdate(listing, proxy, orderState, updates, updateCount, false, userOrders[i]);
+                updateCount++;
             }
         }
 

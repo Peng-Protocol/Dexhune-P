@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.10 (Updated)
+// Version: 0.0.11 (Updated)
 // Changes:
-// - Aligned with MFPLiquidityTemplate: LiquidityDetails, UpdateType, update, split withdraw (from v0.0.9).
-// - Added IMFPListing (renamed IOMFListing) for tVolume (from v0.0.9).
-// - Implemented getPrice() from OMFListingTemplate in x/yPrepOut for withdrawal compensation (new in v0.0.10).
-// - Fixed DeclarationError: Corrected typo "abi_decode" to "abi.decode" in yPrepOut (this revision).
+// - From v0.0.10: Removed listingId as function parameter, made implicit via stored state (all functions and events).
+// - Updated mappings to remove listingId key: liquidityDetails, xLiquiditySlots, yLiquiditySlots, activeXLiquiditySlots, activeYLiquiditySlots.
+// - Updated IOMFListing interface: volumeBalances() no longer takes listingId.
+// - Updated LiquidityUpdated event: removed listingId parameter.
+// - Retained original 'this.' usage for internal calls (addFees, deposit, xExecuteOut, yExecuteOut, transact) as per request.
+// - Aligned with prior changes (v0.0.10): Aligned with MFPLiquidityTemplate, added getPrice() in x/yPrepOut, fixed abi.decode typo.
+// - Maintained normalize/denormalize for decimal handling, explicit casting, and nonReentrant guards.
 
 import "./imports/SafeERC20.sol";
 import "./imports/ReentrancyGuard.sol";
 
 interface IOMFListing {
-    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
+    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function getPrice() external view returns (uint256);
-} 
+}
 
 contract OMFLiquidityTemplate is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -53,17 +56,17 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
         uint256 amount1; // baseToken
     }
 
-    mapping(uint256 => LiquidityDetails) public liquidityDetails;
-    mapping(uint256 => mapping(uint256 => Slot)) public xLiquiditySlots;
-    mapping(uint256 => mapping(uint256 => Slot)) public yLiquiditySlots;
-    mapping(uint256 => uint256[]) public activeXLiquiditySlots;
-    mapping(uint256 => uint256[]) public activeYLiquiditySlots;
+    LiquidityDetails public liquidityDetail;
+    mapping(uint256 => Slot) public xLiquiditySlots;
+    mapping(uint256 => Slot) public yLiquiditySlots;
+    uint256[] public activeXLiquiditySlots;
+    uint256[] public activeYLiquiditySlots;
     mapping(address => uint256[]) public userIndex;
 
     event LiquidityAdded(bool isX, uint256 amount);
     event FeesAdded(bool isX, uint256 amount);
     event FeesClaimed(bool isX, uint256 amount, address depositor);
-    event LiquidityUpdated(uint256 listingId, uint256 xLiquid, uint256 yLiquid);
+    event LiquidityUpdated(uint256 xLiquid, uint256 yLiquid);
 
     constructor() {}
 
@@ -98,7 +101,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     }
 
     function update(address caller, UpdateType[] memory updates) external onlyRouter {
-        LiquidityDetails storage details = liquidityDetails[listingId];
+        LiquidityDetails storage details = liquidityDetail;
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 0) { // Balance update
@@ -108,36 +111,36 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
                 if (u.index == 0) details.xFees += u.value;
                 else if (u.index == 1) details.yFees += u.value;
             } else if (u.updateType == 2) { // xSlot update
-                Slot storage slot = xLiquiditySlots[listingId][u.index];
+                Slot storage slot = xLiquiditySlots[u.index];
                 if (slot.depositor == address(0) && u.addr != address(0)) {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
-                    activeXLiquiditySlots[listingId].push(u.index);
+                    activeXLiquiditySlots.push(u.index);
                     userIndex[u.addr].push(u.index);
                 } else if (u.addr == address(0)) {
                     removeSlot(true, u.index);
                 }
                 slot.allocation = u.value;
-                (, , uint256 xVolume, ) = IOMFListing(listingAddress).volumeBalances(listingId);
+                (, , uint256 xVolume, ) = IOMFListing(listingAddress).volumeBalances();
                 slot.dVolume = xVolume;
                 details.xLiquid += u.value;
             } else if (u.updateType == 3) { // ySlot update
-                Slot storage slot = yLiquiditySlots[listingId][u.index];
+                Slot storage slot = yLiquiditySlots[u.index];
                 if (slot.depositor == address(0) && u.addr != address(0)) {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
-                    activeYLiquiditySlots[listingId].push(u.index);
+                    activeYLiquiditySlots.push(u.index);
                     userIndex[u.addr].push(u.index);
                 } else if (u.addr == address(0)) {
                     removeSlot(false, u.index);
                 }
                 slot.allocation = u.value;
-                (, , , uint256 yVolume) = IOMFListing(listingAddress).volumeBalances(listingId);
+                (, , , uint256 yVolume) = IOMFListing(listingAddress).volumeBalances();
                 slot.dVolume = yVolume;
                 details.yLiquid += u.value;
             }
         }
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
+        emit LiquidityUpdated(details.xLiquid, details.yLiquid);
     }
 
     function addFees(address caller, bool isX, uint256 fee) external onlyRouter nonReentrant {
@@ -162,15 +165,15 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
         uint256 normalizedAmount = normalize(actualReceived, IERC20(token).decimals());
 
         UpdateType[] memory updates = new UpdateType[](1);
-        uint256 slotIndex = isX ? activeXLiquiditySlots[listingId].length : activeYLiquiditySlots[listingId].length;
+        uint256 slotIndex = isX ? activeXLiquiditySlots.length : activeYLiquiditySlots.length;
         updates[0] = UpdateType(isX ? 2 : 3, slotIndex, normalizedAmount, caller, address(0));
         this.update(caller, updates);
         emit LiquidityAdded(isX, normalizedAmount);
     }
 
     function xPrepOut(address caller, uint256 amount, uint256 index) external onlyRouter returns (PreparedWithdrawal memory) {
-        LiquidityDetails storage details = liquidityDetails[listingId];
-        Slot storage slot = xLiquiditySlots[listingId][index];
+        LiquidityDetails storage details = liquidityDetail;
+        Slot storage slot = xLiquiditySlots[index];
         require(slot.depositor == caller, "Not depositor");
         uint256 normalizedAmount = normalize(amount, IERC20(token0).decimals());
         require(slot.allocation >= normalizedAmount, "Amount exceeds allocation");
@@ -191,8 +194,8 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     }
 
     function yPrepOut(address caller, uint256 amount, uint256 index) external onlyRouter returns (PreparedWithdrawal memory) {
-        LiquidityDetails storage details = liquidityDetails[listingId];
-        Slot storage slot = yLiquiditySlots[listingId][index];
+        LiquidityDetails storage details = liquidityDetail;
+        Slot storage slot = yLiquiditySlots[index];
         require(slot.depositor == caller, "Not depositor");
         uint256 normalizedAmount = normalize(amount, IERC20(baseToken).decimals());
         require(slot.allocation >= normalizedAmount, "Amount exceeds allocation");
@@ -213,7 +216,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     }
 
     function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external onlyRouter nonReentrant {
-        Slot storage slot = xLiquiditySlots[listingId][index];
+        Slot storage slot = xLiquiditySlots[index];
         require(slot.depositor == caller, "Not depositor");
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(2, index, slot.allocation - withdrawal.amount0, slot.depositor, address(0));
@@ -228,7 +231,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     }
 
     function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external onlyRouter nonReentrant {
-        Slot storage slot = yLiquiditySlots[listingId][index];
+        Slot storage slot = yLiquiditySlots[index];
         require(slot.depositor == caller, "Not depositor");
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(3, index, slot.allocation - withdrawal.amount1, slot.depositor, address(0));
@@ -243,7 +246,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     }
 
     function transact(address caller, address token, uint256 amount, address recipient) external onlyRouter nonReentrant {
-        LiquidityDetails storage details = liquidityDetails[listingId];
+        LiquidityDetails storage details = liquidityDetail;
         uint256 normalizedAmount = normalize(amount, IERC20(token).decimals());
         if (token == token0) {
             require(details.xLiquid >= normalizedAmount, "Insufficient Token-0 liquidity");
@@ -253,15 +256,15 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
             details.yLiquid -= normalizedAmount;
         }
         IERC20(token).safeTransfer(recipient, amount);
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
+        emit LiquidityUpdated(details.xLiquid, details.yLiquid);
     }
 
     function claimFees(address caller, bool isX, uint256 slotIndex, uint256 /* volume */) external onlyRouter nonReentrant {
-        Slot storage slot = isX ? xLiquiditySlots[listingId][slotIndex] : yLiquiditySlots[listingId][slotIndex];
+        Slot storage slot = isX ? xLiquiditySlots[slotIndex] : yLiquiditySlots[slotIndex];
         require(slot.depositor == caller, "Not depositor");
-        LiquidityDetails storage details = liquidityDetails[listingId];
+        LiquidityDetails storage details = liquidityDetail;
 
-        (, , uint256 xVolume, uint256 yVolume) = IOMFListing(listingAddress).volumeBalances(listingId);
+        (, , uint256 xVolume, uint256 yVolume) = IOMFListing(listingAddress).volumeBalances();
         uint256 tVolume = isX ? xVolume : yVolume;
         uint256 liquid = isX ? details.xLiquid : details.yLiquid;
         uint256 fees = isX ? details.xFees : details.yFees;
@@ -296,8 +299,8 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     }
 
     function removeSlot(bool isX, uint256 slotIndex) internal {
-        mapping(uint256 => Slot) storage slots = isX ? xLiquiditySlots[listingId] : yLiquiditySlots[listingId];
-        uint256[] storage activeSlots = isX ? activeXLiquiditySlots[listingId] : activeYLiquiditySlots[listingId];
+        mapping(uint256 => Slot) storage slots = isX ? xLiquiditySlots : yLiquiditySlots;
+        uint256[] storage activeSlots = isX ? activeXLiquiditySlots : activeYLiquiditySlots;
         address depositor = slots[slotIndex].depositor;
         slots[slotIndex] = Slot(address(0), 0, 0, 0);
         for (uint256 i = 0; i < activeSlots.length; i++) {
@@ -330,22 +333,22 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
         return feeShare > fees ? fees : feeShare;
     }
 
-    function liquidityAmounts(uint256) external view returns (uint256 xAmount, uint256 yAmount) {
-        LiquidityDetails memory details = liquidityDetails[listingId];
+    function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount) {
+        LiquidityDetails memory details = liquidityDetail;
         return (details.xLiquid, details.yLiquid);
     }
 
-    function feeAmounts(uint256) external view returns (uint256 xFee, uint256 yFee) {
-        LiquidityDetails memory details = liquidityDetails[listingId];
+    function feeAmounts() external view returns (uint256 xFee, uint256 yFee) {
+        LiquidityDetails memory details = liquidityDetail;
         return (details.xFees, details.yFees);
     }
 
     function activeXLiquiditySlotsView() external view returns (uint256[] memory) {
-        return activeXLiquiditySlots[listingId];
+        return activeXLiquiditySlots;
     }
 
     function activeYLiquiditySlotsView() external view returns (uint256[] memory) {
-        return activeYLiquiditySlots[listingId];
+        return activeYLiquiditySlots;
     }
 
     function userIndexView(address user) external view returns (uint256[] memory) {
@@ -353,10 +356,10 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     }
 
     function getXSlotView(uint256 index) external view returns (Slot memory) {
-        return xLiquiditySlots[listingId][index];
+        return xLiquiditySlots[index];
     }
 
     function getYSlotView(uint256 index) external view returns (Slot memory) {
-        return yLiquiditySlots[listingId][index];
+        return yLiquiditySlots[index];
     }
 }

@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.8 (Updated)
+// Version: 0.0.9 (Updated)
 // Changes:
-// - Renamed tokenA to token0, tokenB to baseToken (from v0.0.5).
-// - Renamed xLiquid to xBalances, kept yBalances (from v0.0.5).
-// - Added xVolume and yVolume, added updateVolume (from v0.0.5).
-// - Inlined IOracle interface for getPrice() (from v0.0.5).
-// - Fixed transact, restricted updateVolume, added volume tracking (from v0.0.6).
-// - Aligned with MFPListingTemplate: setters, VolumeBalance, split Order, historical data, events, views (from v0.0.7).
-// - Added orderIdHeight and nextOrderId() for incremental order IDs, managed in update (new in v0.0.8).
+// - From v0.0.8: Removed listingId as function parameter, made implicit via stored state (all functions and events).
+// - Updated mappings to remove listingId key: volumeBalances, liquidityAddresses, prices, pendingBuyOrders, pendingSellOrders, historicalData.
+// - Updated IOMFListing interface: volumeBalances() no longer takes listingId.
+// - Updated events: Removed listingId from OrderUpdated and BalancesUpdated.
+// - Retained original 'this.' usage for internal calls as per request.
+// - Aligned with prior changes (v0.0.8): Renamed tokenA to token0, tokenB to baseToken, xLiquid to xBalances, added volume tracking, orderIdHeight, etc.
 
 import "./imports/SafeERC20.sol";
+
+interface IOMFListing {
+    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
+    function getPrice() external view returns (uint256);
+}
 
 contract OMFListingTemplate {
     using SafeERC20 for IERC20;
@@ -70,18 +74,18 @@ contract OMFListingTemplate {
         uint256 timestamp;
     }
 
-    mapping(uint256 => VolumeBalance) public volumeBalances;
-    mapping(uint256 => address) public liquidityAddresses;
-    mapping(uint256 => uint256) public prices;
+    VolumeBalance public volumeBalance;
+    address public liquidityAddress;
+    uint256 public price;
     mapping(uint256 => BuyOrder) public buyOrders;
     mapping(uint256 => SellOrder) public sellOrders;
-    mapping(uint256 => uint256[]) public pendingBuyOrders;
-    mapping(uint256 => uint256[]) public pendingSellOrders;
+    uint256[] public pendingBuyOrders;
+    uint256[] public pendingSellOrders;
     mapping(address => uint256[]) public makerPendingOrders;
-    mapping(uint256 => HistoricalData[]) public historicalData;
+    HistoricalData[] public historicalData;
 
-    event OrderUpdated(uint256 listingId, uint256 orderId, bool isBuy, uint8 status);
-    event BalancesUpdated(uint256 listingId, uint256 xBalance, uint256 yBalance);
+    event OrderUpdated(uint256 orderId, bool isBuy, uint8 status);
+    event BalancesUpdated(uint256 xBalance, uint256 yBalance);
 
     constructor() {
         orderIdHeight = 0; // Initialize orderIdHeight
@@ -105,9 +109,9 @@ contract OMFListingTemplate {
     }
 
     function setLiquidityAddress(address _liquidityAddress) external {
-        require(liquidityAddresses[listingId] == address(0), "Liquidity already set");
+        require(liquidityAddress == address(0), "Liquidity already set");
         require(_liquidityAddress != address(0), "Invalid liquidity address");
-        liquidityAddresses[listingId] = _liquidityAddress;
+        liquidityAddress = _liquidityAddress;
     }
 
     function setTokens(address _token0, address _baseToken) external {
@@ -137,7 +141,7 @@ contract OMFListingTemplate {
     }
 
     function update(address caller, UpdateType[] memory updates) external onlyRouter {
-        VolumeBalance storage balances = volumeBalances[listingId];
+        VolumeBalance storage balances = volumeBalance;
 
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
@@ -156,16 +160,16 @@ contract OMFListingTemplate {
                     order.minPrice = u.minPrice;
                     order.pending = u.value;
                     order.status = 1;
-                    pendingBuyOrders[listingId].push(u.index);
+                    pendingBuyOrders.push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
                     balances.yBalance += u.value; // Deposit increases yBalance
                     balances.yVolume += u.value;  // Track order volume
-                    emit OrderUpdated(listingId, u.index, true, 1);
+                    emit OrderUpdated(u.index, true, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
-                    removePendingOrder(pendingBuyOrders[listingId], u.index);
+                    removePendingOrder(pendingBuyOrders, u.index);
                     removePendingOrder(makerPendingOrders[u.addr], u.index);
-                    emit OrderUpdated(listingId, u.index, true, 0);
+                    emit OrderUpdated(u.index, true, 0);
                 } else if (order.status == 1) { // Fill order
                     require(order.pending >= u.value, "Insufficient pending");
                     order.pending -= u.value;
@@ -173,10 +177,10 @@ contract OMFListingTemplate {
                     balances.xBalance -= u.value; // Reduce xBalance on fill
                     order.status = order.pending == 0 ? 3 : 2;
                     if (order.pending == 0) {
-                        removePendingOrder(pendingBuyOrders[listingId], u.index);
+                        removePendingOrder(pendingBuyOrders, u.index);
                         removePendingOrder(makerPendingOrders[order.makerAddress], u.index);
                     }
-                    emit OrderUpdated(listingId, u.index, true, order.status);
+                    emit OrderUpdated(u.index, true, order.status);
                 }
             } else if (u.updateType == 2) { // Sell order update
                 SellOrder storage order = sellOrders[u.index];
@@ -188,16 +192,16 @@ contract OMFListingTemplate {
                     order.minPrice = u.minPrice;
                     order.pending = u.value;
                     order.status = 1;
-                    pendingSellOrders[listingId].push(u.index);
+                    pendingSellOrders.push(u.index);
                     makerPendingOrders[u.addr].push(u.index);
                     balances.xBalance += u.value; // Deposit increases xBalance
                     balances.xVolume += u.value;  // Track order volume
-                    emit OrderUpdated(listingId, u.index, false, 1);
+                    emit OrderUpdated(u.index, false, 1);
                 } else if (u.value == 0) { // Cancel order
                     order.status = 0;
-                    removePendingOrder(pendingSellOrders[listingId], u.index);
+                    removePendingOrder(pendingSellOrders, u.index);
                     removePendingOrder(makerPendingOrders[u.addr], u.index);
-                    emit OrderUpdated(listingId, u.index, false, 0);
+                    emit OrderUpdated(u.index, false, 0);
                 } else if (order.status == 1) { // Fill order
                     require(order.pending >= u.value, "Insufficient pending");
                     order.pending -= u.value;
@@ -205,13 +209,13 @@ contract OMFListingTemplate {
                     balances.yBalance -= u.value; // Reduce yBalance on fill
                     order.status = order.pending == 0 ? 3 : 2;
                     if (order.pending == 0) {
-                        removePendingOrder(pendingSellOrders[listingId], u.index);
+                        removePendingOrder(pendingSellOrders, u.index);
                         removePendingOrder(makerPendingOrders[order.makerAddress], u.index);
                     }
-                    emit OrderUpdated(listingId, u.index, false, order.status);
+                    emit OrderUpdated(u.index, false, order.status);
                 }
             } else if (u.updateType == 3) { // Historical data
-                historicalData[listingId].push(HistoricalData(
+                historicalData.push(HistoricalData(
                     u.value, // price
                     u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1), // xBalance, yBalance
                     u.minPrice >> 128, u.minPrice & ((1 << 128) - 1), // xVolume, yVolume
@@ -221,13 +225,13 @@ contract OMFListingTemplate {
         }
 
         if (balances.xBalance > 0 && balances.yBalance > 0) {
-            prices[listingId] = (balances.xBalance * 1e18) / balances.yBalance;
+            price = (balances.xBalance * 1e18) / balances.yBalance;
         }
-        emit BalancesUpdated(listingId, balances.xBalance, balances.yBalance);
+        emit BalancesUpdated(balances.xBalance, balances.yBalance);
     }
 
     function transact(address caller, address token, uint256 amount, address recipient) external onlyRouter {
-        VolumeBalance storage balances = volumeBalances[listingId];
+        VolumeBalance storage balances = volumeBalance;
         uint8 decimals = IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
 
@@ -246,9 +250,9 @@ contract OMFListingTemplate {
         }
 
         if (balances.xBalance > 0 && balances.yBalance > 0) {
-            prices[listingId] = (balances.xBalance * 1e18) / balances.yBalance;
+            price = (balances.xBalance * 1e18) / balances.yBalance;
         }
-        emit BalancesUpdated(listingId, balances.xBalance, balances.yBalance);
+        emit BalancesUpdated(balances.xBalance, balances.yBalance);
     }
 
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
@@ -275,20 +279,20 @@ contract OMFListingTemplate {
 
     // View functions
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
-        VolumeBalance memory bal = volumeBalances[listingId];
+        VolumeBalance memory bal = volumeBalance;
         return (bal.xBalance, bal.yBalance, bal.xVolume, bal.yVolume);
     }
 
     function listingPriceView() external view returns (uint256) {
-        return prices[listingId];
+        return price;
     }
 
     function pendingBuyOrdersView() external view returns (uint256[] memory) {
-        return pendingBuyOrders[listingId];
+        return pendingBuyOrders;
     }
 
     function pendingSellOrdersView() external view returns (uint256[] memory) {
-        return pendingSellOrders[listingId];
+        return pendingSellOrders;
     }
 
     function makerPendingOrdersView(address maker) external view returns (uint256[] memory) {
@@ -296,11 +300,11 @@ contract OMFListingTemplate {
     }
 
     function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory) {
-        require(index < historicalData[listingId].length, "Invalid index");
-        return historicalData[listingId][index];
+        require(index < historicalData.length, "Invalid index");
+        return historicalData[index];
     }
 
     function historicalDataLengthView() external view returns (uint256) {
-        return historicalData[listingId].length;
+        return historicalData.length;
     }
 }

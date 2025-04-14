@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.8 (Updated)
+// Version: 0.0.9 (Updated)
 // Changes:
+// - From v0.0.8: Removed listingId from all functions to align with implicit listingId in OMFListingTemplate.
+// - Updated inlined IOMFListing calls: Changed liquidityAddresses() to liquidityAddress().
 // - Renamed tokenA to token0, tokenB to baseToken (Token-0 to Token-1) (from v0.0.7).
 // - Adjusted settlement to use transact from listing, removed direct deposit/withdraw (from v0.0.7).
 // - Fully inlined all interfaces (IOMFListing, IOMFLiquidity) within functions (from v0.0.7).
-// - Fixed UpdateType scoping to OMFLiquidLibrary.UpdateType (new in v0.0.8).
-// - Aligned order decoding to 7-element struct (new in v0.0.8).
-// - Fixed stack-too-deep in prepBuyLiquid/prepSellLiquid: Added PrepState struct and helper functions (this revision).
+// - Fixed UpdateType scoping to OMFLiquidLibrary.UpdateType (from v0.0.8).
+// - Aligned order decoding to 7-element struct (from v0.0.8).
+// - Fixed stack-too-deep in prepBuyLiquid/prepSellLiquid: Added PrepState struct and helper functions (from v0.0.8).
 
 import "./imports/SafeERC20.sol";
 
@@ -59,8 +61,9 @@ library OMFLiquidLibrary {
         {
             (bool success0, bytes memory data0) = listingAddress.staticcall(abi.encodeWithSignature("token0()"));
             (bool success1, bytes memory data1) = listingAddress.staticcall(abi.encodeWithSignature("baseToken()"));
-            if (success0) state.token0 = abi.decode(data0, (address));
-            if (success1) state.baseToken = abi.decode(data1, (address));
+            require(success0 && success1, "Token fetch failed");
+            state.token0 = abi.decode(data0, (address));
+            state.baseToken = abi.decode(data1, (address));
         }
         data.token0 = state.token0;
         data.baseToken = state.baseToken;
@@ -81,7 +84,7 @@ library OMFLiquidLibrary {
             require(success, "Buy order fetch failed");
             (
                 address makerAddress,
-                address recipient,
+                address recipientAddress,
                 uint256 maxPrice,
                 uint256 minPrice,
                 uint256 pending,
@@ -89,7 +92,7 @@ library OMFLiquidLibrary {
                 uint8 status
             ) = abi.decode(returnData, (address, address, uint256, uint256, uint256, uint256, uint8));
             require(status == 1, "Order not active");
-            data.updates[i] = PreparedUpdate(orderIds[i], pending, recipient);
+            data.updates[i] = PreparedUpdate(orderIds[i], pending, recipientAddress);
         }
     }
 
@@ -108,8 +111,9 @@ library OMFLiquidLibrary {
         {
             (bool success0, bytes memory data0) = listingAddress.staticcall(abi.encodeWithSignature("token0()"));
             (bool success1, bytes memory data1) = listingAddress.staticcall(abi.encodeWithSignature("baseToken()"));
-            if (success0) state.token0 = abi.decode(data0, (address));
-            if (success1) state.baseToken = abi.decode(data1, (address));
+            require(success0 && success1, "Token fetch failed");
+            state.token0 = abi.decode(data0, (address));
+            state.baseToken = abi.decode(data1, (address));
         }
         data.token0 = state.token0;
         data.baseToken = state.baseToken;
@@ -130,7 +134,7 @@ library OMFLiquidLibrary {
             require(success, "Sell order fetch failed");
             (
                 address makerAddress,
-                address recipient,
+                address recipientAddress,
                 uint256 maxPrice,
                 uint256 minPrice,
                 uint256 pending,
@@ -138,7 +142,7 @@ library OMFLiquidLibrary {
                 uint8 status
             ) = abi.decode(returnData, (address, address, uint256, uint256, uint256, uint256, uint8));
             require(status == 1, "Order not active");
-            data.updates[i] = PreparedUpdate(orderIds[i], pending, recipient);
+            data.updates[i] = PreparedUpdate(orderIds[i], pending, recipientAddress);
         }
     }
 
@@ -237,14 +241,14 @@ library OMFLiquidLibrary {
         address liquidity;
         {
             (bool success, bytes memory returnData) = listingAddress.staticcall(
-                abi.encodeWithSignature("liquidityAddresses(uint256)", 0)
+                abi.encodeWithSignature("liquidityAddress()")
             );
             require(success, "Liquidity address fetch failed");
             liquidity = abi.decode(returnData, (address));
         }
 
         (bool success, ) = liquidity.call(
-            abi.encodeWithSignature("claimFees(address,bool,uint256)", msg.sender, isX, volume)
+            abi.encodeWithSignature("claimFees(address,bool,uint256,uint256)", msg.sender, isX, 0, volume)
         );
         require(success, "Claim fees failed");
     }

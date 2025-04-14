@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.10 (Updated)
+// Version: 0.0.12 (Updated)
 // Changes:
+// - From v0.0.11: Renamed clearOrders to clearUserOrders and updated to call OMFOrderLibrary.clearOrders with msg.sender.
+// - From v0.0.10: Removed listingId from all functions to align with implicit listingId in OMFListingTemplate.
+// - Updated IOMFListing interface: Changed liquidityAddresses() to liquidityAddress().
 // - Updated tokenA to token0, using baseToken from OMFAgent (from v0.0.8).
 // - Added volume updates to OMFListingTemplate, added withdrawLiquidity (from v0.0.8).
 // - Inlined interfaces for OMFAgent, IOMFOrderLibrary, IOMFSettlementLibrary, IOMFLiquidLibrary, IOMFLiquidity (from v0.0.8).
 // - Replaced updateVolume with update calls, updated withdrawLiquidity to prep/execute (from v0.0.9).
-// - Aligned with OMFListingTemplate v0.0.7, removed constructor args, streamlined functions, added claimFees (from last revision).
-// - Moved IOMFListing to top with other interfaces (from last revision).
-// - Updated claimFees to include slotIndex for OMFLiquidityTemplate compatibility (previous revision).
-// - Removed redundant UpdateType struct to fix DeclarationError conflict with IOMFOrderLibrary (this revision).
+// - Aligned with OMFListingTemplate v0.0.7, removed constructor args, streamlined functions, added claimFees (from previous revision).
+// - Moved IOMFListing to top with other interfaces (from previous revision).
+// - Updated claimFees to include slotIndex for OMFLiquidityTemplate compatibility (from previous revision).
+// - Removed redundant UpdateType struct to fix DeclarationError conflict with IOMFOrderLibrary (from previous revision).
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
 
 interface IOMFListing {
     function token0() external view returns (address);
-    function liquidityAddresses(uint256 index) external view returns (address);
+    function liquidityAddress() external view returns (address);
     function update(address caller, IOMFOrderLibrary.UpdateType[] memory updates) external;
 }
 
@@ -44,7 +47,7 @@ interface IOMFOrderLibrary {
     function executeBuyOrder(address listingAddress, OrderPrep memory prep, address listingAgent, address proxy) external;
     function executeSellOrder(address listingAddress, OrderPrep memory prep, address listingAgent, address proxy) external;
     function clearSingleOrder(address listingAddress, uint256 orderId, bool isBuy, address listingAgent, address proxy) external;
-    function clearOrders(address listingAddress, address listingAgent, address proxy) external;
+    function clearOrders(address listingAddress, address listingAgent, address proxy, address user) external;
 }
 
 interface IOMFSettlementLibrary {
@@ -61,7 +64,7 @@ interface IOMFLiquidLibrary {
     function prepSellLiquid(address listingAddress, uint256[] memory orderIds, address listingAgent, address proxy) external view returns (SettlementData memory);
     function executeBuyLiquid(address listingAddress, SettlementData memory data, address listingAgent, address proxy) external;
     function executeSellLiquid(address listingAddress, SettlementData memory data, address listingAgent, address proxy) external;
-    function claimFees(address listingAddress, bool isX, uint256 volume) external; // Assumed signature; may need slotIndex if updated
+    function claimFees(address listingAddress, bool isX, uint256 volume) external;
 }
 
 interface IOMFLiquidity {
@@ -192,12 +195,12 @@ contract OMFProxyRouter is Ownable {
         emit OrderCleared(orderId, isBuy);
     }
 
-    function clearOrders(address token0) external {
+    function clearUserOrders(address token0) external {
         address listing = getListing(token0);
         (bool success, ) = orderLibrary.call(
-            abi.encodeWithSignature("clearOrders(address,address,address)", listing, agent, address(this))
+            abi.encodeWithSignature("clearOrders(address,address,address,address)", listing, agent, address(this), msg.sender)
         );
-        require(success, "Clear orders failed");
+        require(success, "Clear user orders failed");
     }
 
     function claimFees(address token0, bool isX, uint256 slotIndex, uint256 volume) external {
@@ -218,7 +221,7 @@ contract OMFProxyRouter is Ownable {
     }
 
     function getLiquidityAddress(address listing) internal view returns (address) {
-        (bool success, bytes memory returnData) = listing.staticcall(abi.encodeWithSignature("liquidityAddresses(uint256)", 0));
+        (bool success, bytes memory returnData) = listing.staticcall(abi.encodeWithSignature("liquidityAddress()"));
         require(success, "Liquidity address fetch failed");
         return abi.decode(returnData, (address));
     }

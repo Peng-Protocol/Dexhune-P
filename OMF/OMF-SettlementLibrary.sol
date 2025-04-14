@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.5 (Updated)
+// Version: 0.0.7 (Updated)
 // Changes:
+// - From v0.0.6: Fixed stack-too-deep in processBuyOrder/processSellOrder by introducing ProcessOrderState struct and helper functions computeOrderAmounts/performTransactionAndAdjust.
+// - From v0.0.5: Removed listingId from all functions and interfaces to align with implicit listingId in OMFListingTemplate.
+// - Updated IOMFListing interface: Removed listingId from volumeBalances(), liquidityAddresses().
 // - Fixed E7: Added tax-on-transfer checks in executeBuyOrders/executeSellOrders (from v0.0.4).
 // - Fixed E1: Inverted price for buy orders (tokenBAmount = tokenAAmount / price) (from v0.0.4).
 // - Fixed E2: Removed redundant decimal conversion, relying on OMFListingTemplate.getPrice() (from v0.0.4).
-// - Updated for OMFListingTemplate v0.0.7: 7-field BuyOrder/SellOrder, token0/baseToken, added yVolume tracking (new in v0.0.5).
-// - Fixed assembly errors in prepBuyOrders/prepSellOrders: Correctly set data.updates length using data.orderCount (previous revision).
-// - Fixed stack-too-deep in execute$order and prep$order: Added ExecutionState and PrepState structs with helper functions (this revision).
+// - Updated for OMFListingTemplate v0.0.7: 7-field BuyOrder/SellOrder, token0/baseToken, added yVolume tracking (from v0.0.5).
+// - Fixed assembly errors in prepBuyOrders/prepSellOrders: Correctly set data.updates length using data.orderCount (from v0.0.5).
+// - Fixed stack-too-deep in execute$order and prep$order: Added ExecutionState and PrepState structs with helper functions (from v0.0.5).
 
 import "./imports/SafeERC20.sol";
 
@@ -25,6 +28,7 @@ interface IOMFListing {
     function token0() external view returns (address);
     function baseToken() external view returns (address);
     function getPrice() external view returns (uint256);
+    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function buyOrders(uint256 orderId) external view returns (
         address makerAddress,
         address recipientAddress,
@@ -77,6 +81,48 @@ library OMFSettlementLibrary {
         IERC20 baseToken;
     }
 
+    struct ProcessOrderState {
+        uint256 baseTokenAmount;
+        uint256 token0Amount;
+        uint256 actualReceived;
+        uint256 adjustedValue;
+        address recipientAddress;
+        uint256 preBalance;
+        uint256 postBalance;
+    }
+
+    // Helper function to compute order amounts
+    function computeOrderAmounts(
+        uint256 price,
+        uint256 pending,
+        bool isBuy
+    ) internal pure returns (uint256 baseTokenAmount, uint256 token0Amount) {
+        if (isBuy) {
+            baseTokenAmount = pending;
+            token0Amount = (baseTokenAmount * 1e18) / price;
+        } else {
+            token0Amount = pending;
+            baseTokenAmount = (token0Amount * price) / 1e18;
+        }
+    }
+
+    // Helper function to perform transaction and adjust for tax-on-transfer
+    function performTransactionAndAdjust(
+        IOMFListing listing,
+        address proxy,
+        IERC20 baseToken,
+        uint256 amount,
+        address recipient,
+        uint256 price,
+        bool isBuy
+    ) internal returns (uint256 actualReceived, uint256 adjustedValue) {
+        uint256 preBalance = baseToken.balanceOf(recipient);
+        listing.transact(proxy, address(baseToken), amount, recipient);
+        uint256 postBalance = baseToken.balanceOf(recipient);
+        actualReceived = postBalance - preBalance;
+        adjustedValue = isBuy ? (actualReceived * price) / 1e18 : (actualReceived * 1e18) / price;
+    }
+
     function prepBuyOrders(
         address listingAddress,
         uint256[] memory orderIds,
@@ -109,8 +155,8 @@ library OMFSettlementLibrary {
     ) internal view {
         for (uint256 i = 0; i < pendingOrders.length; i++) {
             (
-                address maker,
-                address recipient,
+                address makerAddress,
+                address recipientAddress,
                 uint256 maxPrice,
                 uint256 minPrice,
                 uint256 pending,
@@ -118,7 +164,7 @@ library OMFSettlementLibrary {
                 uint8 status
             ) = state.listing.buyOrders(pendingOrders[i]);
             if (status == 1 && pending > 0 && state.price >= minPrice && state.price <= maxPrice) {
-                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, recipient);
+                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, recipientAddress);
                 data.orderCount++;
             }
         }
@@ -153,18 +199,51 @@ library OMFSettlementLibrary {
         ExecutionState memory state,
         address proxy
     ) internal {
-        (, address recipient, , , uint256 pending, , ) = listing.buyOrders(update.orderId);
-        uint256 baseTokenAmount = pending; // baseToken to spend
-        uint256 token0Amount = (baseTokenAmount * 1e18) / state.price; // token0 to receive
-        state.totalBaseToken += baseTokenAmount;
+        // Explicit destructuring
+        address makerAddress;
+        address recipientAddress;
+        uint256 maxPrice;
+        uint256 minPrice;
+        uint256 pending;
+        uint256 filled;
+        uint8 status;
+        (
+            makerAddress,
+            recipientAddress,
+            maxPrice,
+            minPrice,
+            pending,
+            filled,
+            status
+        ) = listing.buyOrders(update.orderId);
 
-        uint256 preBalance = state.baseToken.balanceOf(recipient);
-        listing.transact(proxy, address(state.baseToken), token0Amount, recipient);
-        uint256 postBalance = state.baseToken.balanceOf(recipient);
-        uint256 actualReceived = postBalance - preBalance;
-        uint256 adjustedValue = (actualReceived * state.price) / 1e18; // Adjust baseToken spent
+        ProcessOrderState memory orderState;
+        orderState.recipientAddress = recipientAddress;
+
+        // Compute amounts
+        (orderState.baseTokenAmount, orderState.token0Amount) = computeOrderAmounts(state.price, pending, true);
+        state.totalBaseToken += orderState.baseTokenAmount;
+
+        // Perform transaction and adjust
+        (orderState.actualReceived, orderState.adjustedValue) = performTransactionAndAdjust(
+            listing,
+            proxy,
+            state.baseToken,
+            orderState.token0Amount,
+            recipientAddress,
+            state.price,
+            true
+        );
+
+        // Update order
         updates[index] = IOMFListing.UpdateType(
-            1, update.orderId, pending > adjustedValue ? pending - adjustedValue : 0, address(0), recipient, 0, 0
+            1,
+            update.orderId,
+            pending > orderState.adjustedValue ? pending - orderState.adjustedValue : 0,
+            address(0),
+            recipientAddress,
+            0,
+            0
         );
     }
 
@@ -200,8 +279,8 @@ library OMFSettlementLibrary {
     ) internal view {
         for (uint256 i = 0; i < pendingOrders.length; i++) {
             (
-                address maker,
-                address recipient,
+                address makerAddress,
+                address recipientAddress,
                 uint256 maxPrice,
                 uint256 minPrice,
                 uint256 pending,
@@ -209,7 +288,7 @@ library OMFSettlementLibrary {
                 uint8 status
             ) = state.listing.sellOrders(pendingOrders[i]);
             if (status == 1 && pending > 0 && state.price >= minPrice && state.price <= maxPrice) {
-                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, recipient);
+                data.updates[data.orderCount] = PreparedUpdate(pendingOrders[i], pending, recipientAddress);
                 data.orderCount++;
             }
         }
@@ -244,18 +323,51 @@ library OMFSettlementLibrary {
         ExecutionState memory state,
         address proxy
     ) internal {
-        (, address recipient, , , uint256 pending, , ) = listing.sellOrders(update.orderId);
-        uint256 token0Amount = pending; // token0 to send
-        uint256 baseTokenAmount = (token0Amount * state.price) / 1e18; // baseToken to receive
-        state.totalBaseToken += baseTokenAmount;
+        // Explicit destructuring
+        address makerAddress;
+        address recipientAddress;
+        uint256 maxPrice;
+        uint256 minPrice;
+        uint256 pending;
+        uint256 filled;
+        uint8 status;
+        (
+            makerAddress,
+            recipientAddress,
+            maxPrice,
+            minPrice,
+            pending,
+            filled,
+            status
+        ) = listing.sellOrders(update.orderId);
 
-        uint256 preBalance = state.baseToken.balanceOf(recipient);
-        listing.transact(proxy, address(state.baseToken), baseTokenAmount, recipient);
-        uint256 postBalance = state.baseToken.balanceOf(recipient);
-        uint256 actualReceived = postBalance - preBalance;
-        uint256 adjustedValue = (actualReceived * 1e18) / state.price; // Adjust token0 sent
+        ProcessOrderState memory orderState;
+        orderState.recipientAddress = recipientAddress;
+
+        // Compute amounts
+        (orderState.baseTokenAmount, orderState.token0Amount) = computeOrderAmounts(state.price, pending, false);
+        state.totalBaseToken += orderState.baseTokenAmount;
+
+        // Perform transaction and adjust
+        (orderState.actualReceived, orderState.adjustedValue) = performTransactionAndAdjust(
+            listing,
+            proxy,
+            state.baseToken,
+            orderState.baseTokenAmount,
+            recipientAddress,
+            state.price,
+            false
+        );
+
+        // Update order
         updates[index] = IOMFListing.UpdateType(
-            2, update.orderId, pending > adjustedValue ? pending - adjustedValue : 0, address(0), recipient, 0, 0
+            2,
+            update.orderId,
+            pending > orderState.adjustedValue ? pending - orderState.adjustedValue : 0,
+            address(0),
+            recipientAddress,
+            0,
+            0
         );
     }
 }
