@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.7 (Updated)
+// Version: 0.0.8 (Updated)
 // Changes:
-// - Removed listingId from liquidityAddresses, volumeBalances, prices, pendingBuyOrders, pendingSellOrders calls; uses updated IMFPListing interface (new in v0.0.7).
-// - Updated clearOrders to use pendingBuyOrders(), pendingSellOrders() without listingId (new in v0.0.7).
-// - Updated IMFPListing interface to remove listingId parameters (new in v0.0.7).
-// - Side effects: Aligns with MFPListingTemplate’s stored listingId; ensures clearOrders targets correct listing.
+// - Added denormalize function to handle non-18 decimal tokens (new in v0.0.8).
+// - Updated clearSingleOrder to denormalize refundAmount before transact (new in v0.0.8).
+// - Updated clearOrders to denormalize pending amounts before transact (new in v0.0.8).
+// - Side effects: Corrects refund amounts for tokens with non-18 decimals (e.g., USDC); aligns with MFP-SettlementLibrary’s processOrder.
+// - No changes to prepBuyOrder, prepSellOrder, executeBuyOrder, executeSellOrder.
+// - Retains alignment with MFPListingTemplate’s stored listingId (from v0.0.7).
 
 import "./imports/SafeERC20.sol";
 
@@ -94,6 +96,12 @@ library MFPOrderLibrary {
         }
         fee = (normalized * 5) / 10000; // 0.05% fee
         principal = normalized - fee;
+    }
+
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10**(18 - decimals);
+        else return amount * 10**(decimals - 18);
     }
 
     function _createOrderUpdate(
@@ -263,7 +271,9 @@ library MFPOrderLibrary {
         }
 
         if (refundAmount > 0) {
-            listing.transact(proxy, token, refundAmount, refundTo);
+            uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+            uint256 rawAmount = denormalize(refundAmount, decimals);
+            listing.transact(proxy, token, rawAmount, refundTo);
         }
 
         IMFPListing.UpdateType[] memory updates = _createOrderUpdate(isBuy ? 1 : 2, orderId, 0, address(0), address(0), 0, 0);
@@ -296,7 +306,10 @@ library MFPOrderLibrary {
             if (status == 1 || status == 2) {
                 address refundTo = recipient != address(0) ? recipient : maker;
                 if (pending > 0) {
-                    listing.transact(bracket, listing.tokenA(), pending, refundTo);
+                    address token = listing.tokenA();
+                    uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+                    uint256 rawAmount = denormalize(pending, decimals);
+                    listing.transact(bracket, token, rawAmount, refundTo);
                 }
                 updates[updateCount] = _createOrderUpdate(1, buyOrders[i], 0, address(0), address(0), 0, 0)[0];
                 updateCount++;
@@ -313,7 +326,10 @@ library MFPOrderLibrary {
             if (status == 1 || status == 2) {
                 address refundTo = recipient != address(0) ? recipient : maker;
                 if (pending > 0) {
-                    listing.transact(bracket, listing.tokenB(), pending, refundTo);
+                    address token = listing.tokenB();
+                    uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+                    uint256 rawAmount = denormalize(pending, decimals);
+                    listing.transact(bracket, token, rawAmount, refundTo);
                 }
                 updates[updateCount] = _createOrderUpdate(2, sellOrders[i], 0, address(0), address(0), 0, 0)[0];
                 updateCount++;
