@@ -1,22 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.12 (Updated)
+// Version: 0.0.13 (Updated)
 // Changes:
-// - From v0.0.11: Fixed stack-too-deep in clearOrders/clearSingleOrder by introducing ClearOrderState struct and helper functions validateAndPrepareRefund/executeRefundAndUpdate.
-// - From v0.0.10: Updated clearOrders to only clear orders for the user caller (msg.sender) using makerPendingOrdersView.
-// - From v0.0.9: Removed listingId from all functions and interfaces to align with implicit listingId in OMFListingTemplate.
-// - Updated IOMFListing interface: Changed liquidityAddresses() to liquidityAddress().
-// - Added tax-on-transfer adjustment via adjustOrder (from v0.0.6).
-// - Replaced block.timestamp with order counter (from v0.0.6).
-// - Fixed adjustOrder to overwrite original orderId (from v0.0.6).
-// - Updated prep$Order to return orderId (from v0.0.6).
-// - Aligned with OMFListingTemplate v0.0.7 status codes (from v0.0.7).
-// - Removed nextOrderId input, added prep/execute split, normalization, events, refunds, historical updates (from v0.0.8).
-// - Fetch orderId from OMFListingTemplate.nextOrderId() (from v0.0.9).
-// - Added missing SafeERC20 import to fix DeclarationError (from previous revision).
-// - Fixed stack-too-deep in executeBuyOrder/executeSellOrder: Added ExecutionState struct and helper functions (from previous revision).
-// - Fixed DeclarationError "state" visibility: Refactored ExecutionState initialization (from previous revision).
+// - From v0.0.12: Added denormalize function to handle non-18 decimal tokens (new in v0.0.13).
+// - From v0.0.12: Updated executeRefundAndUpdate to denormalize refundAmount before transact (new in v0.0.13).
+// - Side effects: Corrects refund amounts for tokens with non-18 decimals (e.g., USDC); aligns with MFP-OrderLibrary v0.0.8.
+// - No changes to prepBuyOrder, prepSellOrder, executeBuyOrder, executeSellOrder, adjustOrder.
+// - Retains fixes from v0.0.12: Fixed stack-too-deep in clearOrders/clearSingleOrder using ClearOrderState and helpers.
+// - Retains alignment with OMFListingTemplate’s implicit listingId (from v0.0.9).
 
 import "./imports/SafeERC20.sol";
 
@@ -150,24 +142,6 @@ interface IOMFOrderLibrary {
 library OMFOrderLibrary {
     using SafeERC20 for IERC20;
 
-    struct OrderPrep {
-        uint256 orderId;
-        uint256 principal;
-        uint256 fee;
-        IOMFListing.UpdateType[] updates;
-        address token;
-        address recipient;
-    }
-
-    struct PrepData {
-        uint256 normalized;
-        uint256 fee;
-        uint256 principal;
-        uint256 orderId;
-        IOMFListing.UpdateType[] updates;
-        address token;
-    }
-
     struct ExecutionState {
         IOMFListing listing;
         IOMFLiquidity liquidity;
@@ -206,6 +180,12 @@ library OMFOrderLibrary {
         principal = normalized - fee;
     }
 
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10**(18 - decimals);
+        else return amount * 10**(decimals - 18);
+    }
+
     function _createOrderUpdate(
         uint8 updateType,
         uint256 orderId,
@@ -220,7 +200,6 @@ library OMFOrderLibrary {
         return updates;
     }
 
-    // New helper for validating and preparing refund
     function validateAndPrepareRefund(
         IOMFListing listing,
         uint256 orderId,
@@ -261,7 +240,7 @@ library OMFOrderLibrary {
         } else {
             (
                 address makerAddress,
-                address recipientAddress,
+                address recipientAddress/,
                 uint256 maxPrice,
                 uint256 minPrice,
                 uint256 pending,
@@ -283,7 +262,6 @@ library OMFOrderLibrary {
         return (orderState, false);
     }
 
-    // New helper for executing refund and updating order
     function executeRefundAndUpdate(
         IOMFListing listing,
         address proxy,
@@ -294,7 +272,9 @@ library OMFOrderLibrary {
         uint256 orderId
     ) internal {
         if (orderState.refundAmount > 0) {
-            listing.transact(proxy, orderState.token, orderState.refundAmount, orderState.refundTo);
+            uint8 decimals = IERC20(orderState.token).decimals();
+            uint256 rawAmount = denormalize(orderState.refundAmount, decimals);
+            listing.transact(proxy, orderState.token, rawAmount, orderState.refundTo);
         }
         updates[updateIndex] = IOMFListing.UpdateType(
             isBuy ? 1 : 2,
