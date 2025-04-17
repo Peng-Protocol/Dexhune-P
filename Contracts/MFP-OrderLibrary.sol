@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.8 (Updated)
+// Version: 0.0.10 (Updated)
 // Changes:
-// - Added denormalize function to handle non-18 decimal tokens (new in v0.0.8).
-// - Updated clearSingleOrder to denormalize refundAmount before transact (new in v0.0.8).
-// - Updated clearOrders to denormalize pending amounts before transact (new in v0.0.8).
-// - Side effects: Corrects refund amounts for tokens with non-18 decimals (e.g., USDC); aligns with MFP-SettlementLibrary’s processOrder.
-// - No changes to prepBuyOrder, prepSellOrder, executeBuyOrder, executeSellOrder.
+// - From v0.0.9: Updated executeBuyOrder and executeSellOrder to handle tax-on-transfer tokens by using post-tax receivedPrincipal and receivedFee (new in v0.0.10).
+// - From v0.0.9: Removed reverts for receivedPrincipal < prep.principal and receivedFee < prep.fee; store receivedPrincipal in updates and use receivedFee in addFees (new in v0.0.10).
+// - From v0.0.9: Side effect: Prevents reverts for tax-on-transfer tokens; ensures actual received amounts are stored and used.
+// - From v0.0.9: Updated clearSingleOrder to restrict cancellation to order maker (msg.sender).
+// - From v0.0.9: Updated clearOrders to clear only caller's orders using makerPendingOrdersView.
+// - From v0.0.9: Changed clearOrders signature to include caller parameter and use proxy instead of bracket.
+// - From v0.0.9: Side effect: Enhances security by preventing unauthorized order cancellations.
+// - From v0.0.8: Added denormalize function to handle non-18 decimal tokens.
+// - From v0.0.8: Updated clearSingleOrder to denormalize refundAmount before transact.
+// - From v0.0.8: Updated clearOrders to denormalize pending amounts before transact.
+// - From v0.0.8: Side effects: Corrects refund amounts for tokens with non-18 decimals (e.g., USDC); aligns with MFP-SettlementLibrary’s processOrder.
+// - No changes to prepBuyOrder, prepSellOrder.
 // - Retains alignment with MFPListingTemplate’s stored listingId (from v0.0.7).
 
 import "./imports/SafeERC20.sol";
@@ -41,6 +48,7 @@ interface IMFPListing {
     function prices() external view returns (uint256);
     function pendingBuyOrders() external view returns (uint256[] memory);
     function pendingSellOrders() external view returns (uint256[] memory);
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
     function update(address caller, UpdateType[] memory updates) external;
     function transact(address caller, address token, uint256 amount, address recipient) external;
 }
@@ -175,13 +183,15 @@ library MFPOrderLibrary {
         IMFPLiquidity liquidity = IMFPLiquidity(liquidityAddress);
 
         uint256 receivedPrincipal = _transferToken(prep.token, listingAddress, prep.principal);
-        require(receivedPrincipal >= prep.principal, "Principal transfer failed");
+        require(receivedPrincipal > 0, "No principal received");
 
         uint256 receivedFee = _transferToken(prep.token, liquidityAddress, prep.fee);
-        require(receivedFee >= prep.fee, "Fee transfer failed");
+
+        // Update principal in updates to reflect post-tax amount
+        prep.updates[0].value = receivedPrincipal;
 
         listing.update(proxy, prep.updates);
-        liquidity.addFees(proxy, true, prep.fee);
+        liquidity.addFees(proxy, true, receivedFee);
 
         IMFPListing.UpdateType[] memory historicalUpdate = new IMFPListing.UpdateType[](1);
         uint256 xBalance;
@@ -210,13 +220,15 @@ library MFPOrderLibrary {
         IMFPLiquidity liquidity = IMFPLiquidity(liquidityAddress);
 
         uint256 receivedPrincipal = _transferToken(prep.token, listingAddress, prep.principal);
-        require(receivedPrincipal >= prep.principal, "Principal transfer failed");
+        require(receivedPrincipal > 0, "No principal received");
 
         uint256 receivedFee = _transferToken(prep.token, liquidityAddress, prep.fee);
-        require(receivedFee >= prep.fee, "Fee transfer failed");
+
+        // Update principal in updates to reflect post-tax amount
+        prep.updates[0].value = receivedPrincipal;
 
         listing.update(proxy, prep.updates);
-        liquidity.addFees(proxy, false, prep.fee);
+        liquidity.addFees(proxy, false, receivedFee);
 
         IMFPListing.UpdateType[] memory historicalUpdate = new IMFPListing.UpdateType[](1);
         uint256 xBalance;
@@ -255,6 +267,7 @@ library MFPOrderLibrary {
             uint8 status;
             (maker, recipient, , , pending, , status) = listing.buyOrders(orderId);
             require(status == 1 || status == 2, "Order not active");
+            require(maker == msg.sender, "Not order maker");
             refundTo = recipient != address(0) ? recipient : maker;
             refundAmount = pending;
             token = listing.tokenA();
@@ -265,6 +278,7 @@ library MFPOrderLibrary {
             uint8 status;
             (maker, recipient, , , pending, , status) = listing.sellOrders(orderId);
             require(status == 1 || status == 2, "Order not active");
+            require(maker == msg.sender, "Not order maker");
             refundTo = recipient != address(0) ? recipient : maker;
             refundAmount = pending;
             token = listing.tokenB();
@@ -284,62 +298,58 @@ library MFPOrderLibrary {
     function clearOrders(
         address listingAddress,
         address listingAgent,
-        address bracket
+        address proxy,
+        address caller
     ) external {
         require(IMFP(listingAgent).isValidListing(listingAddress), "Invalid listing");
         IMFPListing listing = IMFPListing(listingAddress);
-        uint256[] memory buyOrders = listing.pendingBuyOrders();
-        uint256[] memory sellOrders = listing.pendingSellOrders();
+        uint256[] memory userOrders = listing.makerPendingOrdersView(caller);
 
-        uint256 totalOrders = buyOrders.length + sellOrders.length;
-        if (totalOrders == 0) return;
+        if (userOrders.length == 0) return;
 
-        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](totalOrders);
+        IMFPListing.UpdateType[] memory updates = new IMFPListing.UpdateType[](userOrders.length);
         uint256 updateCount = 0;
 
-        for (uint256 i = 0; i < buyOrders.length; i++) {
+        for (uint256 i = 0; i < userOrders.length; i++) {
+            uint256 orderId = userOrders[i];
+            bool isBuy;
             address maker;
             address recipient;
             uint256 pending;
             uint8 status;
-            (maker, recipient, , , pending, , status) = listing.buyOrders(buyOrders[i]);
-            if (status == 1 || status == 2) {
-                address refundTo = recipient != address(0) ? recipient : maker;
-                if (pending > 0) {
-                    address token = listing.tokenA();
-                    uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
-                    uint256 rawAmount = denormalize(pending, decimals);
-                    listing.transact(bracket, token, rawAmount, refundTo);
-                }
-                updates[updateCount] = _createOrderUpdate(1, buyOrders[i], 0, address(0), address(0), 0, 0)[0];
-                updateCount++;
-                emit OrderCancelled(buyOrders[i]);
-            }
-        }
+            address token;
 
-        for (uint256 i = 0; i < sellOrders.length; i++) {
-            address maker;
-            address recipient;
-            uint256 pending;
-            uint8 status;
-            (maker, recipient, , , pending, , status) = listing.sellOrders(sellOrders[i]);
-            if (status == 1 || status == 2) {
-                address refundTo = recipient != address(0) ? recipient : maker;
-                if (pending > 0) {
-                    address token = listing.tokenB();
-                    uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
-                    uint256 rawAmount = denormalize(pending, decimals);
-                    listing.transact(bracket, token, rawAmount, refundTo);
+            // Try buy order
+            (maker, recipient, , , pending, , status) = listing.buyOrders(orderId);
+            if (status == 1 || status == 2 && maker == caller) {
+                isBuy = true;
+                token = listing.tokenA();
+            } else {
+                // Try sell order
+                (maker, recipient, , , pending, , status) = listing.sellOrders(orderId);
+                if (status == 1 || status == 2 && maker == caller) {
+                    isBuy = false;
+                    token = listing.tokenB();
+                } else {
+                    continue;
                 }
-                updates[updateCount] = _createOrderUpdate(2, sellOrders[i], 0, address(0), address(0), 0, 0)[0];
-                updateCount++;
-                emit OrderCancelled(sellOrders[i]);
             }
+
+            address refundTo = recipient != address(0) ? recipient : maker;
+            if (pending > 0) {
+                uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+                uint256 rawAmount = denormalize(pending, decimals);
+                listing.transact(proxy, token, rawAmount, refundTo);
+            }
+
+            updates[updateCount] = _createOrderUpdate(isBuy ? 1 : 2, orderId, 0, address(0), address(0), 0, 0)[0];
+            updateCount++;
+            emit OrderCancelled(orderId);
         }
 
         if (updateCount > 0) {
             assembly { mstore(updates, updateCount) }
-            listing.update(bracket, updates);
+            listing.update(proxy, updates);
         }
     }
 }
@@ -409,6 +419,7 @@ interface IMFPOrderLibrary {
     function clearOrders(
         address listingAddress,
         address listingAgent,
-        address proxy
+        address proxy,
+        address caller
     ) external;
 }
