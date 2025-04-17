@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.9 (Updated)
+// Version: 0.0.10 (Updated)
 // Changes:
+// - From v0.0.9: Added normalize/denormalize functions for decimal handling (new in v0.0.10).
+// - From v0.0.9: Added performTransactionAndAdjust to denormalize amounts, check actual received, and adjust UpdateType.value (new in v0.0.10).
+// - From v0.0.9: Updated executeBuyLiquid to use performTransactionAndAdjust and set UpdateType.value to actualReceived (new in v0.0.10).
+// - From v0.0.9: Updated executeSellLiquid to use performTransactionAndAdjust and set UpdateType.value to actualReceived (new in v0.0.10).
 // - From v0.0.8: Removed listingId from all functions to align with implicit listingId in OMFListingTemplate.
 // - Updated inlined IOMFListing calls: Changed liquidityAddresses() to liquidityAddress().
 // - Renamed tokenA to token0, tokenB to baseToken (Token-0 to Token-1) (from v0.0.7).
@@ -11,6 +15,7 @@ pragma solidity ^0.8.1;
 // - Fixed UpdateType scoping to OMFLiquidLibrary.UpdateType (from v0.0.8).
 // - Aligned order decoding to 7-element struct (from v0.0.8).
 // - Fixed stack-too-deep in prepBuyLiquid/prepSellLiquid: Added PrepState struct and helper functions (from v0.0.8).
+// - Side effects: Ensures tax-on-transfer adjustments are reflected in state updates; supports non-18 decimal tokens.
 
 import "./imports/SafeERC20.sol";
 
@@ -44,6 +49,42 @@ library OMFLiquidLibrary {
     struct PrepState {
         address token0;
         address baseToken;
+    }
+
+    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount * 10**(18 - decimals);
+        else return amount / 10**(decimals - 18);
+    }
+
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10**(18 - decimals);
+        else return amount * 10**(decimals - 18);
+    }
+
+    function performTransactionAndAdjust(
+        address listingAddress,
+        address proxy,
+        address token,
+        uint256 amount,
+        address recipient,
+        uint8 decimals
+    ) internal returns (uint256 actualReceived) {
+        uint256 rawAmount = denormalize(amount, decimals);
+        uint256 preBalance = token == address(0) ? recipient.balance : IERC20(token).balanceOf(recipient);
+        (bool success, ) = listingAddress.call(
+            abi.encodeWithSignature(
+                "transact(address,address,uint256,address)",
+                proxy,
+                token,
+                rawAmount,
+                recipient
+            )
+        );
+        require(success, "Transact failed");
+        uint256 postBalance = token == address(0) ? recipient.balance : IERC20(token).balanceOf(recipient);
+        actualReceived = normalize(postBalance - preBalance, decimals);
     }
 
     function prepBuyLiquid(
@@ -161,24 +202,31 @@ library OMFLiquidLibrary {
 
         OMFLiquidLibrary.UpdateType[] memory updates = new OMFLiquidLibrary.UpdateType[](data.orderCount);
         uint256 totalToken0;
+        uint8 baseTokenDecimals = data.baseToken == address(0) ? 18 : IERC20(data.baseToken).decimals();
 
         for (uint256 i = 0; i < data.orderCount; i++) {
             uint256 token0Amount = data.updates[i].value;
             uint256 token1Amount = (token0Amount * 1e18) / price;
             totalToken0 += token0Amount;
 
-            (bool success, ) = listingAddress.call(
-                abi.encodeWithSignature(
-                    "transact(address,address,uint256,address)",
-                    proxy,
-                    data.baseToken,
-                    token1Amount,
-                    data.updates[i].recipient
-                )
+            uint256 actualReceived = performTransactionAndAdjust(
+                listingAddress,
+                proxy,
+                data.baseToken,
+                token1Amount,
+                data.updates[i].recipient,
+                baseTokenDecimals
             );
-            require(success, "Transact failed");
 
-            updates[i] = OMFLiquidLibrary.UpdateType(1, data.updates[i].orderId, 0, address(0), data.updates[i].recipient, 0, 0);
+            updates[i] = OMFLiquidLibrary.UpdateType(
+                1,
+                data.updates[i].orderId,
+                actualReceived,
+                address(0),
+                data.updates[i].recipient,
+                0,
+                0
+            );
         }
 
         if (data.orderCount > 0) {
@@ -204,24 +252,31 @@ library OMFLiquidLibrary {
 
         OMFLiquidLibrary.UpdateType[] memory updates = new OMFLiquidLibrary.UpdateType[](data.orderCount + 1);
         uint256 totalToken0;
+        uint8 baseTokenDecimals = data.baseToken == address(0) ? 18 : IERC20(data.baseToken).decimals();
 
         for (uint256 i = 0; i < data.orderCount; i++) {
             uint256 token0Amount = data.updates[i].value;
             uint256 token1Amount = (token0Amount * price) / 1e18;
             totalToken0 += token0Amount;
 
-            (bool success, ) = listingAddress.call(
-                abi.encodeWithSignature(
-                    "transact(address,address,uint256,address)",
-                    proxy,
-                    data.baseToken,
-                    token1Amount,
-                    data.updates[i].recipient
-                )
+            uint256 actualReceived = performTransactionAndAdjust(
+                listingAddress,
+                proxy,
+                data.baseToken,
+                token1Amount,
+                data.updates[i].recipient,
+                baseTokenDecimals
             );
-            require(success, "Transact failed");
 
-            updates[i] = OMFLiquidLibrary.UpdateType(2, data.updates[i].orderId, 0, address(0), data.updates[i].recipient, 0, 0);
+            updates[i] = OMFLiquidLibrary.UpdateType(
+                2,
+                data.updates[i].orderId,
+                actualReceived,
+                address(0),
+                data.updates[i].recipient,
+                0,
+                0
+            );
         }
 
         updates[data.orderCount] = OMFLiquidLibrary.UpdateType(0, 0, totalToken0, data.token0, address(0), 0, 0);

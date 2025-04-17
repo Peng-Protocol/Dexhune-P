@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.7 (Updated)
+// Version: 0.0.8 (Updated)
 // Changes:
+// - From v0.0.7: Added normalize/denormalize functions for decimal handling (new in v0.0.8).
+// - From v0.0.7: Updated computeOrderAmounts to normalize inputs and denormalize outputs (new in v0.0.8).
+// - From v0.0.7: Updated performTransactionAndAdjust to denormalize amount before transact and normalize actualReceived (new in v0.0.8).
 // - From v0.0.6: Fixed stack-too-deep in processBuyOrder/processSellOrder by introducing ProcessOrderState struct and helper functions computeOrderAmounts/performTransactionAndAdjust.
 // - From v0.0.5: Removed listingId from all functions and interfaces to align with implicit listingId in OMFListingTemplate.
 // - Updated IOMFListing interface: Removed listingId from volumeBalances(), liquidityAddresses().
@@ -12,6 +15,7 @@ pragma solidity ^0.8.1;
 // - Updated for OMFListingTemplate v0.0.7: 7-field BuyOrder/SellOrder, token0/baseToken, added yVolume tracking (from v0.0.5).
 // - Fixed assembly errors in prepBuyOrders/prepSellOrders: Correctly set data.updates length using data.orderCount (from v0.0.5).
 // - Fixed stack-too-deep in execute$order and prep$order: Added ExecutionState and PrepState structs with helper functions (from v0.0.5).
+// - Side effects: Ensures correct decimal handling for tax-on-transfer tokens; improves robustness for non-18 decimal tokens.
 
 import "./imports/SafeERC20.sol";
 
@@ -91,22 +95,39 @@ library OMFSettlementLibrary {
         uint256 postBalance;
     }
 
-    // Helper function to compute order amounts
+    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount * 10**(18 - decimals);
+        else return amount / 10**(decimals - 18);
+    }
+
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10**(18 - decimals);
+        else return amount * 10**(decimals - 18);
+    }
+
     function computeOrderAmounts(
         uint256 price,
         uint256 pending,
-        bool isBuy
+        bool isBuy,
+        uint8 token0Decimals,
+        uint8 baseTokenDecimals
     ) internal pure returns (uint256 baseTokenAmount, uint256 token0Amount) {
+        uint256 normalizedPending = normalize(pending, isBuy ? baseTokenDecimals : token0Decimals);
         if (isBuy) {
-            baseTokenAmount = pending;
+            baseTokenAmount = normalizedPending;
             token0Amount = (baseTokenAmount * 1e18) / price;
+            baseTokenAmount = denormalize(baseTokenAmount, baseTokenDecimals);
+            token0Amount = denormalize(token0Amount, token0Decimals);
         } else {
-            token0Amount = pending;
+            token0Amount = normalizedPending;
             baseTokenAmount = (token0Amount * price) / 1e18;
+            token0Amount = denormalize(token0Amount, token0Decimals);
+            baseTokenAmount = denormalize(baseTokenAmount, baseTokenDecimals);
         }
     }
 
-    // Helper function to perform transaction and adjust for tax-on-transfer
     function performTransactionAndAdjust(
         IOMFListing listing,
         address proxy,
@@ -114,12 +135,14 @@ library OMFSettlementLibrary {
         uint256 amount,
         address recipient,
         uint256 price,
-        bool isBuy
+        bool isBuy,
+        uint8 decimals
     ) internal returns (uint256 actualReceived, uint256 adjustedValue) {
+        uint256 rawAmount = denormalize(amount, decimals);
         uint256 preBalance = baseToken.balanceOf(recipient);
-        listing.transact(proxy, address(baseToken), amount, recipient);
+        listing.transact(proxy, address(baseToken), rawAmount, recipient);
         uint256 postBalance = baseToken.balanceOf(recipient);
-        actualReceived = postBalance - preBalance;
+        actualReceived = normalize(postBalance - preBalance, decimals);
         adjustedValue = isBuy ? (actualReceived * price) / 1e18 : (actualReceived * 1e18) / price;
     }
 
@@ -178,11 +201,13 @@ library OMFSettlementLibrary {
     ) external {
         IOMFListing listing = IOMFListing(listingAddress);
         IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](data.orderCount + 1);
+        uint8 baseTokenDecimals = IERC20(data.baseToken).decimals();
+        uint8 token0Decimals = IERC20(data.token0).decimals();
         ExecutionState memory state = ExecutionState(0, listing.getPrice(), IERC20(data.baseToken));
 
         for (uint256 i = 0; i < data.orderCount; i++) {
             PreparedUpdate memory update = data.updates[i];
-            processBuyOrder(listing, updates, i, update, state, proxy);
+            processBuyOrder(listing, updates, i, update, state, proxy, token0Decimals, baseTokenDecimals);
         }
 
         if (data.orderCount > 0) {
@@ -197,7 +222,9 @@ library OMFSettlementLibrary {
         uint256 index,
         PreparedUpdate memory update,
         ExecutionState memory state,
-        address proxy
+        address proxy,
+        uint8 token0Decimals,
+        uint8 baseTokenDecimals
     ) internal {
         // Explicit destructuring
         address makerAddress;
@@ -221,7 +248,7 @@ library OMFSettlementLibrary {
         orderState.recipientAddress = recipientAddress;
 
         // Compute amounts
-        (orderState.baseTokenAmount, orderState.token0Amount) = computeOrderAmounts(state.price, pending, true);
+        (orderState.baseTokenAmount, orderState.token0Amount) = computeOrderAmounts(state.price, pending, true, token0Decimals, baseTokenDecimals);
         state.totalBaseToken += orderState.baseTokenAmount;
 
         // Perform transaction and adjust
@@ -232,7 +259,8 @@ library OMFSettlementLibrary {
             orderState.token0Amount,
             recipientAddress,
             state.price,
-            true
+            true,
+            token0Decimals
         );
 
         // Update order
@@ -302,11 +330,13 @@ library OMFSettlementLibrary {
     ) external {
         IOMFListing listing = IOMFListing(listingAddress);
         IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](data.orderCount + 1);
+        uint8 baseTokenDecimals = IERC20(data.baseToken).decimals();
+        uint8 token0Decimals = IERC20(data.token0).decimals();
         ExecutionState memory state = ExecutionState(0, listing.getPrice(), IERC20(data.baseToken));
 
         for (uint256 i = 0; i < data.orderCount; i++) {
             PreparedUpdate memory update = data.updates[i];
-            processSellOrder(listing, updates, i, update, state, proxy);
+            processSellOrder(listing, updates, i, update, state, proxy, token0Decimals, baseTokenDecimals);
         }
 
         if (data.orderCount > 0) {
@@ -321,7 +351,9 @@ library OMFSettlementLibrary {
         uint256 index,
         PreparedUpdate memory update,
         ExecutionState memory state,
-        address proxy
+        address proxy,
+        uint8 token0Decimals,
+        uint8 baseTokenDecimals
     ) internal {
         // Explicit destructuring
         address makerAddress;
@@ -345,7 +377,7 @@ library OMFSettlementLibrary {
         orderState.recipientAddress = recipientAddress;
 
         // Compute amounts
-        (orderState.baseTokenAmount, orderState.token0Amount) = computeOrderAmounts(state.price, pending, false);
+        (orderState.baseTokenAmount, orderState.token0Amount) = computeOrderAmounts(state.price, pending, false, token0Decimals, baseTokenDecimals);
         state.totalBaseToken += orderState.baseTokenAmount;
 
         // Perform transaction and adjust
@@ -356,7 +388,8 @@ library OMFSettlementLibrary {
             orderState.baseTokenAmount,
             recipientAddress,
             state.price,
-            false
+            false,
+            baseTokenDecimals
         );
 
         // Update order

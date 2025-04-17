@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.13 (Updated)
+// Version: 0.0.14 (Updated)
 // Changes:
-// - From v0.0.12: Added denormalize function to handle non-18 decimal tokens (new in v0.0.13).
-// - From v0.0.12: Updated executeRefundAndUpdate to denormalize refundAmount before transact (new in v0.0.13).
-// - Side effects: Corrects refund amounts for tokens with non-18 decimals (e.g., USDC); aligns with MFP-OrderLibrary v0.0.8.
+// - From v0.0.13: Updated processExecuteBuyOrder and processExecuteSellOrder to handle tax-on-transfer tokens by using post-tax receivedPrincipal and receivedFee (new in v0.0.14).
+// - From v0.0.13: Removed reverts for receivedPrincipal < prep.principal and receivedFee < prep.fee; store receivedPrincipal in updates and use receivedFee in addFees (new in v0.0.14).
+// - From v0.0.13: Side effect: Prevents reverts for tax-on-transfer tokens; ensures actual received amounts are stored and used.
+// - From v0.0.13: Added denormalize function to handle non-18 decimal tokens.
+// - From v0.0.13: Updated executeRefundAndUpdate to denormalize refundAmount before transact.
+// - From v0.0.13: Side effects: Corrects refund amounts for tokens with non-18 decimals (e.g., USDC); aligns with MFP-OrderLibrary v0.0.8.
 // - No changes to prepBuyOrder, prepSellOrder, executeBuyOrder, executeSellOrder, adjustOrder.
 // - Retains fixes from v0.0.12: Fixed stack-too-deep in clearOrders/clearSingleOrder using ClearOrderState and helpers.
 // - Retains alignment with OMFListingTemplate’s implicit listingId (from v0.0.9).
@@ -240,7 +243,7 @@ library OMFOrderLibrary {
         } else {
             (
                 address makerAddress,
-                address recipientAddress/,
+                address recipientAddress,
                 uint256 maxPrice,
                 uint256 minPrice,
                 uint256 pending,
@@ -350,13 +353,15 @@ library OMFOrderLibrary {
         address proxy
     ) internal {
         uint256 receivedPrincipal = _transferToken(prep.token, address(state.listing), prep.principal);
-        require(receivedPrincipal >= prep.principal, "Principal transfer failed");
+        require(receivedPrincipal > 0, "No principal received");
 
         uint256 receivedFee = _transferToken(prep.token, state.liquidityAddress, prep.fee);
-        require(receivedFee >= prep.fee, "Fee transfer failed");
+
+        // Update principal in updates to reflect post-tax amount
+        prep.updates[0].value = receivedPrincipal;
 
         state.listing.update(proxy, prep.updates);
-        state.liquidity.addFees(proxy, true, prep.fee);
+        state.liquidity.addFees(proxy, true, receivedFee);
 
         IOMFListing.UpdateType[] memory historicalUpdate = new IOMFListing.UpdateType[](1);
         (
@@ -392,13 +397,15 @@ library OMFOrderLibrary {
         address proxy
     ) internal {
         uint256 receivedPrincipal = _transferToken(prep.token, address(state.listing), prep.principal);
-        require(receivedPrincipal >= prep.principal, "Principal transfer failed");
+        require(receivedPrincipal > 0, "No principal received");
 
         uint256 receivedFee = _transferToken(prep.token, state.liquidityAddress, prep.fee);
-        require(receivedFee >= prep.fee, "Fee transfer failed");
+
+        // Update principal in updates to reflect post-tax amount
+        prep.updates[0].value = receivedPrincipal;
 
         state.listing.update(proxy, prep.updates);
-        state.liquidity.addFees(proxy, false, prep.fee);
+        state.liquidity.addFees(proxy, false, receivedFee);
 
         IOMFListing.UpdateType[] memory historicalUpdate = new IOMFListing.UpdateType[](1);
         (
