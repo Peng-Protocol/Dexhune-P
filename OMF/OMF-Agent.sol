@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.4 (Updated)
+// Version: 0.0.5 (Updated)
 // Changes:
 // - Clarified tokenA as Token-0 (listed token) and baseToken as Token-1 (reference token).
-// - Moved IOMFListingTemplate and IOMFLiquidityTemplate interfaces to top level to fix ParserError (previous revision).
-// - Moved IOMFListingLibrary and IOMFLiquidityLibrary interfaces to top level to fix ParserError (previous revision).
-// - Added IOMFListing interface and updated listToken to use it for liquidityAddresses call (previous revision).
-// - Refactored listToken and prepListing: Moved executeListing into prepListing, use state variable for listingAddress (this revision).
+// - Mov
+// - Removed fee collection in executeListing; added 1% supply ownership check for caller in prepListing (this revision).
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
@@ -46,7 +44,7 @@ contract OMFAgent is Ownable {
     address public listingLibraryAddress;
     address public liquidityLibraryAddress;
     address public baseToken; // Token-1 (reference token)
-    address public taxCollector;
+    
     uint256 public listingCount;
 
     mapping(address => mapping(address => address)) public getListing; // tokenA (Token-0) to baseToken (Token-1)
@@ -54,7 +52,6 @@ contract OMFAgent is Ownable {
     address[] public allListedTokens;
 
     struct PrepData {
-        uint256 tax;
         bytes32 listingSalt;
         bytes32 liquiditySalt;
         address tokenA; // Token-0 (listed token)
@@ -96,9 +93,14 @@ contract OMFAgent is Ownable {
         baseToken = _baseToken; // Token-1
     }
 
-    function setTaxCollector(address _taxCollector) external onlyOwner {
-        require(_taxCollector != address(0), "Invalid tax collector address");
-        taxCollector = _taxCollector;
+    
+    function checkCallerBalance(address tokenA, uint256 totalSupply) internal view returns (bool) {
+        uint256 decimals = IERC20(tokenA).decimals();
+        uint256 requiredBalance = totalSupply / 100; // 1% of total supply
+        if (decimals != 18) {
+            requiredBalance = (totalSupply * 1e18) / (100 * 10 ** decimals);
+        }
+        return IERC20(tokenA).balanceOf(msg.sender) >= requiredBalance;
     }
 
     function _initializePair(
@@ -136,23 +138,22 @@ contract OMFAgent is Ownable {
         require(routerAddress != address(0), "Router not set");
         require(listingLibraryAddress != address(0), "Listing library not set");
         require(liquidityLibraryAddress != address(0), "Liquidity library not set");
-        require(taxCollector != address(0), "Tax collector not set");
+        
         require(oracleAddress != address(0), "Invalid oracle address");
 
         uint256 supply = IERC20(tokenA).totalSupply();
-        uint256 tax = supply / 100; // 1%
+        require(checkCallerBalance(tokenA, supply), "Must own at least 1% of token supply");
+
         bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, baseToken, listingCount));
         bytes32 liquiditySalt = keccak256(abi.encodePacked(baseToken, tokenA, listingCount));
 
-        PrepData memory prep = PrepData(tax, listingSalt, liquiditySalt, tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
+        PrepData memory prep = PrepData(listingSalt, liquiditySalt, tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
         return executeListing(prep);
     }
 
     function executeListing(PrepData memory prep) internal returns (address) {
         address listingAddress = IOMFListingLibrary(listingLibraryAddress).deploy(prep.listingSalt);
         address liquidityAddress = IOMFLiquidityLibrary(liquidityLibraryAddress).deploy(prep.liquiditySalt);
-
-        IERC20(prep.tokenA).safeTransferFrom(msg.sender, taxCollector, prep.tax);
 
         _initializePair(
             listingAddress,
