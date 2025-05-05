@@ -1,197 +1,285 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.13 (Updated)
+// Version: 0.0.16 (Updated)
 // Changes:
-// - Renamed OMF-ProxyRouter to OMFRouter.
-// - Imported OMF-OrderLibrary, OMF-SettlementLibrary, and OMF-LiquidLibrary from ./utils/... instead of external contracts.
-// - Updated buy, sell, clearSingleOrder, clearUserOrders, settleBuy, settleSell, settleBuyLiquid, settleSellLiquid to use internal library functions.
-// - Removed orderLibrary, settlementLibrary, liquidLibrary state variables and their setters.
-// - Removed clearSingleOrder and clearOrders from IOMFSettlementLibrary interface.
-// - From v0.0.12: Renamed clearOrders to clearUserOrders and updated to call OMFOrderLibrary.clearOrders with msg.sender.
-// - From v0.0.11: Removed listingId from all functions to align with implicit listingId in OMFListingTemplate.
-// - Updated IOMFListing interface: Changed liquidityAddresses() to liquidityAddress().
-// - Updated tokenA to token0, using baseToken from OMFAgent (from v0.0.8).
-// - Added volume updates to OMFListingTemplate, added withdrawLiquidity (from v0.0.8).
-// - Inlined interfaces for OMFAgent, IOMFLiquidity (from v0.0.8).
-// - Replaced updateVolume with update calls, updated withdrawLiquidity to prep/execute (from v0.0.9).
-// - Aligned with OMFListingTemplate v0.0.7, removed constructor args, streamlined functions, added claimFees (from previous revision).
-// - Updated claimFees to include slotIndex for OMFLiquidityTemplate compatibility (from previous revision).
-// - Removed redundant UpdateType struct to fix DeclarationError conflict with IOMFOrderLibrary (from previous revision).
+// - Moved IOMFAgent interface before contract declaration to align with Solidity conventions.
+// - Removed IOMFListing and IOMFLiquidity interfaces, as they are retained in OMF-Shared.sol as an abstract contract.
+// - Removed direct SafeERC20 import; use OMFShared.SafeERC20 for ERC20 operations.
+// - Updated OMF-Shared.sol import to reference abstract contract with interfaces.
+// - Updated interface references to OMFShared.IOMFListing and OMFShared.IOMFLiquidity.
+// - From v0.0.15: Added IOMFListing/IOMFLiquidity interfaces (now reverted).
+// - From v0.0.14: Replaced inline assembly in _clearOrders with Solidity array resizing.
+// - From v0.0.12: Updated _transferToken to denormalize amounts using OMFShared.denormalize.
+// - From v0.0.12: Updated executeOrder to handle tax-on-transfer tokens by checking post-transfer balances.
+// - From v0.0.12: Removed reverts for tax-on-transfer discrepancies; use actual received amounts.
+// - From v0.0.12: Side effects: Ensures correct handling of non-18 decimal tokens (e.g., USDC); prevents reverts for tax-on-transfer tokens.
+// - From v0.0.10: Removed listingId from all functions to align with implicit listingId in OMFListingTemplate.
+// - From v0.0.10: Renamed tokenA to token0, tokenB to baseToken (Token-0 to Token-1).
+// - From v0.0.10: Adjusted settlement to use transact from listing, removed direct deposit/withdraw.
+// - From v0.0.8: Aligned with OMFListingTemplate’s 7-field BuyOrder/SellOrder and implicit listingId.
+// - From v0.0.8: Fixed stack-too-deep in buy/sell using helper functions.
+// - Side effects: Improves robustness for non-18 decimal tokens and tax-on-transfer tokens; centralizes SafeERC20 usage.
 
-import "./imports/Ownable.sol";
-import "./imports/SafeERC20.sol";
+import "../imports/Ownable.sol";
+import "./utils/OMF-Shared.sol";
 import "./utils/OMF-OrderLibrary.sol";
 import "./utils/OMF-SettlementLibrary.sol";
 import "./utils/OMF-LiquidLibrary.sol";
 
-interface IOMFListing {
-    function token0() external view returns (address);
-    function liquidityAddress() external view returns (address);
-    function update(address caller, OMFOrderLibrary.UpdateType[] memory updates) external;
-}
-
 interface IOMFAgent {
-    function getListing(address token0, address baseToken) external view returns (address);
-    function baseToken() external view returns (address);
-}
-
-interface IOMFSettlementLibrary {
-    function settleBuyOrders(address listingAddress, uint256[] memory orderIds, address listingAgent, address proxy) external;
-    function settleSellOrders(address listingAddress, uint256[] memory orderIds, address listingAgent, address proxy) external;
-}
-
-interface IOMFLiquidity {
-    struct PreparedWithdrawal { uint256 amount0; uint256 amount1; }
-    function xPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
-    function yPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
-    function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external;
-    function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external;
-    function deposit(address caller, bool isX, uint256 amount) external;
-    function claimFees(address caller, bool isX, uint256 slotIndex, uint256 volume) external;
+    function isValidListing(address listingAddress) external view returns (bool);
 }
 
 contract OMFRouter is Ownable {
-    using SafeERC20 for IERC20;
+    using OMFShared.SafeERC20 for IERC20;
 
     address public agent;
 
-    event BuyOrderPlaced(uint256 orderId, address maker);
-    event SellOrderPlaced(uint256 orderId, address maker);
-    event OrderCleared(uint256 orderId, bool isBuy);
-    event FeesClaimed(address token0, bool isX, uint256 slotIndex, uint256 volume, address claimant);
+    constructor(address _owner) {
+        _transferOwnership(_owner);
+    }
 
     function setAgent(address _agent) external onlyOwner {
-        require(agent == address(0), "Agent already set");
-        require(_agent != address(0), "Invalid address");
+        require(_agent != address(0), "Agent cannot be zero address");
         agent = _agent;
     }
 
-    function buy(address token0, uint256 amount, uint256 maxPrice, uint256 minPrice, address recipient) external {
-        address listing = getListing(token0);
-        OMFOrderLibrary.OrderPrep memory prep = OMFOrderLibrary.prepBuyOrder(
-            listing, OMFOrderLibrary.BuyOrderDetails(recipient, amount, maxPrice, minPrice), agent, address(this)
+    function getLiquidityAddress(address listingAddress) external view returns (address) {
+        require(IOMFAgent(agent).isValidListing(listingAddress), "Invalid listing");
+        return OMFShared.IOMFListing(listingAddress).liquidityAddress();
+    }
+
+    function buy(
+        address listingAddress,
+        uint256 amount,
+        uint256 maxPrice,
+        uint256 minPrice,
+        address recipient
+    ) external {
+        IOMFOrderLibrary.BuyOrderDetails memory details = IOMFOrderLibrary.BuyOrderDetails(recipient, amount, maxPrice, minPrice);
+        IOMFOrderLibrary.OrderPrep memory prep = OMFOrderLibrary.prepBuyOrder(listingAddress, details, agent, address(this));
+        OMFOrderLibrary.executeBuyOrder(listingAddress, prep, agent, address(this));
+        OMFSettlementLibrary.settleBuyOrders(listingAddress, new uint256[](0), agent, address(this));
+    }
+
+    function sell(
+        address listingAddress,
+        uint256 amount,
+        uint256 maxPrice,
+        uint256 minPrice,
+        address recipient
+    ) external {
+        IOMFOrderLibrary.SellOrderDetails memory details = IOMFOrderLibrary.SellOrderDetails(recipient, amount, maxPrice, minPrice);
+        IOMFOrderLibrary.OrderPrep memory prep = OMFOrderLibrary.prepSellOrder(listingAddress, details, agent, address(this));
+        OMFOrderLibrary.executeSellOrder(listingAddress, prep, agent, address(this));
+        OMFSettlementLibrary.settleSellOrders(listingAddress, new uint256[](0), agent, address(this));
+    }
+
+    function deposit(address listingAddress, bool isX, uint256 amount) external {
+        require(IOMFAgent(agent).isValidListing(listingAddress), "Invalid listing");
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
+        address token = isX ? listing.token0() : listing.baseToken();
+        uint8 decimals = IERC20(token).decimals();
+        uint256 rawAmount = OMFShared.denormalize(amount, decimals);
+        _transferToken(token, address(listing), rawAmount);
+        OMFShared.IOMFLiquidity(listing.liquidityAddress()).deposit(address(this), isX, amount);
+    }
+
+    function withdrawLiquidity(
+        address listingAddress,
+        bool isX,
+        uint256 amount,
+        uint256 index
+    ) external {
+        require(IOMFAgent(agent).isValidListing(listingAddress), "Invalid listing");
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
+        OMFShared.IOMFLiquidity liquidity = OMFShared.IOMFLiquidity(listing.liquidityAddress());
+        OMFShared.IOMFLiquidity.PreparedWithdrawal memory withdrawal = isX
+            ? liquidity.xPrepOut(address(this), amount, index)
+            : liquidity.yPrepOut(address(this), amount, index);
+        isX
+            ? liquidity.xExecuteOut(address(this), index, withdrawal)
+            : liquidity.yExecuteOut(address(this), index, withdrawal);
+    }
+
+    function claimFees(address listingAddress, bool isX, uint256 volume) external {
+        OMFLiquidLibrary.claimFees(listingAddress, isX, volume);
+    }
+
+    function executeOrder(
+        address listingAddress,
+        bool isBuy,
+        uint256 amount,
+        uint256 orderId,
+        uint256 maxPrice,
+        uint256 minPrice,
+        address recipient
+    ) external {
+        require(IOMFAgent(agent).isValidListing(listingAddress), "Invalid listing");
+        OMFOrderLibrary.adjustOrder(listingAddress, isBuy, amount, orderId, maxPrice, minPrice, recipient);
+        isBuy
+            ? OMFSettlementLibrary.settleBuyOrders(listingAddress, new uint256[](0), agent, address(this))
+            : OMFSettlementLibrary.settleSellOrders(listingAddress, new uint256[](0), agent, address(this));
+    }
+
+    function clearOrders(address listingAddress) external {
+        require(IOMFAgent(agent).isValidListing(listingAddress), "Invalid listing");
+        _clearOrders(listingAddress, agent, address(this), msg.sender);
+    }
+
+    function _clearOrders(
+        address listingAddress,
+        address listingAgent,
+        address proxy,
+        address user
+    ) internal {
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
+        (bool success, bytes memory returnData) = listingAddress.staticcall(
+            abi.encodeWithSignature("makerPendingOrdersView(address)", user)
         );
-        executeOrder(listing, prep, true);
-        emit BuyOrderPlaced(prep.orderId, msg.sender);
-    }
+        require(success, "Failed to fetch user orders");
+        uint256[] memory userOrders = abi.decode(returnData, (uint256[]));
 
-    function sell(address token0, uint256 amount, uint256 maxPrice, uint256 minPrice, address recipient) external {
-        address listing = getListing(token0);
-        OMFOrderLibrary.OrderPrep memory prep = OMFOrderLibrary.prepSellOrder(
-            listing, OMFOrderLibrary.SellOrderDetails(recipient, amount, maxPrice, minPrice), agent, address(this)
-        );
-        executeOrder(listing, prep, false);
-        emit SellOrderPlaced(prep.orderId, msg.sender);
-    }
+        if (userOrders.length == 0) return;
 
-    function deposit(address token0, bool isX, uint256 amount) external {
-        address listing = getListing(token0);
-        address token = isX ? token0 : baseToken();
-        address liquidity = getLiquidityAddress(listing);
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        IERC20(token).approve(liquidity, amount);
-        (bool success, ) = liquidity.call(abi.encodeWithSignature("deposit(address,bool,uint256)", address(this), isX, amount));
-        require(success, "Deposit failed");
-    }
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](userOrders.length);
+        uint256 updateCount = 0;
 
-    function withdrawLiquidity(address token0, bool isX, uint256 slotIndex, uint256 amount) external {
-        address listing = getListing(token0);
-        address liquidity = getLiquidityAddress(listing);
-        IOMFLiquidity.PreparedWithdrawal memory withdrawal = isX
-            ? IOMFLiquidity(liquidity).xPrepOut(msg.sender, amount, slotIndex)
-            : IOMFLiquidity(liquidity).yPrepOut(msg.sender, amount, slotIndex);
-        (bool success, ) = liquidity.call(
-            isX ? abi.encodeWithSignature("xExecuteOut(address,uint256,(uint256,uint256))", msg.sender, slotIndex, withdrawal)
-                : abi.encodeWithSignature("yExecuteOut(address,uint256,(uint256,uint256))", msg.sender, slotIndex, withdrawal)
-        );
-        require(success, "Execute withdrawal failed");
-    }
+        for (uint256 i = 0; i < userOrders.length; i++) {
+            bool isValid;
+            ClearOrderState memory orderState;
 
-    function settleBuy(address token0, uint256[] memory orderIds) external {
-        address listing = getListing(token0);
-        OMFSettlementLibrary.settleBuyOrders(listing, orderIds, agent, address(this));
-    }
+            // Try buy order
+            (orderState, isValid) = validateAndPrepareRefund(listing, userOrders[i], true, user);
+            if (isValid) {
+                executeRefundAndUpdate(listing, proxy, orderState, updates, updateCount, true, userOrders[i]);
+                updateCount++;
+                continue;
+            }
 
-    function settleSell(address token0, uint256[] memory orderIds) external {
-        address listing = getListing(token0);
-        OMFSettlementLibrary.settleSellOrders(listing, orderIds, agent, address(this));
-    }
-
-    function settleBuyLiquid(address token0, uint256[] memory orderIds) external {
-        address listing = getListing(token0);
-        OMFLiquidLibrary.SettlementData memory data = OMFLiquidLibrary.prepBuyLiquid(listing, orderIds, agent, address(this));
-        OMFLiquidLibrary.executeBuyLiquid(listing, data, agent, address(this));
-    }
-
-    function settleSellLiquid(address token0, uint256[] memory orderIds) external {
-        address listing = getListing(token0);
-        OMFLiquidLibrary.SettlementData memory data = OMFLiquidLibrary.prepSellLiquid(listing, orderIds, agent, address(this));
-        OMFLiquidLibrary.executeSellLiquid(listing, data, agent, address(this));
-    }
-
-    function clearSingleOrder(address token0, uint256 orderId, bool isBuy) external {
-        address listing = getListing(token0);
-        OMFOrderLibrary.clearSingleOrder(listing, orderId, isBuy, agent, address(this));
-        emit OrderCleared(orderId, isBuy);
-    }
-
-    function clearUserOrders(address token0) external {
-        address listing = getListing(token0);
-        OMFOrderLibrary.clearOrders(listing, agent, address(this), msg.sender);
-    }
-
-    function claimFees(address token0, bool isX, uint256 slotIndex, uint256 volume) external {
-        address listing = getListing(token0);
-        address liquidity = getLiquidityAddress(listing);
-        (bool success, ) = liquidity.call(
-            abi.encodeWithSignature("claimFees(address,bool,uint256,uint256)", msg.sender, isX, slotIndex, volume)
-        );
-        require(success, "Claim fees failed");
-        emit FeesClaimed(token0, isX, slotIndex, volume, msg.sender);
-    }
-
-    function getListing(address token0) internal view returns (address) {
-        require(agent != address(0), "Agent not set");
-        address listing = IOMFAgent(agent).getListing(token0, baseToken());
-        require(listing != address(0), "Invalid listing");
-        return listing;
-    }
-
-    function getLiquidityAddress(address listing) internal view returns (address) {
-        (bool success, bytes memory returnData) = listing.staticcall(abi.encodeWithSignature("liquidityAddress()"));
-        require(success, "Liquidity address fetch failed");
-        return abi.decode(returnData, (address));
-    }
-
-    function executeOrder(address listing, OMFOrderLibrary.OrderPrep memory prep, bool isBuy) internal {
-        address liquidity = getLiquidityAddress(listing);
-        address token0 = IOMFListing(listing).token0();
-        address token = prep.token;
-        uint256 preBalance = IERC20(token).balanceOf(listing);
-        IERC20(token).safeTransferFrom(msg.sender, listing, prep.principal);
-        uint256 actualReceived = IERC20(token).balanceOf(listing) - preBalance;
-        if (actualReceived < prep.principal) {
-            OMFOrderLibrary.UpdateType[] memory updates = new OMFOrderLibrary.UpdateType[](1);
-            updates[0] = OMFOrderLibrary.UpdateType(
-                0, token == token0 ? 2 : 3, prep.principal - actualReceived, address(0), address(0), 0, 0
-            );
-            (bool success, ) = listing.call(abi.encodeWithSignature("update(address,(uint8,uint256,uint256,address,address,uint256,uint256)[])", address(this), updates));
-            require(success, "Update volume failed");
+            // Try sell order
+            (orderState, isValid) = validateAndPrepareRefund(listing, userOrders[i], false, user);
+            if (isValid) {
+                executeRefundAndUpdate(listing, proxy, orderState, updates, updateCount, false, userOrders[i]);
+                updateCount++;
+            }
         }
-        if (prep.fee > 0) IERC20(token).safeTransferFrom(msg.sender, liquidity, prep.fee);
-        OMFOrderLibrary.ExecutionState memory state = OMFOrderLibrary.ExecutionState(
-            IOMFListing(listing), IOMFLiquidity(liquidity), liquidity
-        );
+
+        if (updateCount > 0) {
+            if (updateCount < updates.length) {
+                OMFShared.UpdateType[] memory resized = new OMFShared.UpdateType[](updateCount);
+                for (uint256 i = 0; i < updateCount; i++) {
+                    resized[i] = updates[i];
+                }
+                updates = resized;
+            }
+            listing.update(proxy, updates);
+        }
+    }
+
+    function _transferToken(address token, address target, uint256 amount) internal returns (uint256) {
+        uint256 preBalance = IERC20(token).balanceOf(target);
+        IERC20(token).safeTransferFrom(msg.sender, target, amount);
+        uint256 postBalance = IERC20(token).balanceOf(target);
+        return postBalance - preBalance;
+    }
+
+    // Structs and helpers for _clearOrders
+    struct ClearOrderState {
+        address makerAddress;
+        address recipientAddress;
+        uint256 pending;
+        uint8 status;
+        address refundTo;
+        uint256 refundAmount;
+        address token;
+    }
+
+    function validateAndPrepareRefund(
+        OMFShared.IOMFListing listing,
+        uint256 orderId,
+        bool isBuy,
+        address user
+    ) internal view returns (ClearOrderState memory orderState, bool isValid) {
+        orderState = ClearOrderState({
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            pending: 0,
+            status: 0,
+            refundTo: address(0),
+            refundAmount: 0,
+            token: address(0)
+        });
+
         if (isBuy) {
-            OMFOrderLibrary.processExecuteBuyOrder(prep, state, address(this));
+            (
+                address makerAddress,
+                address recipientAddress,
+                uint256 maxPrice,
+                uint256 minPrice,
+                uint256 pending,
+                uint256 filled,
+                uint8 status
+            ) = listing.buyOrders(orderId);
+            if (status == 1 || status == 2) {
+                if (makerAddress != user) return (orderState, false);
+                orderState.makerAddress = makerAddress;
+                orderState.recipientAddress = recipientAddress;
+                orderState.pending = pending;
+                orderState.status = status;
+                orderState.refundTo = recipientAddress != address(0) ? recipientAddress : makerAddress;
+                orderState.refundAmount = pending;
+                orderState.token = listing.token0();
+                return (orderState, true);
+            }
         } else {
-            OMFOrderLibrary.processExecuteSellOrder(prep, state, address(this));
+            (
+                address makerAddress,
+                address recipientAddress,
+                uint256 maxPrice,
+                uint256 minPrice,
+                uint256 pending,
+                uint256 filled,
+                uint8 status
+            ) = listing.sellOrders(orderId);
+            if (status == 1 || status == 2) {
+                if (makerAddress != user) return (orderState, false);
+                orderState.makerAddress = makerAddress;
+                orderState.recipientAddress = recipientAddress;
+                orderState.pending = pending;
+                orderState.status = status;
+                orderState.refundTo = recipientAddress != address(0) ? recipientAddress : makerAddress;
+                orderState.refundAmount = pending;
+                orderState.token = listing.baseToken();
+                return (orderState, true);
+            }
         }
+        return (orderState, false);
     }
 
-    function baseToken() public view returns (address) {
-        require(agent != address(0), "Agent not set");
-        return IOMFAgent(agent).baseToken();
+    function executeRefundAndUpdate(
+        OMFShared.IOMFListing listing,
+        address proxy,
+        ClearOrderState memory orderState,
+        OMFShared.UpdateType[] memory updates,
+        uint256 updateIndex,
+        bool isBuy,
+        uint256 orderId
+    ) internal {
+        if (orderState.refundAmount > 0) {
+            uint8 decimals = IERC20(orderState.token).decimals();
+            uint256 rawAmount = OMFShared.denormalize(orderState.refundAmount, decimals);
+            listing.transact(proxy, orderState.token, rawAmount, orderState.refundTo);
+        }
+        updates[updateIndex] = OMFShared.UpdateType(
+            isBuy ? 1 : 2,
+            orderId,
+            0,
+            address(0),
+            address(0),
+            0,
+            0
+        );
     }
 }
