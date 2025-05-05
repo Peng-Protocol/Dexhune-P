@@ -4,15 +4,14 @@ pragma solidity ^0.8.1;
 // Version: 0.0.1
 // Changes:
 // - Replaced OMFListingLibrary with OMFListingLogic contract.
-// - Updated deploy function to deploy both OMFListingTemplate and OMFLiquidityTemplate using separate salts.
+// - Updated deploy function to deploy only OMFListingTemplate, removing OMFLiquidityTemplate deployment.
+// - Removed OMFLiquidityTemplate import to resolve SafeERC20 import duplication.
 
 import "./utils/OMF-ListingTemplate.sol";
-import "./utils/OMF-LiquidityTemplate.sol";
 
 contract OMFListingLogic {
-    function deploy(bytes32 listingSalt, bytes32 liquiditySalt) public returns (address listingAddress, address liquidityAddress) {
+    function deploy(bytes32 listingSalt) public returns (address listingAddress) {
         listingAddress = address(new OMFListingTemplate{salt: listingSalt}());
-        liquidityAddress = address(new OMFLiquidityTemplate{salt: liquiditySalt}());
-        return (listingAddress, liquidityAddress);
+        return listingAddress;
     }
 }
