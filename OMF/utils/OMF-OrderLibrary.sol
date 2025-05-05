@@ -1,68 +1,32 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.15 (Updated)
+// Version: 0.0.17 (Updated)
 // Changes:
-// - Updated comments to reference OMFRouter instead of OMF-ProxyRouter.
-// - Added import for ./utils/OMF-SettlementLibrary.sol.
+// - Converted from library to abstract contract to support potential future interface declarations and avoid Remix AI library interface warnings.
+// - Moved PrepData struct inside contract scope (previously outside library).
+// - Updated helper functions _transferToken, _normalizeAndFee, _createOrderUpdate to public to maintain external accessibility.
+// - Retained validateAndPrepareRefund and executeRefundAndUpdate as internal, as used only within clearOrders/clearSingleOrder.
+// - Retained OMFShared.SafeERC20 usage, with single SafeERC20 import in OMF-Shared.sol.
+// - From v0.0.16: Replaced IOMFListing and IOMFLiquidity interfaces with OMFShared.IOMFListing and OMFShared.IOMFLiquidity.
+// - From v0.0.16: Updated IOMFOrderLibrary interface to use OMFShared.UpdateType in OrderPrep struct.
+// - From v0.0.16: Removed SafeERC20 import, used OMFShared.SafeERC20.
+// - From v0.0.16: Updated UpdateType to OMFShared.UpdateType to resolve duplication.
+// - From v0.0.16: Removed denormalize function, used OMFShared.denormalize.
+// - From v0.0.16: Replaced inline assembly in clearOrders with Solidity array resizing.
 // - From v0.0.14: Updated processExecuteBuyOrder and processExecuteSellOrder to handle tax-on-transfer tokens by using post-tax receivedPrincipal and receivedFee.
 // - From v0.0.14: Removed reverts for receivedPrincipal < prep.principal and receivedFee < prep.fee; store receivedPrincipal in updates and use receivedFee in addFees.
 // - From v0.0.14: Side effect: Prevents reverts for tax-on-transfer tokens; ensures actual received amounts are stored and used.
-// - From v0.0.14: Added denormalize function to handle non-18 decimal tokens.
+// - From v0.0.14: Added denormalize function to handle non-18 decimal tokens (now in OMFShared).
 // - From v0.0.14: Updated executeRefundAndUpdate to denormalize refundAmount before transact.
 // - From v0.0.14: Side effects: Corrects refund amounts for tokens with non-18 decimals (e.g., USDC); aligns with MFP-OrderLibrary v0.0.8.
-// - Retains fixes from v0.0.12: Fixed stack-too-deep in clearOrders/clearSingleOrder using ClearOrderState and helpers.
-// - Retains alignment with OMFListingTemplate’s implicit listingId (from v0.0.9).
+// - From v0.0.12: Fixed stack-too-deep in clearOrders/clearSingleOrder using ClearOrderState and helpers.
+// - From v0.0.9: Aligned with OMFListingTemplate’s implicit listingId.
 
-import "./imports/SafeERC20.sol";
+import "./OMF-Shared.sol";
 
 interface IOMF {
     function isValidListing(address listingAddress) external view returns (bool);
-}
-
-interface IOMFListing {
-    struct UpdateType {
-        uint8 updateType;
-        uint256 index;
-        uint256 value;
-        address addr;
-        address recipient;
-        uint256 maxPrice;
-        uint256 minPrice;
-    }
-    function token0() external view returns (address);
-    function baseToken() external view returns (address);
-    function liquidityAddress() external view returns (address);
-    function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
-    function listingPriceView() external view returns (uint256);
-    function buyOrders(uint256 orderId) external view returns (
-        address makerAddress,
-        address recipientAddress,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 pending,
-        uint256 filled,
-        uint8 status
-    );
-    function sellOrders(uint256 orderId) external view returns (
-        address makerAddress,
-        address recipientAddress,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 pending,
-        uint256 filled,
-        uint8 status
-    );
-    function pendingBuyOrdersView() external view returns (uint256[] memory);
-    function pendingSellOrdersView() external view returns (uint256[] memory);
-    function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
-    function update(address caller, UpdateType[] memory updates) external;
-    function transact(address caller, address token, uint256 amount, address recipient) external;
-    function nextOrderId() external returns (uint256);
-}
-
-interface IOMFLiquidity {
-    function addFees(address caller, bool isX, uint256 fee) external;
 }
 
 interface IOMFOrderLibrary {
@@ -84,7 +48,7 @@ interface IOMFOrderLibrary {
         uint256 orderId;
         uint256 principal;
         uint256 fee;
-        IOMFListing.UpdateType[] updates;
+        OMFShared.UpdateType[] updates;
         address token;
         address recipient;
     }
@@ -143,12 +107,21 @@ interface IOMFOrderLibrary {
     ) external;
 }
 
-library OMFOrderLibrary {
-    using SafeERC20 for IERC20;
+abstract contract OMFOrderLibrary {
+    using OMFShared.SafeERC20 for IERC20;
+
+    struct PrepData {
+        address token;
+        uint256 normalized;
+        uint256 fee;
+        uint256 principal;
+        uint256 orderId;
+        OMFShared.UpdateType[] updates;
+    }
 
     struct ExecutionState {
-        IOMFListing listing;
-        IOMFLiquidity liquidity;
+        OMFShared.IOMFListing listing;
+        OMFShared.IOMFLiquidity liquidity;
         address liquidityAddress;
     }
 
@@ -165,29 +138,18 @@ library OMFOrderLibrary {
     event OrderCreated(uint256 orderId, bool isBuy, address maker);
     event OrderCancelled(uint256 orderId);
 
-    // Helper functions
-    function _transferToken(address token, address target, uint256 amount) internal returns (uint256) {
+    function _transferToken(address token, address target, uint256 amount) public returns (uint256) {
         uint256 preBalance = IERC20(token).balanceOf(target);
         IERC20(token).safeTransferFrom(msg.sender, target, amount);
         uint256 postBalance = IERC20(token).balanceOf(target);
         return postBalance - preBalance;
     }
 
-    function _normalizeAndFee(address token, uint256 amount) internal view returns (uint256 normalized, uint256 fee, uint256 principal) {
+    function _normalizeAndFee(address token, uint256 amount) public view returns (uint256 normalized, uint256 fee, uint256 principal) {
         uint8 decimals = IERC20(token).decimals();
-        normalized = amount;
-        if (decimals != 18) {
-            if (decimals < 18) normalized = amount * (10 ** (18 - decimals));
-            else normalized = amount / (10 ** (decimals - 18));
-        }
+        normalized = OMFShared.normalize(amount, decimals);
         fee = (normalized * 5) / 10000; // 0.05% fee
         principal = normalized - fee;
-    }
-
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
     }
 
     function _createOrderUpdate(
@@ -198,14 +160,14 @@ library OMFOrderLibrary {
         address recipient,
         uint256 maxPrice,
         uint256 minPrice
-    ) internal pure returns (IOMFListing.UpdateType[] memory) {
-        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](1);
-        updates[0] = IOMFListing.UpdateType(updateType, orderId, principal, maker, recipient, maxPrice, minPrice);
+    ) public pure returns (OMFShared.UpdateType[] memory) {
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](1);
+        updates[0] = OMFShared.UpdateType(updateType, orderId, principal, maker, recipient, maxPrice, minPrice);
         return updates;
     }
 
     function validateAndPrepareRefund(
-        IOMFListing listing,
+        OMFShared.IOMFListing listing,
         uint256 orderId,
         bool isBuy,
         address user
@@ -267,20 +229,20 @@ library OMFOrderLibrary {
     }
 
     function executeRefundAndUpdate(
-        IOMFListing listing,
+        OMFShared.IOMFListing listing,
         address proxy,
         ClearOrderState memory orderState,
-        IOMFListing.UpdateType[] memory updates,
+        OMFShared.UpdateType[] memory updates,
         uint256 updateIndex,
         bool isBuy,
         uint256 orderId
     ) internal {
         if (orderState.refundAmount > 0) {
             uint8 decimals = IERC20(orderState.token).decimals();
-            uint256 rawAmount = denormalize(orderState.refundAmount, decimals);
+            uint256 rawAmount = OMFShared.denormalize(orderState.refundAmount, decimals);
             listing.transact(proxy, orderState.token, rawAmount, orderState.refundTo);
         }
-        updates[updateIndex] = IOMFListing.UpdateType(
+        updates[updateIndex] = OMFShared.UpdateType(
             isBuy ? 1 : 2,
             orderId,
             0,
@@ -292,16 +254,15 @@ library OMFOrderLibrary {
         emit OrderCancelled(orderId);
     }
 
-    // Prep functions
     function prepBuyOrder(
         address listingAddress,
         IOMFOrderLibrary.BuyOrderDetails memory details,
         address listingAgent,
         address proxy
-    ) external returns (OrderPrep memory) {
+    ) external returns (IOMFOrderLibrary.OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
 
         PrepData memory prepData;
         prepData.token = listing.token0();
@@ -311,7 +272,7 @@ library OMFOrderLibrary {
             1, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
 
-        return OrderPrep(prepData.orderId, prepData.principal, prepData.fee, prepData.updates, prepData.token, details.recipient);
+        return IOMFOrderLibrary.OrderPrep(prepData.orderId, prepData.principal, prepData.fee, prepData.updates, prepData.token, details.recipient);
     }
 
     function prepSellOrder(
@@ -319,10 +280,10 @@ library OMFOrderLibrary {
         IOMFOrderLibrary.SellOrderDetails memory details,
         address listingAgent,
         address proxy
-    ) external returns (OrderPrep memory) {
+    ) external returns (IOMFOrderLibrary.OrderPrep memory) {
         require(listingAgent != address(0), "Agent not set");
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
 
         PrepData memory prepData;
         prepData.token = listing.baseToken();
@@ -332,24 +293,23 @@ library OMFOrderLibrary {
             2, prepData.orderId, prepData.principal, msg.sender, details.recipient, details.maxPrice, details.minPrice
         );
 
-        return OrderPrep(prepData.orderId, prepData.principal, prepData.fee, prepData.updates, prepData.token, details.recipient);
+        return IOMFOrderLibrary.OrderPrep(prepData.orderId, prepData.principal, prepData.fee, prepData.updates, prepData.token, details.recipient);
     }
 
-    // Execute functions
     function executeBuyOrder(
         address listingAddress,
-        OrderPrep memory prep,
+        IOMFOrderLibrary.OrderPrep memory prep,
         address listingAgent,
         address proxy
     ) external {
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
         address liquidityAddr = listing.liquidityAddress();
-        ExecutionState memory state = ExecutionState(listing, IOMFLiquidity(liquidityAddr), liquidityAddr);
+        ExecutionState memory state = ExecutionState(listing, OMFShared.IOMFLiquidity(liquidityAddr), liquidityAddr);
         processExecuteBuyOrder(prep, state, proxy);
     }
 
     function processExecuteBuyOrder(
-        OrderPrep memory prep,
+        IOMFOrderLibrary.OrderPrep memory prep,
         ExecutionState memory state,
         address proxy
     ) internal {
@@ -364,14 +324,14 @@ library OMFOrderLibrary {
         state.listing.update(proxy, prep.updates);
         state.liquidity.addFees(proxy, true, receivedFee);
 
-        IOMFListing.UpdateType[] memory historicalUpdate = new IOMFListing.UpdateType[](1);
+        OMFShared.UpdateType[] memory historicalUpdate = new OMFShared.UpdateType[](1);
         (
             uint256 xBalance,
             uint256 yBalance,
             uint256 xVolume,
             uint256 yVolume
         ) = state.listing.listingVolumeBalancesView();
-        historicalUpdate[0] = IOMFListing.UpdateType(
+        historicalUpdate[0] = OMFShared.UpdateType(
             3, 0, state.listing.listingPriceView(), address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
         );
@@ -382,18 +342,18 @@ library OMFOrderLibrary {
 
     function executeSellOrder(
         address listingAddress,
-        OrderPrep memory prep,
+        IOMFOrderLibrary.OrderPrep memory prep,
         address listingAgent,
         address proxy
     ) external {
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
         address liquidityAddr = listing.liquidityAddress();
-        ExecutionState memory state = ExecutionState(listing, IOMFLiquidity(liquidityAddr), liquidityAddr);
+        ExecutionState memory state = ExecutionState(listing, OMFShared.IOMFLiquidity(liquidityAddr), liquidityAddr);
         processExecuteSellOrder(prep, state, proxy);
     }
 
     function processExecuteSellOrder(
-        OrderPrep memory prep,
+        IOMFOrderLibrary.OrderPrep memory prep,
         ExecutionState memory state,
         address proxy
     ) internal {
@@ -408,14 +368,14 @@ library OMFOrderLibrary {
         state.listing.update(proxy, prep.updates);
         state.liquidity.addFees(proxy, false, receivedFee);
 
-        IOMFListing.UpdateType[] memory historicalUpdate = new IOMFListing.UpdateType[](1);
+        OMFShared.UpdateType[] memory historicalUpdate = new OMFShared.UpdateType[](1);
         (
             uint256 xBalance,
             uint256 yBalance,
             uint256 xVolume,
             uint256 yVolume
         ) = state.listing.listingVolumeBalancesView();
-        historicalUpdate[0] = IOMFListing.UpdateType(
+        historicalUpdate[0] = OMFShared.UpdateType(
             3, 0, state.listing.listingPriceView(), address(0), address(0),
             xBalance << 128 | yBalance, xVolume << 128 | yVolume
         );
@@ -424,7 +384,6 @@ library OMFOrderLibrary {
         emit OrderCreated(prep.orderId, false, msg.sender);
     }
 
-    // Clear functions
     function clearSingleOrder(
         address listingAddress,
         uint256 orderId,
@@ -433,12 +392,12 @@ library OMFOrderLibrary {
         address proxy
     ) external {
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
 
         (ClearOrderState memory orderState, bool isValid) = validateAndPrepareRefund(listing, orderId, isBuy, msg.sender);
         require(isValid, "Order not active or not maker");
 
-        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](1);
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](1);
         executeRefundAndUpdate(listing, proxy, orderState, updates, 0, isBuy, orderId);
 
         listing.update(proxy, updates);
@@ -451,7 +410,7 @@ library OMFOrderLibrary {
         address user
     ) external {
         require(IOMF(listingAgent).isValidListing(listingAddress), "Invalid listing");
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
         (bool success, bytes memory returnData) = listingAddress.staticcall(
             abi.encodeWithSignature("makerPendingOrdersView(address)", user)
         );
@@ -460,7 +419,7 @@ library OMFOrderLibrary {
 
         if (userOrders.length == 0) return;
 
-        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](userOrders.length);
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](userOrders.length);
         uint256 updateCount = 0;
 
         for (uint256 i = 0; i < userOrders.length; i++) {
@@ -484,12 +443,17 @@ library OMFOrderLibrary {
         }
 
         if (updateCount > 0) {
-            assembly { mstore(updates, updateCount) }
+            if (updateCount < updates.length) {
+                OMFShared.UpdateType[] memory resized = new OMFShared.UpdateType[](updateCount);
+                for (uint256 i = 0; i < updateCount; i++) {
+                    resized[i] = updates[i];
+                }
+                updates = resized;
+            }
             listing.update(proxy, updates);
         }
     }
 
-    // Retained for backward compatibility (optional)
     function adjustOrder(
         address listing,
         bool isBuy,
@@ -499,20 +463,11 @@ library OMFOrderLibrary {
         uint256 minPrice,
         address recipient
     ) external {
-        IOMFListing listingContract = IOMFListing(listing);
+        OMFShared.IOMFListing listingContract = OMFShared.IOMFListing(listing);
         (uint256 normalized, , uint256 principal) = _normalizeAndFee(isBuy ? listingContract.token0() : listingContract.baseToken(), actualAmount);
-        IOMFListing.UpdateType[] memory updates = _createOrderUpdate(
+        OMFShared.UpdateType[] memory updates = _createOrderUpdate(
             isBuy ? 1 : 2, orderId, principal, msg.sender, recipient, maxPrice, minPrice
         );
         listingContract.update(msg.sender, updates);
     }
-}
-
-struct PrepData {
-    address token;
-    uint256 normalized;
-    uint256 fee;
-    uint256 principal;
-    uint256 orderId;
-    IOMFListing.UpdateType[] updates;
 }

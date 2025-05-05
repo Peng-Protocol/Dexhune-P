@@ -1,65 +1,34 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.9 (Updated)
+// Version: 0.0.11 (Updated)
 // Changes:
-// - Updated comments to reference OMFRouter instead of OMF-ProxyRouter.
-// - From v0.0.8: Added normalize/denormalize functions for decimal handling.
+// - Converted from library to abstract contract to support potential future interface declarations and avoid Remix AI library interface warnings.
+// - Updated helper functions computeOrderAmounts, performTransactionAndAdjust to public to maintain external accessibility.
+// - Retained processPrepBuyOrders, processPrepSellOrders, processBuyOrder, processSellOrder as internal, as used only within prep/execute functions.
+// - Retained OMFShared.SafeERC20 usage, with single SafeERC20 import in OMF-Shared.sol.
+// - From v0.0.10: Removed SafeERC20 import, added OMF-Shared.sol.
+// - From v0.0.10: Replaced IOMFListing interface with OMFShared.IOMFListing.
+// - From v0.0.10: Updated UpdateType to OMFShared.UpdateType.
+// - From v0.0.10: Removed normalize/denormalize functions, used OMFShared.normalize/denormalize.
+// - From v0.0.10: Replaced inline assembly in prepBuyOrders/prepSellOrders with Solidity array resizing.
+// - From v0.0.8: Added normalize/denormalize functions (now in OMFShared).
 // - From v0.0.8: Updated computeOrderAmounts to normalize inputs and denormalize outputs.
 // - From v0.0.8: Updated performTransactionAndAdjust to denormalize amount before transact and normalize actualReceived.
-// - From v0.0.7: Fixed stack-too-deep in processBuyOrder/processSellOrder by introducing ProcessOrderState struct and helper functions computeOrderAmounts/performTransactionAndAdjust.
-// - From v0.0.6: Removed listingId from all functions and interfaces to align with implicit listingId in OMFListingTemplate.
-// - Updated IOMFListing interface: Removed listingId from volumeBalances(), liquidityAddresses().
-// - Fixed E7: Added tax-on-transfer checks in executeBuyOrders/executeSellOrders (from v0.0.4).
-// - Fixed E1: Inverted price for buy orders (tokenBAmount = tokenAAmount / price) (from v0.0.4).
-// - Fixed E2: Removed redundant decimal conversion, relying on OMFListingTemplate.getPrice() (from v0.0.4).
-// - Updated for OMFListingTemplate v0.0.7: 7-field BuyOrder/SellOrder, token0/baseToken, added yVolume tracking (from v0.0.5).
-// - Fixed assembly errors in prepBuyOrders/prepSellOrders: Correctly set data.updates length using data.orderCount (from v0.0.5).
-// - Fixed stack-too-deep in execute$order and prep$order: Added ExecutionState and PrepState structs with helper functions (from v0.0.5).
+// - From v0.0.7: Fixed stack-too-deep in processBuyOrder/processSellOrder with ProcessOrderState struct and helpers.
+// - From v0.0.6: Removed listingId from all functions to align with OMFListingTemplate.
+// - From v0.0.5: Updated for OMFListingTemplate v0.0.7: 7-field BuyOrder/SellOrder, token0/baseToken, yVolume tracking.
+// - From v0.0.5: Fixed assembly errors in prepBuyOrders/prepSellOrders.
+// - From v0.0.5: Fixed stack-too-deep in execute/prep with ExecutionState and PrepState structs.
+// - From v0.0.4: Fixed E7: Added tax-on-transfer checks in executeBuyOrders/executeSellOrders.
+// - From v0.0.4: Fixed E1: Inverted price for buy orders (tokenBAmount = tokenAAmount / price).
+// - From v0.0.4: Fixed E2: Removed redundant decimal conversion, relying on OMFListingTemplate.getPrice().
 // - Side effects: Ensures correct decimal handling for tax-on-transfer tokens; improves robustness for non-18 decimal tokens.
 
-import "./imports/SafeERC20.sol";
+import "./OMF-Shared.sol";
 
-interface IOMFListing {
-    struct UpdateType {
-        uint8 updateType;
-        uint256 index;
-        uint256 value;
-        address addr;
-        address recipient;
-        uint256 maxPrice;
-        uint256 minPrice;
-    }
-    function token0() external view returns (address);
-    function baseToken() external view returns (address);
-    function getPrice() external view returns (uint256);
-    function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
-    function buyOrders(uint256 orderId) external view returns (
-        address makerAddress,
-        address recipientAddress,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 pending,
-        uint256 filled,
-        uint8 status
-    );
-    function sellOrders(uint256 orderId) external view returns (
-        address makerAddress,
-        address recipientAddress,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 pending,
-        uint256 filled,
-        uint8 status
-    );
-    function pendingBuyOrdersView() external view returns (uint256[] memory);
-    function pendingSellOrdersView() external view returns (uint256[] memory);
-    function update(address caller, UpdateType[] memory updates) external;
-    function transact(address caller, address token, uint256 amount, address recipient) external;
-}
-
-library OMFSettlementLibrary {
-    using SafeERC20 for IERC20;
+abstract contract OMFSettlementLibrary {
+    using OMFShared.SafeERC20 for IERC20;
 
     struct PreparedUpdate {
         uint256 orderId;
@@ -77,7 +46,7 @@ library OMFSettlementLibrary {
 
     struct PrepState {
         uint256 price;
-        IOMFListing listing;
+        OMFShared.IOMFListing listing;
     }
 
     struct ExecutionState {
@@ -96,41 +65,29 @@ library OMFSettlementLibrary {
         uint256 postBalance;
     }
 
-    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount * 10**(18 - decimals);
-        else return amount / 10**(decimals - 18);
-    }
-
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
-    }
-
     function computeOrderAmounts(
         uint256 price,
         uint256 pending,
         bool isBuy,
         uint8 token0Decimals,
         uint8 baseTokenDecimals
-    ) internal pure returns (uint256 baseTokenAmount, uint256 token0Amount) {
-        uint256 normalizedPending = normalize(pending, isBuy ? baseTokenDecimals : token0Decimals);
+    ) public pure returns (uint256 baseTokenAmount, uint256 token0Amount) {
+        uint256 normalizedPending = OMFShared.normalize(pending, isBuy ? baseTokenDecimals : token0Decimals);
         if (isBuy) {
             baseTokenAmount = normalizedPending;
             token0Amount = (baseTokenAmount * 1e18) / price;
-            baseTokenAmount = denormalize(baseTokenAmount, baseTokenDecimals);
-            token0Amount = denormalize(token0Amount, token0Decimals);
+            baseTokenAmount = OMFShared.denormalize(baseTokenAmount, baseTokenDecimals);
+            token0Amount = OMFShared.denormalize(token0Amount, token0Decimals);
         } else {
             token0Amount = normalizedPending;
             baseTokenAmount = (token0Amount * price) / 1e18;
-            token0Amount = denormalize(token0Amount, token0Decimals);
-            baseTokenAmount = denormalize(baseTokenAmount, baseTokenDecimals);
+            token0Amount = OMFShared.denormalize(token0Amount, token0Decimals);
+            baseTokenAmount = OMFShared.denormalize(baseTokenAmount, baseTokenDecimals);
         }
     }
 
     function performTransactionAndAdjust(
-        IOMFListing listing,
+        OMFShared.IOMFListing listing,
         address proxy,
         IERC20 baseToken,
         uint256 amount,
@@ -138,12 +95,12 @@ library OMFSettlementLibrary {
         uint256 price,
         bool isBuy,
         uint8 decimals
-    ) internal returns (uint256 actualReceived, uint256 adjustedValue) {
-        uint256 rawAmount = denormalize(amount, decimals);
+    ) public returns (uint256 actualReceived, uint256 adjustedValue) {
+        uint256 rawAmount = OMFShared.denormalize(amount, decimals);
         uint256 preBalance = baseToken.balanceOf(recipient);
         listing.transact(proxy, address(baseToken), rawAmount, recipient);
         uint256 postBalance = baseToken.balanceOf(recipient);
-        actualReceived = normalize(postBalance - preBalance, decimals);
+        actualReceived = OMFShared.normalize(postBalance - preBalance, decimals);
         adjustedValue = isBuy ? (actualReceived * price) / 1e18 : (actualReceived * 1e18) / price;
     }
 
@@ -153,7 +110,7 @@ library OMFSettlementLibrary {
         address listingAgent,
         address proxy
     ) external view returns (SettlementData memory) {
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
         uint256[] memory pendingOrders = orderIds.length > 0 ? orderIds : listing.pendingBuyOrdersView();
         SettlementData memory data;
         data.orderIds = pendingOrders;
@@ -164,10 +121,12 @@ library OMFSettlementLibrary {
         PrepState memory state = PrepState(listing.getPrice(), listing);
         processPrepBuyOrders(data, pendingOrders, state);
 
-        assembly {
-            let updatesPtr := add(data, 0x40) // Offset to data.updates
-            let count := mload(data)          // data.orderCount at offset 0x00
-            mstore(updatesPtr, count)         // Set length of data.updates
+        if (data.orderCount < data.updates.length) {
+            PreparedUpdate[] memory resized = new PreparedUpdate[](data.orderCount);
+            for (uint256 i = 0; i < data.orderCount; i++) {
+                resized[i] = data.updates[i];
+            }
+            data.updates = resized;
         }
         return data;
     }
@@ -200,8 +159,8 @@ library OMFSettlementLibrary {
         address listingAgent,
         address proxy
     ) external {
-        IOMFListing listing = IOMFListing(listingAddress);
-        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](data.orderCount + 1);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](data.orderCount + 1);
         uint8 baseTokenDecimals = IERC20(data.baseToken).decimals();
         uint8 token0Decimals = IERC20(data.token0).decimals();
         ExecutionState memory state = ExecutionState(0, listing.getPrice(), IERC20(data.baseToken));
@@ -212,14 +171,14 @@ library OMFSettlementLibrary {
         }
 
         if (data.orderCount > 0) {
-            updates[data.orderCount] = IOMFListing.UpdateType(0, 3, state.totalBaseToken, data.baseToken, address(0), 0, 0); // yVolume
+            updates[data.orderCount] = OMFShared.UpdateType(0, 3, state.totalBaseToken, data.baseToken, address(0), 0, 0); // yVolume
             listing.update(proxy, updates);
         }
     }
 
     function processBuyOrder(
-        IOMFListing listing,
-        IOMFListing.UpdateType[] memory updates,
+        OMFShared.IOMFListing listing,
+        OMFShared.UpdateType[] memory updates,
         uint256 index,
         PreparedUpdate memory update,
         ExecutionState memory state,
@@ -265,7 +224,7 @@ library OMFSettlementLibrary {
         );
 
         // Update order
-        updates[index] = IOMFListing.UpdateType(
+        updates[index] = OMFShared.UpdateType(
             1,
             update.orderId,
             pending > orderState.adjustedValue ? pending - orderState.adjustedValue : 0,
@@ -282,7 +241,7 @@ library OMFSettlementLibrary {
         address listingAgent,
         address proxy
     ) external view returns (SettlementData memory) {
-        IOMFListing listing = IOMFListing(listingAddress);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
         uint256[] memory pendingOrders = orderIds.length > 0 ? orderIds : listing.pendingSellOrdersView();
         SettlementData memory data;
         data.orderIds = pendingOrders;
@@ -293,10 +252,12 @@ library OMFSettlementLibrary {
         PrepState memory state = PrepState(listing.getPrice(), listing);
         processPrepSellOrders(data, pendingOrders, state);
 
-        assembly {
-            let updatesPtr := add(data, 0x40) // Offset to data.updates
-            let count := mload(data)          // data.orderCount at offset 0x00
-            mstore(updatesPtr, count)         // Set length of data.updates
+        if (data.orderCount < data.updates.length) {
+            PreparedUpdate[] memory resized = new PreparedUpdate[](data.orderCount);
+            for (uint256 i = 0; i < data.orderCount; i++) {
+                resized[i] = data.updates[i];
+            }
+            data.updates = resized;
         }
         return data;
     }
@@ -329,8 +290,8 @@ library OMFSettlementLibrary {
         address listingAgent,
         address proxy
     ) external {
-        IOMFListing listing = IOMFListing(listingAddress);
-        IOMFListing.UpdateType[] memory updates = new IOMFListing.UpdateType[](data.orderCount + 1);
+        OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](data.orderCount + 1);
         uint8 baseTokenDecimals = IERC20(data.baseToken).decimals();
         uint8 token0Decimals = IERC20(data.token0).decimals();
         ExecutionState memory state = ExecutionState(0, listing.getPrice(), IERC20(data.baseToken));
@@ -341,14 +302,14 @@ library OMFSettlementLibrary {
         }
 
         if (data.orderCount > 0) {
-            updates[data.orderCount] = IOMFListing.UpdateType(0, 1, state.totalBaseToken, data.baseToken, address(0), 0, 0); // yBalance
+            updates[data.orderCount] = OMFShared.UpdateType(0, 1, state.totalBaseToken, data.baseToken, address(0), 0, 0); // yBalance
             listing.update(proxy, updates);
         }
     }
 
     function processSellOrder(
-        IOMFListing listing,
-        IOMFListing.UpdateType[] memory updates,
+        OMFShared.IOMFListing listing,
+        OMFShared.UpdateType[] memory updates,
         uint256 index,
         PreparedUpdate memory update,
         ExecutionState memory state,
@@ -394,7 +355,7 @@ library OMFSettlementLibrary {
         );
 
         // Update order
-        updates[index] = IOMFListing.UpdateType(
+        updates[index] = OMFShared.UpdateType(
             2,
             update.orderId,
             pending > orderState.adjustedValue ? pending - orderState.adjustedValue : 0,
@@ -424,5 +385,4 @@ library OMFSettlementLibrary {
         SettlementData memory data = prepSellOrders(listingAddress, orderIds, listingAgent, proxy);
         executeSellOrders(listingAddress, data, listingAgent, proxy);
     }
-
 }

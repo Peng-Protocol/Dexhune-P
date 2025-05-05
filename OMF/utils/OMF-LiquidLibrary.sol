@@ -1,27 +1,33 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.11 (Updated)
+// Version: 0.0.13 (Updated)
 // Changes:
-// - Updated comments to reference OMFRouter instead of OMF-ProxyRouter.
-// - From v0.0.10: Added normalize/denormalize functions for decimal handling.
+// - Converted from library to abstract contract to support potential future interface declarations and avoid Remix AI library interface warnings.
+// - Updated helper function performTransactionAndAdjust to public to maintain external accessibility.
+// - Retained processPrepBuyLiquid, processPrepSellLiquid as internal, as used only within prepBuyLiquid/prepSellLiquid.
+// - Retained OMFShared.SafeERC20 usage, with single SafeERC20 import in OMF-Shared.sol.
+// - From v0.0.12: Removed SafeERC20 import, added OMF-Shared.sol.
+// - From v0.0.12: Replaced inlined IOMFListing/IOMFLiquidity calls with OMFShared.IOMFListing/IOMFLiquidity.
+// - From v0.0.12: Updated UpdateType to OMFShared.UpdateType.
+// - From v0.0.12: Removed normalize/denormalize functions, used OMFShared.normalize/denormalize.
+// - From v0.0.10: Added normalize/denormalize functions (now in OMFShared).
 // - From v0.0.10: Added performTransactionAndAdjust to denormalize amounts, check actual received, and adjust UpdateType.value.
 // - From v0.0.10: Updated executeBuyLiquid to use performTransactionAndAdjust and set UpdateType.value to actualReceived.
 // - From v0.0.10: Updated executeSellLiquid to use performTransactionAndAdjust and set UpdateType.value to actualReceived.
-// - From v0.0.8: Removed listingId from all functions to align with implicit listingId in OMFListingTemplate.
-// - Updated inlined IOMFListing calls: Changed liquidityAddresses() to liquidityAddress().
-// - Renamed tokenA to token0, tokenB to baseToken (Token-0 to Token-1) (from v0.0.7).
-// - Adjusted settlement to use transact from listing, removed direct deposit/withdraw (from v0.0.7).
-// - Fully inlined all interfaces (IOMFListing, IOMFLiquidity) within functions (from v0.0.7).
-// - Fixed UpdateType scoping to OMFLiquidLibrary.UpdateType (from v0.0.8).
-// - Aligned order decoding to 7-element struct (from v0.0.8).
-// - Fixed stack-too-deep in prepBuyLiquid/prepSellLiquid: Added PrepState struct and helper functions (from v0.0.8).
+// - From v0.0.8: Removed listingId from all functions to align with OMFListingTemplate.
+// - From v0.0.8: Fixed UpdateType scoping to OMFShared.UpdateType.
+// - From v0.0.8: Fixed stack-too-deep in prepBuyLiquid/prepSellLiquid with PrepState struct and helpers.
+// - From v0.0.7: Updated inlined IOMFListing calls: Changed liquidityAddresses() to liquidityAddress().
+// - From v0.0.7: Renamed tokenA to token0, tokenB to baseToken (Token-0 to Token-1).
+// - From v0.0.7: Adjusted settlement to use transact from listing, removed direct deposit/withdraw.
+// - From v0.0.7: Fully inlined all interfaces (now explicit via OMFShared).
 // - Side effects: Ensures tax-on-transfer adjustments are reflected in state updates; supports non-18 decimal tokens.
 
-import "./imports/SafeERC20.sol";
+import "./OMF-Shared.sol";
 
-library OMFLiquidLibrary {
-    using SafeERC20 for IERC20;
+abstract contract OMFLiquidLibrary {
+    using OMFShared.SafeERC20 for IERC20;
 
     struct PreparedUpdate {
         uint256 orderId;
@@ -37,31 +43,9 @@ library OMFLiquidLibrary {
         address baseToken; // Token-1 (reference token)
     }
 
-    struct UpdateType {
-        uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
-        uint256 index;
-        uint256 value;
-        address addr;
-        address recipient;
-        uint256 maxPrice;
-        uint256 minPrice;
-    }
-
     struct PrepState {
         address token0;
         address baseToken;
-    }
-
-    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount * 10**(18 - decimals);
-        else return amount / 10**(decimals - 18);
-    }
-
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10**(18 - decimals);
-        else return amount * 10**(decimals - 18);
     }
 
     function performTransactionAndAdjust(
@@ -71,8 +55,8 @@ library OMFLiquidLibrary {
         uint256 amount,
         address recipient,
         uint8 decimals
-    ) internal returns (uint256 actualReceived) {
-        uint256 rawAmount = denormalize(amount, decimals);
+    ) public returns (uint256 actualReceived) {
+        uint256 rawAmount = OMFShared.denormalize(amount, decimals);
         uint256 preBalance = token == address(0) ? recipient.balance : IERC20(token).balanceOf(recipient);
         (bool success, ) = listingAddress.call(
             abi.encodeWithSignature(
@@ -85,7 +69,7 @@ library OMFLiquidLibrary {
         );
         require(success, "Transact failed");
         uint256 postBalance = token == address(0) ? recipient.balance : IERC20(token).balanceOf(recipient);
-        actualReceived = normalize(postBalance - preBalance, decimals);
+        actualReceived = OMFShared.normalize(postBalance - preBalance, decimals);
     }
 
     function prepBuyLiquid(
@@ -101,11 +85,8 @@ library OMFLiquidLibrary {
 
         PrepState memory state;
         {
-            (bool success0, bytes memory data0) = listingAddress.staticcall(abi.encodeWithSignature("token0()"));
-            (bool success1, bytes memory data1) = listingAddress.staticcall(abi.encodeWithSignature("baseToken()"));
-            require(success0 && success1, "Token fetch failed");
-            state.token0 = abi.decode(data0, (address));
-            state.baseToken = abi.decode(data1, (address));
+            state.token0 = OMFShared.IOMFListing(listingAddress).token0();
+            state.baseToken = OMFShared.IOMFListing(listingAddress).baseToken();
         }
         data.token0 = state.token0;
         data.baseToken = state.baseToken;
@@ -120,10 +101,6 @@ library OMFLiquidLibrary {
         uint256[] memory orderIds
     ) internal view {
         for (uint256 i = 0; i < orderIds.length; i++) {
-            (bool success, bytes memory returnData) = listingAddress.staticcall(
-                abi.encodeWithSignature("buyOrders(uint256)", orderIds[i])
-            );
-            require(success, "Buy order fetch failed");
             (
                 address makerAddress,
                 address recipientAddress,
@@ -132,7 +109,7 @@ library OMFLiquidLibrary {
                 uint256 pending,
                 uint256 filled,
                 uint8 status
-            ) = abi.decode(returnData, (address, address, uint256, uint256, uint256, uint256, uint8));
+            ) = OMFShared.IOMFListing(listingAddress).buyOrders(orderIds[i]);
             require(status == 1, "Order not active");
             data.updates[i] = PreparedUpdate(orderIds[i], pending, recipientAddress);
         }
@@ -151,11 +128,8 @@ library OMFLiquidLibrary {
 
         PrepState memory state;
         {
-            (bool success0, bytes memory data0) = listingAddress.staticcall(abi.encodeWithSignature("token0()"));
-            (bool success1, bytes memory data1) = listingAddress.staticcall(abi.encodeWithSignature("baseToken()"));
-            require(success0 && success1, "Token fetch failed");
-            state.token0 = abi.decode(data0, (address));
-            state.baseToken = abi.decode(data1, (address));
+            state.token0 = OMFShared.IOMFListing(listingAddress).token0();
+            state.baseToken = OMFShared.IOMFListing(listingAddress).baseToken();
         }
         data.token0 = state.token0;
         data.baseToken = state.baseToken;
@@ -170,10 +144,6 @@ library OMFLiquidLibrary {
         uint256[] memory orderIds
     ) internal view {
         for (uint256 i = 0; i < orderIds.length; i++) {
-            (bool success, bytes memory returnData) = listingAddress.staticcall(
-                abi.encodeWithSignature("sellOrders(uint256)", orderIds[i])
-            );
-            require(success, "Sell order fetch failed");
             (
                 address makerAddress,
                 address recipientAddress,
@@ -182,7 +152,7 @@ library OMFLiquidLibrary {
                 uint256 pending,
                 uint256 filled,
                 uint8 status
-            ) = abi.decode(returnData, (address, address, uint256, uint256, uint256, uint256, uint8));
+            ) = OMFShared.IOMFListing(listingAddress).sellOrders(orderIds[i]);
             require(status == 1, "Order not active");
             data.updates[i] = PreparedUpdate(orderIds[i], pending, recipientAddress);
         }
@@ -194,14 +164,9 @@ library OMFLiquidLibrary {
         address listingAgent,
         address proxy
     ) external {
-        uint256 price;
-        {
-            (bool success, bytes memory returnData) = listingAddress.staticcall(abi.encodeWithSignature("getPrice()"));
-            require(success, "Price fetch failed");
-            price = abi.decode(returnData, (uint256));
-        }
+        uint256 price = OMFShared.IOMFListing(listingAddress).getPrice();
 
-        OMFLiquidLibrary.UpdateType[] memory updates = new OMFLiquidLibrary.UpdateType[](data.orderCount);
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](data.orderCount);
         uint256 totalToken0;
         uint8 baseTokenDecimals = data.baseToken == address(0) ? 18 : IERC20(data.baseToken).decimals();
 
@@ -219,7 +184,7 @@ library OMFLiquidLibrary {
                 baseTokenDecimals
             );
 
-            updates[i] = OMFLiquidLibrary.UpdateType(
+            updates[i] = OMFShared.UpdateType(
                 1,
                 data.updates[i].orderId,
                 actualReceived,
@@ -244,14 +209,9 @@ library OMFLiquidLibrary {
         address listingAgent,
         address proxy
     ) external {
-        uint256 price;
-        {
-            (bool success, bytes memory returnData) = listingAddress.staticcall(abi.encodeWithSignature("getPrice()"));
-            require(success, "Price fetch failed");
-            price = abi.decode(returnData, (uint256));
-        }
+        uint256 price = OMFShared.IOMFListing(listingAddress).getPrice();
 
-        OMFLiquidLibrary.UpdateType[] memory updates = new OMFLiquidLibrary.UpdateType[](data.orderCount + 1);
+        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](data.orderCount + 1);
         uint256 totalToken0;
         uint8 baseTokenDecimals = data.baseToken == address(0) ? 18 : IERC20(data.baseToken).decimals();
 
@@ -269,7 +229,7 @@ library OMFLiquidLibrary {
                 baseTokenDecimals
             );
 
-            updates[i] = OMFLiquidLibrary.UpdateType(
+            updates[i] = OMFShared.UpdateType(
                 2,
                 data.updates[i].orderId,
                 actualReceived,
@@ -280,7 +240,7 @@ library OMFLiquidLibrary {
             );
         }
 
-        updates[data.orderCount] = OMFLiquidLibrary.UpdateType(0, 0, totalToken0, data.token0, address(0), 0, 0);
+        updates[data.orderCount] = OMFShared.UpdateType(0, 0, totalToken0, data.token0, address(0), 0, 0);
         if (data.orderCount > 0) {
             (bool success, ) = listingAddress.call(
                 abi.encodeWithSignature("update(address,(uint8,uint256,uint256,address,address,uint256,uint256)[])", proxy, updates)
@@ -294,18 +254,7 @@ library OMFLiquidLibrary {
         bool isX,
         uint256 volume
     ) external {
-        address liquidity;
-        {
-            (bool success, bytes memory returnData) = listingAddress.staticcall(
-                abi.encodeWithSignature("liquidityAddress()")
-            );
-            require(success, "Liquidity address fetch failed");
-            liquidity = abi.decode(returnData, (address));
-        }
-
-        (bool success, ) = liquidity.call(
-            abi.encodeWithSignature("claimFees(address,bool,uint256,uint256)", msg.sender, isX, 0, volume)
-        );
-        require(success, "Claim fees failed");
+        address liquidity = OMFShared.IOMFListing(listingAddress).liquidityAddress();
+        OMFShared.IOMFLiquidity(liquidity).claimFees(msg.sender, isX, 0, volume);
     }
 }
