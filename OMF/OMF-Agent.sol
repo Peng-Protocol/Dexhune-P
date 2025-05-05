@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.5 (Updated)
+// Version: 0.0.6 (Updated)
 // Changes:
-// - Clarified tokenA as Token-0 (listed token) and baseToken as Token-1 (reference token).
-// - Mov
-// - Removed fee collection in executeListing; added 1% supply ownership check for caller in prepListing (this revision).
+// - Replaced OMFListingLibrary and OMFLiquidityLibrary with OMFListingLogic.
+// - Updated executeListing to use new deploy function with two salts.
+// - Replaced setListingLibrary and setLiquidityLibrary with setListingLogic.
+// - From v0.0.5: Clarified tokenA as Token-0 (listed token) and baseToken as Token-1 (reference token).
+// - From v0.0.5: Removed fee collection in executeListing; added 1% supply ownership check for caller in prepListing.
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
@@ -25,12 +27,8 @@ interface IOMFLiquidityTemplate {
     function setTokens(address _tokenA, address _tokenB) external;
 }
 
-interface IOMFListingLibrary {
-    function deploy(bytes32 salt) external returns (address);
-}
-
-interface IOMFLiquidityLibrary {
-    function deploy(bytes32 salt) external returns (address);
+interface IOMFListingLogic {
+    function deploy(bytes32 listingSalt, bytes32 liquiditySalt) external returns (address listingAddress, address liquidityAddress);
 }
 
 interface IOMFListing {
@@ -41,8 +39,7 @@ contract OMFAgent is Ownable {
     using SafeERC20 for IERC20;
 
     address public routerAddress;
-    address public listingLibraryAddress;
-    address public liquidityLibraryAddress;
+    address public listingLogicAddress;
     address public baseToken; // Token-1 (reference token)
     
     uint256 public listingCount;
@@ -78,14 +75,9 @@ contract OMFAgent is Ownable {
         routerAddress = _routerAddress;
     }
 
-    function setListingLibrary(address _listingLibrary) external onlyOwner {
-        require(_listingLibrary != address(0), "Invalid library address");
-        listingLibraryAddress = _listingLibrary;
-    }
-
-    function setLiquidityLibrary(address _liquidityLibrary) external onlyOwner {
-        require(_liquidityLibrary != address(0), "Invalid library address");
-        liquidityLibraryAddress = _liquidityLibrary;
+    function setListingLogic(address _listingLogic) external onlyOwner {
+        require(_listingLogic != address(0), "Invalid logic address");
+        listingLogicAddress = _listingLogic;
     }
 
     function setBaseToken(address _baseToken) external onlyOwner {
@@ -93,7 +85,6 @@ contract OMFAgent is Ownable {
         baseToken = _baseToken; // Token-1
     }
 
-    
     function checkCallerBalance(address tokenA, uint256 totalSupply) internal view returns (bool) {
         uint256 decimals = IERC20(tokenA).decimals();
         uint256 requiredBalance = totalSupply / 100; // 1% of total supply
@@ -136,8 +127,7 @@ contract OMFAgent is Ownable {
         require(tokenA != address(0), "TokenA cannot be NATIVE");
         require(getListing[tokenA][baseToken] == address(0), "Pair already listed");
         require(routerAddress != address(0), "Router not set");
-        require(listingLibraryAddress != address(0), "Listing library not set");
-        require(liquidityLibraryAddress != address(0), "Liquidity library not set");
+        require(listingLogicAddress != address(0), "Listing logic not set");
         
         require(oracleAddress != address(0), "Invalid oracle address");
 
@@ -152,8 +142,7 @@ contract OMFAgent is Ownable {
     }
 
     function executeListing(PrepData memory prep) internal returns (address) {
-        address listingAddress = IOMFListingLibrary(listingLibraryAddress).deploy(prep.listingSalt);
-        address liquidityAddress = IOMFLiquidityLibrary(liquidityLibraryAddress).deploy(prep.liquiditySalt);
+        (address listingAddress, address liquidityAddress) = IOMFListingLogic(listingLogicAddress).deploy(prep.listingSalt, prep.liquiditySalt);
 
         _initializePair(
             listingAddress,
