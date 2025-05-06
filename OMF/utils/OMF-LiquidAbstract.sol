@@ -1,32 +1,25 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.13 (Updated)
+// Version: 0.0.14 (Updated)
 // Changes:
-// - Converted from library to abstract contract to support potential future interface declarations and avoid Remix AI library interface warnings.
-// - Updated helper function performTransactionAndAdjust to public to maintain external accessibility.
-// - Retained processPrepBuyLiquid, processPrepSellLiquid as internal, as used only within prepBuyLiquid/prepSellLiquid.
-// - Retained OMFShared.SafeERC20 usage, with single SafeERC20 import in OMF-Shared.sol.
-// - From v0.0.12: Removed SafeERC20 import, added OMF-Shared.sol.
-// - From v0.0.12: Replaced inlined IOMFListing/IOMFLiquidity calls with OMFShared.IOMFListing/IOMFLiquidity.
+// - Added import for OMFSharedUtils.sol to use normalize and denormalize functions.
+// - Updated performTransactionAndAdjust to use OMFSharedUtils.normalize/denormalize (lines 44, 48).
+// - From v0.0.13: Converted from library to abstract contract for interface declarations.
+// - From v0.0.13: Made performTransactionAndAdjust public for accessibility.
+// - From v0.0.12: Removed SafeERC20 import, used OMFShared.SafeERC20.
+// - From v0.0.12: Replaced IOMFListing/IOMFLiquidity with OMFShared.IOMFListing/IOMFLiquidity.
 // - From v0.0.12: Updated UpdateType to OMFShared.UpdateType.
-// - From v0.0.12: Removed normalize/denormalize functions, used OMFShared.normalize/denormalize.
-// - From v0.0.10: Added normalize/denormalize functions (now in OMFShared).
-// - From v0.0.10: Added performTransactionAndAdjust to denormalize amounts, check actual received, and adjust UpdateType.value.
-// - From v0.0.10: Updated executeBuyLiquid to use performTransactionAndAdjust and set UpdateType.value to actualReceived.
-// - From v0.0.10: Updated executeSellLiquid to use performTransactionAndAdjust and set UpdateType.value to actualReceived.
-// - From v0.0.8: Removed listingId from all functions to align with OMFListingTemplate.
-// - From v0.0.8: Fixed UpdateType scoping to OMFShared.UpdateType.
-// - From v0.0.8: Fixed stack-too-deep in prepBuyLiquid/prepSellLiquid with PrepState struct and helpers.
-// - From v0.0.7: Updated inlined IOMFListing calls: Changed liquidityAddresses() to liquidityAddress().
-// - From v0.0.7: Renamed tokenA to token0, tokenB to baseToken (Token-0 to Token-1).
-// - From v0.0.7: Adjusted settlement to use transact from listing, removed direct deposit/withdraw.
-// - From v0.0.7: Fully inlined all interfaces (now explicit via OMFShared).
-// - Side effects: Ensures tax-on-transfer adjustments are reflected in state updates; supports non-18 decimal tokens.
+// - From v0.0.10: Added performTransactionAndAdjust to handle tax-on-transfer tokens.
+// - From v0.0.8: Removed listingId, aligned with OMFListingTemplate.
+// - From v0.0.7: Renamed tokenA to token0, tokenB to baseToken.
+// - From v0.0.7: Used transact for settlement, removed direct deposit/withdraw.
+// - Side effects: Supports non-18 decimal and tax-on-transfer tokens.
 
 import "./OMF-Shared.sol";
+import "./OMFSharedUtils.sol";
 
-abstract contract OMFLiquidLibrary {
+abstract contract OMFLiquidAbstract {
     using OMFShared.SafeERC20 for IERC20;
 
     struct PreparedUpdate {
@@ -56,7 +49,7 @@ abstract contract OMFLiquidLibrary {
         address recipient,
         uint8 decimals
     ) public returns (uint256 actualReceived) {
-        uint256 rawAmount = OMFShared.denormalize(amount, decimals);
+        uint256 rawAmount = OMFSharedUtils.denormalize(amount, decimals);
         uint256 preBalance = token == address(0) ? recipient.balance : IERC20(token).balanceOf(recipient);
         (bool success, ) = listingAddress.call(
             abi.encodeWithSignature(
@@ -69,7 +62,7 @@ abstract contract OMFLiquidLibrary {
         );
         require(success, "Transact failed");
         uint256 postBalance = token == address(0) ? recipient.balance : IERC20(token).balanceOf(recipient);
-        actualReceived = OMFShared.normalize(postBalance - preBalance, decimals);
+        actualReceived = OMFSharedUtils.normalize(postBalance - preBalance, decimals);
     }
 
     function prepBuyLiquid(

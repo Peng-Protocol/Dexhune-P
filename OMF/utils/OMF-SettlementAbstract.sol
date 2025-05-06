@@ -1,33 +1,28 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.11 (Updated)
+// Version: 0.0.12 (Updated)
 // Changes:
-// - Converted from library to abstract contract to support potential future interface declarations and avoid Remix AI library interface warnings.
-// - Updated helper functions computeOrderAmounts, performTransactionAndAdjust to public to maintain external accessibility.
-// - Retained processPrepBuyOrders, processPrepSellOrders, processBuyOrder, processSellOrder as internal, as used only within prep/execute functions.
-// - Retained OMFShared.SafeERC20 usage, with single SafeERC20 import in OMF-Shared.sol.
-// - From v0.0.10: Removed SafeERC20 import, added OMF-Shared.sol.
-// - From v0.0.10: Replaced IOMFListing interface with OMFShared.IOMFListing.
+// - Added import for OMFSharedUtils.sol to use normalize and denormalize functions.
+// - Updated computeOrderAmounts to use OMFSharedUtils.normalize/denormalize (lines 65, 67, 68).
+// - Updated performTransactionAndAdjust to use OMFSharedUtils.normalize/denormalize (lines 81, 85).
+// - From v0.0.11: Converted from library to abstract contract for interface declarations.
+// - From v0.0.11: Made computeOrderAmounts, performTransactionAndAdjust public.
+// - From v0.0.10: Removed SafeERC20 import, used OMFShared.SafeERC20.
+// - From v0.0.10: Replaced IOMFListing with OMFShared.IOMFListing.
 // - From v0.0.10: Updated UpdateType to OMFShared.UpdateType.
-// - From v0.0.10: Removed normalize/denormalize functions, used OMFShared.normalize/denormalize.
-// - From v0.0.10: Replaced inline assembly in prepBuyOrders/prepSellOrders with Solidity array resizing.
-// - From v0.0.8: Added normalize/denormalize functions (now in OMFShared).
-// - From v0.0.8: Updated computeOrderAmounts to normalize inputs and denormalize outputs.
-// - From v0.0.8: Updated performTransactionAndAdjust to denormalize amount before transact and normalize actualReceived.
-// - From v0.0.7: Fixed stack-too-deep in processBuyOrder/processSellOrder with ProcessOrderState struct and helpers.
-// - From v0.0.6: Removed listingId from all functions to align with OMFListingTemplate.
-// - From v0.0.5: Updated for OMFListingTemplate v0.0.7: 7-field BuyOrder/SellOrder, token0/baseToken, yVolume tracking.
-// - From v0.0.5: Fixed assembly errors in prepBuyOrders/prepSellOrders.
-// - From v0.0.5: Fixed stack-too-deep in execute/prep with ExecutionState and PrepState structs.
-// - From v0.0.4: Fixed E7: Added tax-on-transfer checks in executeBuyOrders/executeSellOrders.
-// - From v0.0.4: Fixed E1: Inverted price for buy orders (tokenBAmount = tokenAAmount / price).
-// - From v0.0.4: Fixed E2: Removed redundant decimal conversion, relying on OMFListingTemplate.getPrice().
-// - Side effects: Ensures correct decimal handling for tax-on-transfer tokens; improves robustness for non-18 decimal tokens.
+// - From v0.0.10: Replaced inline assembly in prepBuyOrders/prepSellOrders with Solidity.
+// - From v0.0.8: Updated computeOrderAmounts/performTransactionAndAdjust for tax-on-transfer.
+// - From v0.0.7: Fixed stack-too-deep with ProcessOrderState struct.
+// - From v0.0.6: Removed listingId, aligned with OMFListingTemplate.
+// - From v0.0.5: Updated for 7-field BuyOrder/SellOrder, token0/baseToken.
+// - From v0.0.4: Added tax-on-transfer checks, fixed price inversion for buy orders.
+// - Side effects: Robust decimal handling for non-18 decimal and tax-on-transfer tokens.
 
 import "./OMF-Shared.sol";
+import "./OMFSharedUtils.sol";
 
-abstract contract OMFSettlementLibrary {
+abstract contract OMFSettlementAbstract {
     using OMFShared.SafeERC20 for IERC20;
 
     struct PreparedUpdate {
@@ -72,17 +67,17 @@ abstract contract OMFSettlementLibrary {
         uint8 token0Decimals,
         uint8 baseTokenDecimals
     ) public pure returns (uint256 baseTokenAmount, uint256 token0Amount) {
-        uint256 normalizedPending = OMFShared.normalize(pending, isBuy ? baseTokenDecimals : token0Decimals);
+        uint256 normalizedPending = OMFSharedUtils.normalize(pending, isBuy ? baseTokenDecimals : token0Decimals);
         if (isBuy) {
             baseTokenAmount = normalizedPending;
             token0Amount = (baseTokenAmount * 1e18) / price;
-            baseTokenAmount = OMFShared.denormalize(baseTokenAmount, baseTokenDecimals);
-            token0Amount = OMFShared.denormalize(token0Amount, token0Decimals);
+            baseTokenAmount = OMFSharedUtils.denormalize(baseTokenAmount, baseTokenDecimals);
+            token0Amount = OMFSharedUtils.denormalize(token0Amount, token0Decimals);
         } else {
             token0Amount = normalizedPending;
             baseTokenAmount = (token0Amount * price) / 1e18;
-            token0Amount = OMFShared.denormalize(token0Amount, token0Decimals);
-            baseTokenAmount = OMFShared.denormalize(baseTokenAmount, baseTokenDecimals);
+            token0Amount = OMFSharedUtils.denormalize(token0Amount, token0Decimals);
+            baseTokenAmount = OMFSharedUtils.denormalize(baseTokenAmount, baseTokenDecimals);
         }
     }
 
@@ -96,11 +91,11 @@ abstract contract OMFSettlementLibrary {
         bool isBuy,
         uint8 decimals
     ) public returns (uint256 actualReceived, uint256 adjustedValue) {
-        uint256 rawAmount = OMFShared.denormalize(amount, decimals);
+        uint256 rawAmount = OMFSharedUtils.denormalize(amount, decimals);
         uint256 preBalance = baseToken.balanceOf(recipient);
         listing.transact(proxy, address(baseToken), rawAmount, recipient);
         uint256 postBalance = baseToken.balanceOf(recipient);
-        actualReceived = OMFShared.normalize(postBalance - preBalance, decimals);
+        actualReceived = OMFSharedUtils.normalize(postBalance - preBalance, decimals);
         adjustedValue = isBuy ? (actualReceived * price) / 1e18 : (actualReceived * 1e18) / price;
     }
 

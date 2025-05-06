@@ -1,35 +1,29 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.16 (Updated)
+// Version: 0.0.17 (Updated)
 // Changes:
-// - Moved IOMFAgent interface before contract declaration to align with Solidity conventions.
-// - Removed IOMFListing and IOMFLiquidity interfaces, as they are retained in OMF-Shared.sol as an abstract contract.
-// - Removed direct SafeERC20 import; use OMFShared.SafeERC20 for ERC20 operations.
-// - Updated OMF-Shared.sol import to reference abstract contract with interfaces.
-// - Updated interface references to OMFShared.IOMFListing and OMFShared.IOMFLiquidity.
-// - From v0.0.15: Added IOMFListing/IOMFLiquidity interfaces (now reverted).
+// - Added import for OMFSharedUtils.sol to use denormalize function.
+// - Updated _transferToken to use OMFSharedUtils.denormalize (line 273).
+// - From v0.0.16: Removed IOMFListing/IOMFLiquidity interfaces, retained in OMF-Shared.sol.
+// - From v0.0.16: Removed direct SafeERC20 import, used OMFShared.SafeERC20.
+// - From v0.0.16: Updated to use OMFShared.IOMFListing/IOMFLiquidity.
 // - From v0.0.14: Replaced inline assembly in _clearOrders with Solidity array resizing.
-// - From v0.0.12: Updated _transferToken to denormalize amounts using OMFShared.denormalize.
-// - From v0.0.12: Updated executeOrder to handle tax-on-transfer tokens by checking post-transfer balances.
-// - From v0.0.12: Removed reverts for tax-on-transfer discrepancies; use actual received amounts.
-// - From v0.0.12: Side effects: Ensures correct handling of non-18 decimal tokens (e.g., USDC); prevents reverts for tax-on-transfer tokens.
-// - From v0.0.10: Removed listingId from all functions to align with implicit listingId in OMFListingTemplate.
-// - From v0.0.10: Renamed tokenA to token0, tokenB to baseToken (Token-0 to Token-1).
-// - From v0.0.10: Adjusted settlement to use transact from listing, removed direct deposit/withdraw.
-// - From v0.0.8: Aligned with OMFListingTemplate’s 7-field BuyOrder/SellOrder and implicit listingId.
-// - From v0.0.8: Fixed stack-too-deep in buy/sell using helper functions.
-// - Side effects: Improves robustness for non-18 decimal tokens and tax-on-transfer tokens; centralizes SafeERC20 usage.
+// - From v0.0.12: Updated _transferToken to handle tax-on-transfer tokens.
+// - From v0.0.10: Removed listingId, aligned with OMFListingTemplate.
+// - From v0.0.10: Renamed tokenA to token0, tokenB to baseToken.
+// - From v0.0.8: Fixed stack-too-deep in buy/sell using helpers.
 
 import "./imports/Ownable.sol";
 import "./utils/OMF-Shared.sol";
-import "./utils/OMF-OrderLibrary.sol";
-import "./utils/OMF-SettlementLibrary.sol";
-import "./utils/OMF-LiquidLibrary.sol";
+import "./utils/OMFSharedUtils.sol";
+import "./utils/OMF-OrderAbstract.sol";
+import "./utils/OMF-SettlementAbstract.sol";
+import "./utils/OMF-LiquidAbstract.sol";
 
 interface IOMFAgent {
     function isValidListing(address listingAddress) external view returns (bool);
-} 
+}
 
 contract OMFRouter is Ownable {
     using OMFShared.SafeERC20 for IERC20;
@@ -57,10 +51,10 @@ contract OMFRouter is Ownable {
         uint256 minPrice,
         address recipient
     ) external {
-        IOMFOrderLibrary.BuyOrderDetails memory details = IOMFOrderLibrary.BuyOrderDetails(recipient, amount, maxPrice, minPrice);
-        IOMFOrderLibrary.OrderPrep memory prep = OMFOrderLibrary.prepBuyOrder(listingAddress, details, agent, address(this));
-        OMFOrderLibrary.executeBuyOrder(listingAddress, prep, agent, address(this));
-        OMFSettlementLibrary.settleBuyOrders(listingAddress, new uint256[](0), agent, address(this));
+        IOMFOrderAbstract.BuyOrderDetails memory details = IOMFOrderAbstract.BuyOrderDetails(recipient, amount, maxPrice, minPrice);
+        IOMFOrderAbstract.OrderPrep memory prep = OMFOrderAbstract.prepBuyOrder(listingAddress, details, agent, address(this));
+        OMFOrderAbstract.executeBuyOrder(listingAddress, prep, agent, address(this));
+        OMFSettlementAbstract.settleBuyOrders(listingAddress, new uint256[](0), agent, address(this));
     }
 
     function sell(
@@ -70,10 +64,10 @@ contract OMFRouter is Ownable {
         uint256 minPrice,
         address recipient
     ) external {
-        IOMFOrderLibrary.SellOrderDetails memory details = IOMFOrderLibrary.SellOrderDetails(recipient, amount, maxPrice, minPrice);
-        IOMFOrderLibrary.OrderPrep memory prep = OMFOrderLibrary.prepSellOrder(listingAddress, details, agent, address(this));
-        OMFOrderLibrary.executeSellOrder(listingAddress, prep, agent, address(this));
-        OMFSettlementLibrary.settleSellOrders(listingAddress, new uint256[](0), agent, address(this));
+        IOMFOrderAbstract.SellOrderDetails memory details = IOMFOrderAbstract.SellOrderDetails(recipient, amount, maxPrice, minPrice);
+        IOMFOrderAbstract.OrderPrep memory prep = OMFOrderAbstract.prepSellOrder(listingAddress, details, agent, address(this));
+        OMFOrderAbstract.executeSellOrder(listingAddress, prep, agent, address(this));
+        OMFSettlementAbstract.settleSellOrders(listingAddress, new uint256[](0), agent, address(this));
     }
 
     function deposit(address listingAddress, bool isX, uint256 amount) external {
@@ -81,7 +75,7 @@ contract OMFRouter is Ownable {
         OMFShared.IOMFListing listing = OMFShared.IOMFListing(listingAddress);
         address token = isX ? listing.token0() : listing.baseToken();
         uint8 decimals = IERC20(token).decimals();
-        uint256 rawAmount = OMFShared.denormalize(amount, decimals);
+        uint256 rawAmount = OMFSharedUtils.denormalize(amount, decimals);
         _transferToken(token, address(listing), rawAmount);
         OMFShared.IOMFLiquidity(listing.liquidityAddress()).deposit(address(this), isX, amount);
     }
@@ -104,7 +98,7 @@ contract OMFRouter is Ownable {
     }
 
     function claimFees(address listingAddress, bool isX, uint256 volume) external {
-        OMFLiquidLibrary.claimFees(listingAddress, isX, volume);
+        OMFLiquidAbstract.claimFees(listingAddress, isX, volume);
     }
 
     function executeOrder(
@@ -117,10 +111,10 @@ contract OMFRouter is Ownable {
         address recipient
     ) external {
         require(IOMFAgent(agent).isValidListing(listingAddress), "Invalid listing");
-        OMFOrderLibrary.adjustOrder(listingAddress, isBuy, amount, orderId, maxPrice, minPrice, recipient);
+        OMFOrderAbstract.adjustOrder(listingAddress, isBuy, amount, orderId, maxPrice, minPrice, recipient);
         isBuy
-            ? OMFSettlementLibrary.settleBuyOrders(listingAddress, new uint256[](0), agent, address(this))
-            : OMFSettlementLibrary.settleSellOrders(listingAddress, new uint256[](0), agent, address(this));
+            ? OMFSettlementAbstract.settleBuyOrders(listingAddress, new uint256[](0), agent, address(this))
+            : OMFSettlementAbstract.settleSellOrders(listingAddress, new uint256[](0), agent, address(this));
     }
 
     function clearOrders(address listingAddress) external {
@@ -269,7 +263,7 @@ contract OMFRouter is Ownable {
     ) internal {
         if (orderState.refundAmount > 0) {
             uint8 decimals = IERC20(orderState.token).decimals();
-            uint256 rawAmount = OMFShared.denormalize(orderState.refundAmount, decimals);
+            uint256 rawAmount = OMFSharedUtils.denormalize(orderState.refundAmount, decimals);
             listing.transact(proxy, orderState.token, rawAmount, orderState.refundTo);
         }
         updates[updateIndex] = OMFShared.UpdateType(
