@@ -20,7 +20,7 @@ import "./OMF-Shared.sol";
 import "./OMFSharedUtils.sol";
 
 abstract contract OMFLiquidAbstract {
-    using OMFShared.SafeERC20 for IERC20;
+    using SafeERC20 for IERC20;
 
     struct PreparedUpdate {
         uint256 orderId;
@@ -78,8 +78,8 @@ abstract contract OMFLiquidAbstract {
 
         PrepState memory state;
         {
-            state.token0 = OMFShared.IOMFListing(listingAddress).token0();
-            state.baseToken = OMFShared.IOMFListing(listingAddress).baseToken();
+            state.token0 = IOMFListing(listingAddress).token0();
+            state.baseToken = IOMFListing(listingAddress).baseToken();
         }
         data.token0 = state.token0;
         data.baseToken = state.baseToken;
@@ -102,7 +102,7 @@ abstract contract OMFLiquidAbstract {
                 uint256 pending,
                 uint256 filled,
                 uint8 status
-            ) = OMFShared.IOMFListing(listingAddress).buyOrders(orderIds[i]);
+            ) = IOMFListing(listingAddress).buyOrders(orderIds[i]);
             require(status == 1, "Order not active");
             data.updates[i] = PreparedUpdate(orderIds[i], pending, recipientAddress);
         }
@@ -121,8 +121,8 @@ abstract contract OMFLiquidAbstract {
 
         PrepState memory state;
         {
-            state.token0 = OMFShared.IOMFListing(listingAddress).token0();
-            state.baseToken = OMFShared.IOMFListing(listingAddress).baseToken();
+            state.token0 = IOMFListing(listingAddress).token0();
+            state.baseToken = IOMFListing(listingAddress).baseToken();
         }
         data.token0 = state.token0;
         data.baseToken = state.baseToken;
@@ -145,7 +145,7 @@ abstract contract OMFLiquidAbstract {
                 uint256 pending,
                 uint256 filled,
                 uint8 status
-            ) = OMFShared.IOMFListing(listingAddress).sellOrders(orderIds[i]);
+            ) = IOMFListing(listingAddress).sellOrders(orderIds[i]);
             require(status == 1, "Order not active");
             data.updates[i] = PreparedUpdate(orderIds[i], pending, recipientAddress);
         }
@@ -157,9 +157,9 @@ abstract contract OMFLiquidAbstract {
         address listingAgent,
         address proxy
     ) external {
-        uint256 price = OMFShared.IOMFListing(listingAddress).getPrice();
+        uint256 price = IOMFListing(listingAddress).getPrice();
 
-        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](data.orderCount);
+        UpdateType[] memory updates = new UpdateType[](data.orderCount);
         uint256 totalToken0;
         uint8 baseTokenDecimals = data.baseToken == address(0) ? 18 : IERC20(data.baseToken).decimals();
 
@@ -177,7 +177,7 @@ abstract contract OMFLiquidAbstract {
                 baseTokenDecimals
             );
 
-            updates[i] = OMFShared.UpdateType(
+            updates[i] = UpdateType(
                 1,
                 data.updates[i].orderId,
                 actualReceived,
@@ -202,9 +202,9 @@ abstract contract OMFLiquidAbstract {
         address listingAgent,
         address proxy
     ) external {
-        uint256 price = OMFShared.IOMFListing(listingAddress).getPrice();
+        uint256 price = IOMFListing(listingAddress).getPrice();
 
-        OMFShared.UpdateType[] memory updates = new OMFShared.UpdateType[](data.orderCount + 1);
+        UpdateType[] memory updates = new UpdateType[](data.orderCount + 1);
         uint256 totalToken0;
         uint8 baseTokenDecimals = data.baseToken == address(0) ? 18 : IERC20(data.baseToken).decimals();
 
@@ -222,7 +222,7 @@ abstract contract OMFLiquidAbstract {
                 baseTokenDecimals
             );
 
-            updates[i] = OMFShared.UpdateType(
+            updates[i] = UpdateType(
                 2,
                 data.updates[i].orderId,
                 actualReceived,
@@ -233,7 +233,7 @@ abstract contract OMFLiquidAbstract {
             );
         }
 
-        updates[data.orderCount] = OMFShared.UpdateType(0, 0, totalToken0, data.token0, address(0), 0, 0);
+        updates[data.orderCount] = UpdateType(0, 0, totalToken0, data.token0, address(0), 0, 0);
         if (data.orderCount > 0) {
             (bool success, ) = listingAddress.call(
                 abi.encodeWithSignature("update(address,(uint8,uint256,uint256,address,address,uint256,uint256)[])", proxy, updates)
@@ -247,7 +247,7 @@ abstract contract OMFLiquidAbstract {
         bool isX,
         uint256 volume
     ) external {
-        address liquidity = OMFShared.IOMFListing(listingAddress).liquidityAddress();
-        OMFShared.IOMFLiquidity(liquidity).claimFees(msg.sender, isX, 0, volume);
+        address liquidity = IOMFListing(listingAddress).liquidityAddress();
+        IOMFLiquidity(liquidity).claimFees(msg.sender, isX, 0, volume);
     }
 }
