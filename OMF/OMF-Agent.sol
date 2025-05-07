@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
-pragma solidity ^0.8.1;
+pragma solidity 0.8.2;
 
-// Version: 0.0.7 (Updated)
+// Version: 0.0.8 (Updated)
 // Changes:
-// - Added liquidityLogicAddress and setLiquidityLogic to handle OMFLiquidityLogic.
-// - Updated executeListing to call OMFListingLogic and OMFLiquidityLogic separately.
-// - Resolved SafeERC20 import duplication by separating listing and liquidity deployments.
-// - Updated IOMFListingLogic interface to deploy only listing template.
-// - Added IOMFLiquidityLogic interface for liquidity template deployment.
+// - Updated IOMFListing interface: Replaced liquidityAddresses(uint256) with liquidityAddress() to match OMFListingTemplate.
+// - Updated listToken to call liquidityAddress() instead of liquidityAddresses(0).
+// - Changed prepListing visibility from public to internal to restrict direct access.
+// - From v0.0.7: Added liquidityLogicAddress and setLiquidityLogic to handle OMFLiquidityLogic.
+// - From v0.0.7: Updated executeListing to call OMFListingLogic and OMFLiquidityLogic separately.
+// - From v0.0.7: Resolved SafeERC20 import duplication by separating listing and liquidity deployments.
+// - From v0.0.7: Updated IOMFListingLogic interface to deploy only listing template.
+// - From v0.0.7: Added IOMFLiquidityLogic interface for liquidity template deployment.
 // - From v0.0.6: Replaced OMFListingLibrary and OMFLiquidityLibrary with OMFListingLogic.
 // - From v0.0.6: Updated executeListing to use new deploy function with two salts.
 // - From v0.0.6: Replaced setListingLibrary and setLiquidityLibrary with setListingLogic.
@@ -41,7 +44,7 @@ interface IOMFLiquidityLogic {
 }
 
 interface IOMFListing {
-    function liquidityAddresses(uint256 listingId) external view returns (address);
+    function liquidityAddress() external view returns (address); // Updated from liquidityAddresses(uint256)
 }
 
 contract OMFAgent is Ownable {
@@ -136,7 +139,7 @@ contract OMFAgent is Ownable {
         address oracleAddress,
         uint8 oracleDecimals,
         bytes4 oracleViewFunction
-    ) public returns (address) {
+    ) internal returns (address) {
         require(baseToken != address(0), "Base token not set");
         require(tokenA != baseToken, "Identical tokens");
         require(tokenA != address(0), "TokenA cannot be NATIVE");
@@ -192,7 +195,7 @@ contract OMFAgent is Ownable {
     ) external returns (address listingAddress, address liquidityAddress) {
         address deployedListing = prepListing(tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
         listingAddress = deployedListing;
-        liquidityAddress = IOMFListing(deployedListing).liquidityAddresses(0);
+        liquidityAddress = IOMFListing(deployedListing).liquidityAddress(); // Updated to singular
         return (listingAddress, liquidityAddress);
     }
 
