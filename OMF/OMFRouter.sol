@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.2;
 
-// Version: 0.2.1
+// Version: 0.2.4
 // Most Recent Changes:
-// - From v0.2.0: Fixed undeclared identifier errors for listingAddress in prepBuyLiquidCores, prepSellLiquidCores, processPrepBuyLiquidCores, and processPrepSellLiquidCores.
-// - Added listingAddress parameter to prepBuyLiquidCores, prepSellLiquidCores, processPrepBuyLiquidCores, and processPrepSellLiquidCores.
-// - Updated prepareLiquidPrimaryUpdates to pass listingAddress to prepBuyLiquidCores and prepSellLiquidCores.
-// - Updated prepareBuyLiquidSecondaryUpdates and prepareSellLiquidSecondaryUpdates to pass listingAddress to processPrepBuyLiquidCores and processPrepSellLiquidCores.
-// - Preserved prior changes: Replaced contents with prior LiquidPartial.sol (deposit, withdrawLiquidity, executeBuyLiquid, etc.).
-// - Ensured agent and helper functions (transferToken, getLiquidityAddressInternal, etc.) are accessible from MainPartial via SettlementPartial.
-// - Maintained compatibility with MainPartial structs (UpdateType, LiquidExecutionState).
+// - From v0.2.3: Removed transferLiquidity function.
+// - Added changeDepositor as an external user-facing function to update the depositor address of a liquidity slot via IOMFLiquidity.changeSlotDepositor.
+// - Added DepositorChanged event.
+// - Preserved settleBuyLiquid and settleSellLiquid with transferToLiquidity helper for liquid settlement.
+// - Maintained executeBuyLiquid and executeSellLiquid as internal with helpers (prepareExecutionState, fetchPendingOrders, processPrimaryUpdates, transferToLiquidity, processSecondaryUpdates) to avoid stack-too-deep errors.
+// - Preserved claimFees update to fetch volume from IOMFListing.volumeBalances().
+// - Fixed undeclared identifier errors for listingAddress in prepBuyLiquidCores, prepSellLiquidCores, etc.
+// - Ensured compatibility with MainPartial.sol, SettlementPartial.sol, and OMF-LiquidityTemplate.sol.
 
 import "./utils/SettlementPartial.sol";
 
 contract OMFRouter is SettlementPartial {
     using SafeERC20 for IERC20;
+
+    event DepositorChanged(address indexed listingAddress, bool isX, uint256 slotIndex, address indexed oldDepositor, address indexed newDepositor);
 
     function deposit(address listingAddress, bool isX, uint256 amount) external {
         (bool isValid, , address token0, address baseToken) = IOMF(agent).validateListing(listingAddress);
@@ -37,54 +40,41 @@ contract OMFRouter is SettlementPartial {
             : IOMFLiquidity(liquidityAddress).yExecuteOut(msg.sender, slotIndex, withdrawal);
     }
 
-    function claimFees(address listingAddress, bool isX, uint256 slotIndex, uint256 volume) external {
+    function claimFees(address listingAddress, bool isX, uint256 slotIndex) external {
         (bool isValid, , , ) = IOMF(agent).validateListing(listingAddress);
         require(isValid, "Invalid listing");
         address liquidityAddress = getLiquidityAddressInternal(listingAddress);
+        (, , uint256 xVolume, uint256 yVolume) = IOMFListing(listingAddress).volumeBalances();
+        uint256 volume = isX ? xVolume : yVolume;
         IOMFLiquidity(liquidityAddress).claimFees(msg.sender, isX, slotIndex, volume);
     }
 
-    function executeBuyLiquid(address listingAddress, uint256 count) external {
-        if (count == 0) return;
+    function changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor) external {
+        (bool isValid, , , ) = IOMF(agent).validateListing(listingAddress);
+        require(isValid, "Invalid listing");
+        require(newDepositor != address(0), "Invalid new depositor");
+        address liquidityAddress = getLiquidityAddressInternal(listingAddress);
+        IOMFLiquidity(liquidityAddress).changeSlotDepositor(msg.sender, isX, slotIndex, newDepositor);
+        emit DepositorChanged(listingAddress, isX, slotIndex, msg.sender, newDepositor);
+    }
+
+    function settleBuyLiquid(address listingAddress) external {
         (bool isValid, , address token0, address baseToken) = IOMF(agent).validateListing(listingAddress);
         require(isValid, "Invalid listing");
-        address liquidityAddress = getLiquidityAddressInternal(listingAddress);
-        LiquidExecutionState memory state = prepareLiquidExecution(listingAddress);
         uint256[] memory orderIds = IOMFListing(listingAddress).pendingBuyOrdersView();
-        count = count > orderIds.length ? orderIds.length : count;
-        PrimaryOrderUpdate[] memory primaryUpdates = prepareLiquidPrimaryUpdates(listingAddress, state, orderIds, count, true);
-        applyLiquidPrimaryUpdates(listingAddress, primaryUpdates, true);
-        SecondaryOrderUpdate[] memory secondaryUpdates = prepareBuyLiquidSecondaryUpdates(
-            listingAddress,
-            liquidityAddress,
-            state,
-            orderIds,
-            count
-        );
-        applyLiquidSecondaryUpdates(listingAddress, secondaryUpdates, true);
+        if (orderIds.length == 0) return;
+        executeBuyLiquid(listingAddress, orderIds.length);
     }
 
-    function executeSellLiquid(address listingAddress, uint256 count) external {
-        if (count == 0) return;
+    function settleSellLiquid(address listingAddress) external {
         (bool isValid, , address token0, address baseToken) = IOMF(agent).validateListing(listingAddress);
         require(isValid, "Invalid listing");
-        address liquidityAddress = getLiquidityAddressInternal(listingAddress);
-        LiquidExecutionState memory state = prepareLiquidExecution(listingAddress);
         uint256[] memory orderIds = IOMFListing(listingAddress).pendingSellOrdersView();
-        count = count > orderIds.length ? orderIds.length : count;
-        PrimaryOrderUpdate[] memory primaryUpdates = prepareLiquidPrimaryUpdates(listingAddress, state, orderIds, count, false);
-        applyLiquidPrimaryUpdates(listingAddress, primaryUpdates, false);
-        SecondaryOrderUpdate[] memory secondaryUpdates = prepareSellLiquidSecondaryUpdates(
-            listingAddress,
-            liquidityAddress,
-            state,
-            orderIds,
-            count
-        );
-        applyLiquidSecondaryUpdates(listingAddress, secondaryUpdates, false);
+        if (orderIds.length == 0) return;
+        executeSellLiquid(listingAddress, orderIds.length);
     }
 
-    function prepareLiquidExecution(address listingAddress) internal view returns (LiquidExecutionState memory) {
+    function prepareExecutionState(address listingAddress) internal view returns (LiquidExecutionState memory) {
         (, , address token0, address baseToken) = IOMF(agent).validateListing(listingAddress);
         return LiquidExecutionState({
             token0: token0,
@@ -93,6 +83,85 @@ contract OMFRouter is SettlementPartial {
             baseTokenDecimals: IERC20(baseToken).decimals(),
             price: IOMFListing(listingAddress).getPrice()
         });
+    }
+
+    function fetchPendingOrders(address listingAddress, uint256 count, bool isBuy) internal view returns (uint256[] memory orderIds, uint256 adjustedCount) {
+        orderIds = isBuy ? IOMFListing(listingAddress).pendingBuyOrdersView() : IOMFListing(listingAddress).pendingSellOrdersView();
+        adjustedCount = count > orderIds.length ? orderIds.length : count;
+    }
+
+    function processPrimaryUpdates(
+        address listingAddress,
+        LiquidExecutionState memory state,
+        uint256[] memory orderIds,
+        uint256 count,
+        bool isBuy
+    ) internal returns (PrimaryOrderUpdate[] memory) {
+        PrimaryOrderUpdate[] memory updates = prepareLiquidPrimaryUpdates(listingAddress, state, orderIds, count, isBuy);
+        applyLiquidPrimaryUpdates(listingAddress, updates, isBuy);
+        return updates;
+    }
+
+    function transferToLiquidity(
+        address listingAddress,
+        address liquidityAddress,
+        LiquidExecutionState memory state,
+        PrimaryOrderUpdate[] memory primaryUpdates,
+        bool isBuy
+    ) internal {
+        for (uint256 i = 0; i < primaryUpdates.length; i++) {
+            uint256 amount = primaryUpdates[i].pendingValue;
+            if (amount > 0) {
+                address token = isBuy ? state.baseToken : state.token0;
+                uint8 decimals = isBuy ? state.baseTokenDecimals : state.token0Decimals;
+                IERC20(token).safeTransferFrom(listingAddress, liquidityAddress, denormalize(amount, decimals));
+                IOMFLiquidity(liquidityAddress).deposit(address(this), isBuy, amount);
+            }
+        }
+    }
+
+    function processSecondaryUpdates(
+        address listingAddress,
+        address liquidityAddress,
+        LiquidExecutionState memory state,
+        uint256[] memory orderIds,
+        uint256 count,
+        bool isBuy
+    ) internal {
+        SecondaryOrderUpdate[] memory secondaryUpdates = isBuy
+            ? prepareBuyLiquidSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, count)
+            : prepareSellLiquidSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, count);
+        applyLiquidSecondaryUpdates(listingAddress, secondaryUpdates, isBuy);
+    }
+
+    function executeBuyLiquid(address listingAddress, uint256 count) internal {
+        if (count == 0) return;
+        (bool isValid, , , ) = IOMF(agent).validateListing(listingAddress);
+        require(isValid, "Invalid listing");
+        address liquidityAddress = getLiquidityAddressInternal(listingAddress);
+        
+        LiquidExecutionState memory state = prepareExecutionState(listingAddress);
+        (uint256[] memory orderIds, uint256 adjustedCount) = fetchPendingOrders(listingAddress, count, true);
+        if (adjustedCount == 0) return;
+        
+        PrimaryOrderUpdate[] memory primaryUpdates = processPrimaryUpdates(listingAddress, state, orderIds, adjustedCount, true);
+        transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, true);
+        processSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, adjustedCount, true);
+    }
+
+    function executeSellLiquid(address listingAddress, uint256 count) internal {
+        if (count == 0) return;
+        (bool isValid, , , ) = IOMF(agent).validateListing(listingAddress);
+        require(isValid, "Invalid listing");
+        address liquidityAddress = getLiquidityAddressInternal(listingAddress);
+        
+        LiquidExecutionState memory state = prepareExecutionState(listingAddress);
+        (uint256[] memory orderIds, uint256 adjustedCount) = fetchPendingOrders(listingAddress, count, false);
+        if (adjustedCount == 0) return;
+        
+        PrimaryOrderUpdate[] memory primaryUpdates = processPrimaryUpdates(listingAddress, state, orderIds, adjustedCount, false);
+        transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, false);
+        processSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, adjustedCount, false);
     }
 
     function prepareLiquidPrimaryUpdates(
