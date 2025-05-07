@@ -1,20 +1,44 @@
 // SPDX-License-Identifier: BSD-3-Clause
-pragma solidity ^0.8.1;
+pragma solidity 0.8.2;
 
-// Version: 0.0.9 (Updated)
-// Changes:
-// - From v0.0.8: Removed listingId as function parameter, made implicit via stored state (all functions and events).
-// - Updated mappings to remove listingId key: volumeBalances, liquidityAddresses, prices, pendingBuyOrders, pendingSellOrders, historicalData.
-// - Updated IOMFListing interface: volumeBalances() no longer takes listingId.
-// - Updated events: Removed listingId from OrderUpdated and BalancesUpdated.
-// - Retained original 'this.' usage for internal calls as per request.
-// - Aligned with prior changes (v0.0.8): Renamed tokenA to token0, tokenB to baseToken, xLiquid to xBalances, added volume tracking, orderIdHeight, etc.
+// Version: 0.0.11
+// Most Recent Changes:
+// - From v0.0.10: Renamed UpdateType struct to ListingUpdateType to resolve naming conflict with UpdateType in IOMFListing interface.
+// - Updated update function and internal references to use ListingUpdateType.
+// - Kept IOMFListing interface unchanged, using original UpdateType.
+// - Ensured no changes to external interfaces or OMFRouter.
 
-import "./imports/SafeERC20.sol";
+import "../imports/SafeERC20.sol";
 
 interface IOMFListing {
     function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function getPrice() external view returns (uint256);
+    function buyOrderCoreView(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
+    function buyOrderPricingView(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
+    function buyOrderAmountsView(uint256 orderId) external view returns (uint256 pending, uint256 filled);
+    function sellOrderCoreView(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
+    function sellOrderPricingView(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
+    function sellOrderAmountsView(uint256 orderId) external view returns (uint256 pending, uint256 filled);
+    function isOrderCompleteView(uint256 orderId, bool isBuy) external view returns (bool);
+    function update(UpdateType[] memory updates) external;
+    function transact(address token, uint256 amount, address recipient) external;
+}
+
+interface IERC20 {
+    function decimals() external view returns (uint8);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+}
+
+struct UpdateType {
+    uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
+    uint8 structId;   // 0 = Core, 1 = Pricing, 2 = Amounts (for updateType 1, 2)
+    uint256 index;    // orderId or slot index (0 = xBalance, 1 = yBalance, 2 = xVolume, 3 = yVolume for type 0)
+    uint256 value;    // principal or amount (normalized) or price (for historical)
+    address addr;     // makerAddress
+    address recipient;// recipientAddress
+    uint256 maxPrice; // for Pricing struct or packed xBalance/yBalance (historical)
+    uint256 minPrice; // for Pricing struct or packed xVolume/yVolume (historical)
 }
 
 contract OMFListingTemplate {
@@ -28,14 +52,15 @@ contract OMFListingTemplate {
     uint8 public oracleDecimals;
     uint256 public orderIdHeight; // Tracks next available orderId
 
-    struct UpdateType {
+    struct ListingUpdateType {
         uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
+        uint8 structId;   // 0 = Core, 1 = Pricing, 2 = Amounts (for updateType 1, 2)
         uint256 index;    // orderId or slot index (0 = xBalance, 1 = yBalance, 2 = xVolume, 3 = yVolume for type 0)
         uint256 value;    // principal or amount (normalized) or price (for historical)
         address addr;     // makerAddress
         address recipient;// recipientAddress
-        uint256 maxPrice; // for buy orders or packed xBalance/yBalance (historical)
-        uint256 minPrice; // for sell orders or packed xVolume/yVolume (historical)
+        uint256 maxPrice; // for Pricing struct or packed xBalance/yBalance (historical)
+        uint256 minPrice; // for Pricing struct or packed xVolume/yVolume (historical)
     }
 
     struct VolumeBalance {
@@ -45,24 +70,36 @@ contract OMFListingTemplate {
         uint256 yVolume;
     }
 
-    struct BuyOrder {
+    struct BuyOrderCore {
         address makerAddress;
         address recipientAddress;
-        uint256 maxPrice;
-        uint256 minPrice;
-        uint256 pending;
-        uint256 filled;
         uint8 status; // 0 = cancelled, 1 = pending, 2 = partially filled, 3 = filled
     }
 
-    struct SellOrder {
-        address makerAddress;
-        address recipientAddress;
+    struct BuyOrderPricing {
         uint256 maxPrice;
         uint256 minPrice;
+    }
+
+    struct BuyOrderAmounts {
         uint256 pending;
         uint256 filled;
+    }
+
+    struct SellOrderCore {
+        address makerAddress;
+        address recipientAddress;
         uint8 status; // 0 = cancelled, 1 = pending, 2 = partially filled, 3 = filled
+    }
+
+    struct SellOrderPricing {
+        uint256 maxPrice;
+        uint256 minPrice;
+    }
+
+    struct SellOrderAmounts {
+        uint256 pending;
+        uint256 filled;
     }
 
     struct HistoricalData {
@@ -77,8 +114,14 @@ contract OMFListingTemplate {
     VolumeBalance public volumeBalance;
     address public liquidityAddress;
     uint256 public price;
-    mapping(uint256 => BuyOrder) public buyOrders;
-    mapping(uint256 => SellOrder) public sellOrders;
+    mapping(uint256 => BuyOrderCore) public buyOrderCores;
+    mapping(uint256 => BuyOrderPricing) public buyOrderPricings;
+    mapping(uint256 => BuyOrderAmounts) public buyOrderAmounts;
+    mapping(uint256 => SellOrderCore) public sellOrderCores;
+    mapping(uint256 => SellOrderPricing) public sellOrderPricings;
+    mapping(uint256 => SellOrderAmounts) public sellOrderAmounts;
+    mapping(uint256 => bool) public isBuyOrderComplete;
+    mapping(uint256 => bool) public isSellOrderComplete;
     uint256[] public pendingBuyOrders;
     uint256[] public pendingSellOrders;
     mapping(address => uint256[]) public makerPendingOrders;
@@ -96,7 +139,6 @@ contract OMFListingTemplate {
         _;
     }
 
-    // One-time setup functions
     function setRouter(address _routerAddress) external {
         require(routerAddress == address(0), "Router already set");
         require(_routerAddress != address(0), "Invalid router address");
@@ -132,87 +174,121 @@ contract OMFListingTemplate {
     function getPrice() external view returns (uint256) {
         (bool success, bytes memory returnData) = oracle.staticcall(abi.encodeWithSignature("latestPrice()"));
         require(success, "Price fetch failed");
-        uint256 price = abi.decode(returnData, (uint256));
-        return oracleDecimals == 8 ? price * 1e10 : price; // Scale to 18 decimals
+        uint256 priceValue = abi.decode(returnData, (uint256));
+        return oracleDecimals == 8 ? priceValue * 1e10 : priceValue; // Scale to 18 decimals
     }
 
     function nextOrderId() external onlyRouter returns (uint256) {
         return orderIdHeight++; // Return current and increment
     }
 
-    function update(address caller, UpdateType[] memory updates) external onlyRouter {
+    function update(ListingUpdateType[] memory updates) external onlyRouter {
         VolumeBalance storage balances = volumeBalance;
 
         for (uint256 i = 0; i < updates.length; i++) {
-            UpdateType memory u = updates[i];
+            ListingUpdateType memory u = updates[i];
             if (u.updateType == 0) { // Balance update
                 if (u.index == 0) balances.xBalance = u.value;       // Set xBalance
                 else if (u.index == 1) balances.yBalance = u.value;  // Set yBalance
                 else if (u.index == 2) balances.xVolume += u.value;  // Increase xVolume
                 else if (u.index == 3) balances.yVolume += u.value;  // Increase yVolume
             } else if (u.updateType == 1) { // Buy order update
-                BuyOrder storage order = buyOrders[u.index];
-                if (order.makerAddress == address(0)) { // New order
-                    u.index = orderIdHeight++; // Assign and increment orderId
-                    order.makerAddress = u.addr;
-                    order.recipientAddress = u.recipient;
-                    order.maxPrice = u.maxPrice;
-                    order.minPrice = u.minPrice;
-                    order.pending = u.value;
-                    order.status = 1;
-                    pendingBuyOrders.push(u.index);
-                    makerPendingOrders[u.addr].push(u.index);
-                    balances.yBalance += u.value; // Deposit increases yBalance
-                    balances.yVolume += u.value;  // Track order volume
-                    emit OrderUpdated(u.index, true, 1);
-                } else if (u.value == 0) { // Cancel order
-                    order.status = 0;
-                    removePendingOrder(pendingBuyOrders, u.index);
-                    removePendingOrder(makerPendingOrders[u.addr], u.index);
-                    emit OrderUpdated(u.index, true, 0);
-                } else if (order.status == 1) { // Fill order
-                    require(order.pending >= u.value, "Insufficient pending");
-                    order.pending -= u.value;
-                    order.filled += u.value;
-                    balances.xBalance -= u.value; // Reduce xBalance on fill
-                    order.status = order.pending == 0 ? 3 : 2;
-                    if (order.pending == 0) {
+                if (u.structId == 0) { // Core
+                    BuyOrderCore storage core = buyOrderCores[u.index];
+                    if (core.makerAddress == address(0)) { // New order
+                        u.index = orderIdHeight++; // Assign and increment orderId
+                        core.makerAddress = u.addr;
+                        core.recipientAddress = u.recipient;
+                        core.status = 1;
+                        pendingBuyOrders.push(u.index);
+                        makerPendingOrders[u.addr].push(u.index);
+                        emit OrderUpdated(u.index, true, 1);
+                    } else if (u.value == 0) { // Cancel order
+                        core.status = 0;
                         removePendingOrder(pendingBuyOrders, u.index);
-                        removePendingOrder(makerPendingOrders[order.makerAddress], u.index);
+                        removePendingOrder(makerPendingOrders[core.makerAddress], u.index);
+                        isBuyOrderComplete[u.index] = false;
+                        emit OrderUpdated(u.index, true, 0);
                     }
-                    emit OrderUpdated(u.index, true, order.status);
+                } else if (u.structId == 1) { // Pricing
+                    BuyOrderPricing storage pricing = buyOrderPricings[u.index];
+                    pricing.maxPrice = u.maxPrice;
+                    pricing.minPrice = u.minPrice;
+                } else if (u.structId == 2) { // Amounts
+                    BuyOrderAmounts storage amounts = buyOrderAmounts[u.index];
+                    BuyOrderCore storage core = buyOrderCores[u.index];
+                    if (amounts.pending == 0 && core.makerAddress != address(0)) { // New amounts
+                        amounts.pending = u.value;
+                        balances.yBalance += u.value; // Deposit increases yBalance
+                        balances.yVolume += u.value;  // Track order volume
+                    } else if (core.status == 1) { // Fill order
+                        require(amounts.pending >= u.value, "Insufficient pending");
+                        amounts.pending -= u.value;
+                        amounts.filled += u.value;
+                        balances.xBalance -= u.value; // Reduce xBalance on fill
+                        core.status = amounts.pending == 0 ? 3 : 2;
+                        if (amounts.pending == 0) {
+                            removePendingOrder(pendingBuyOrders, u.index);
+                            removePendingOrder(makerPendingOrders[core.makerAddress], u.index);
+                            isBuyOrderComplete[u.index] = false;
+                        }
+                        emit OrderUpdated(u.index, true, core.status);
+                    }
+                }
+                // Check completeness
+                if (buyOrderCores[u.index].makerAddress != address(0) &&
+                    buyOrderPricings[u.index].maxPrice != 0 &&
+                    buyOrderAmounts[u.index].pending != 0) {
+                    isBuyOrderComplete[u.index] = true;
                 }
             } else if (u.updateType == 2) { // Sell order update
-                SellOrder storage order = sellOrders[u.index];
-                if (order.makerAddress == address(0)) { // New order
-                    u.index = orderIdHeight++; // Assign and increment orderId
-                    order.makerAddress = u.addr;
-                    order.recipientAddress = u.recipient;
-                    order.maxPrice = u.maxPrice;
-                    order.minPrice = u.minPrice;
-                    order.pending = u.value;
-                    order.status = 1;
-                    pendingSellOrders.push(u.index);
-                    makerPendingOrders[u.addr].push(u.index);
-                    balances.xBalance += u.value; // Deposit increases xBalance
-                    balances.xVolume += u.value;  // Track order volume
-                    emit OrderUpdated(u.index, false, 1);
-                } else if (u.value == 0) { // Cancel order
-                    order.status = 0;
-                    removePendingOrder(pendingSellOrders, u.index);
-                    removePendingOrder(makerPendingOrders[u.addr], u.index);
-                    emit OrderUpdated(u.index, false, 0);
-                } else if (order.status == 1) { // Fill order
-                    require(order.pending >= u.value, "Insufficient pending");
-                    order.pending -= u.value;
-                    order.filled += u.value;
-                    balances.yBalance -= u.value; // Reduce yBalance on fill
-                    order.status = order.pending == 0 ? 3 : 2;
-                    if (order.pending == 0) {
+                if (u.structId == 0) { // Core
+                    SellOrderCore storage core = sellOrderCores[u.index];
+                    if (core.makerAddress == address(0)) { // New order
+                        u.index = orderIdHeight++; // Assign and increment orderId
+                        core.makerAddress = u.addr;
+                        core.recipientAddress = u.recipient;
+                        core.status = 1;
+                        pendingSellOrders.push(u.index);
+                        makerPendingOrders[u.addr].push(u.index);
+                        emit OrderUpdated(u.index, false, 1);
+                    } else if (u.value == 0) { // Cancel order
+                        core.status = 0;
                         removePendingOrder(pendingSellOrders, u.index);
-                        removePendingOrder(makerPendingOrders[order.makerAddress], u.index);
+                        removePendingOrder(makerPendingOrders[core.makerAddress], u.index);
+                        isSellOrderComplete[u.index] = false;
+                        emit OrderUpdated(u.index, false, 0);
                     }
-                    emit OrderUpdated(u.index, false, order.status);
+                } else if (u.structId == 1) { // Pricing
+                    SellOrderPricing storage pricing = sellOrderPricings[u.index];
+                    pricing.maxPrice = u.maxPrice;
+                    pricing.minPrice = u.minPrice;
+                } else if (u.structId == 2) { // Amounts
+                    SellOrderAmounts storage amounts = sellOrderAmounts[u.index];
+                    SellOrderCore storage core = sellOrderCores[u.index];
+                    if (amounts.pending == 0 && core.makerAddress != address(0)) { // New amounts
+                        amounts.pending = u.value;
+                        balances.xBalance += u.value; // Deposit increases xBalance
+                        balances.xVolume += u.value;  // Track order volume
+                    } else if (core.status == 1) { // Fill order
+                        require(amounts.pending >= u.value, "Insufficient pending");
+                        amounts.pending -= u.value;
+                        amounts.filled += u.value;
+                        balances.yBalance -= u.value; // Reduce yBalance on fill
+                        core.status = amounts.pending == 0 ? 3 : 2;
+                        if (amounts.pending == 0) {
+                            removePendingOrder(pendingSellOrders, u.index);
+                            removePendingOrder(makerPendingOrders[core.makerAddress], u.index);
+                            isSellOrderComplete[u.index] = false;
+                        }
+                        emit OrderUpdated(u.index, false, core.status);
+                    }
+                }
+                // Check completeness
+                if (sellOrderCores[u.index].makerAddress != address(0) &&
+                    sellOrderPricings[u.index].maxPrice != 0 &&
+                    sellOrderAmounts[u.index].pending != 0) {
+                    isSellOrderComplete[u.index] = true;
                 }
             } else if (u.updateType == 3) { // Historical data
                 historicalData.push(HistoricalData(
@@ -230,7 +306,7 @@ contract OMFListingTemplate {
         emit BalancesUpdated(balances.xBalance, balances.yBalance);
     }
 
-    function transact(address caller, address token, uint256 amount, address recipient) external onlyRouter {
+    function transact(address token, uint256 amount, address recipient) external onlyRouter {
         VolumeBalance storage balances = volumeBalance;
         uint8 decimals = IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
@@ -306,5 +382,39 @@ contract OMFListingTemplate {
 
     function historicalDataLengthView() external view returns (uint256) {
         return historicalData.length;
+    }
+
+    function buyOrderCoreView(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
+        BuyOrderCore memory core = buyOrderCores[orderId];
+        return (core.makerAddress, core.recipientAddress, core.status);
+    }
+
+    function buyOrderPricingView(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
+        BuyOrderPricing memory pricing = buyOrderPricings[orderId];
+        return (pricing.maxPrice, pricing.minPrice);
+    }
+
+    function buyOrderAmountsView(uint256 orderId) external view returns (uint256 pending, uint256 filled) {
+        BuyOrderAmounts memory amounts = buyOrderAmounts[orderId];
+        return (amounts.pending, amounts.filled);
+    }
+
+    function sellOrderCoreView(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
+        SellOrderCore memory core = sellOrderCores[orderId];
+        return (core.makerAddress, core.recipientAddress, core.status);
+    }
+
+    function sellOrderPricingView(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
+        SellOrderPricing memory pricing = sellOrderPricings[orderId];
+        return (pricing.maxPrice, pricing.minPrice);
+    }
+
+    function sellOrderAmountsView(uint256 orderId) external view returns (uint256 pending, uint256 filled) {
+        SellOrderAmounts memory amounts = sellOrderAmounts[orderId];
+        return (amounts.pending, amounts.filled);
+    }
+
+    function isOrderCompleteView(uint256 orderId, bool isBuy) external view returns (bool) {
+        return isBuy ? isBuyOrderComplete[orderId] : isSellOrderComplete[orderId];
     }
 }
