@@ -11,7 +11,7 @@ pragma solidity 0.8.2;
 // - Ensured agent and helper functions (transferToken, getLiquidityAddressInternal, etc.) are accessible from MainPartial via SettlementPartial.
 // - Maintained compatibility with MainPartial structs (UpdateType, LiquidExecutionState).
 
-import "./SettlementPartial.sol";
+import "./utils/SettlementPartial.sol";
 
 contract OMFRouter is SettlementPartial {
     using SafeERC20 for IERC20;
