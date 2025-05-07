@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.11 (Updated)
+// Version: 0.0.12
 // Changes:
-// - From v0.0.10: Removed listingId as function parameter, made implicit via stored state (all functions and events).
+// - From v0.0.11: Added changeSlotDepositor function to update the depositor address of a liquidity slot, restricted to the original depositor via onlyRouter.
+// - Added SlotDepositorChanged event.
+// - Preserved prior changes: Removed listingId as function parameter, made implicit via stored state.
 // - Updated mappings to remove listingId key: liquidityDetails, xLiquiditySlots, yLiquiditySlots, activeXLiquiditySlots, activeYLiquiditySlots.
 // - Updated IOMFListing interface: volumeBalances() no longer takes listingId.
 // - Updated LiquidityUpdated event: removed listingId parameter.
-// - Retained original 'this.' usage for internal calls (addFees, deposit, xExecuteOut, yExecuteOut, transact) as per request.
-// - Aligned with prior changes (v0.0.10): Aligned with MFPLiquidityTemplate, added getPrice() in x/yPrepOut, fixed abi.decode typo.
-// - Maintained normalize/denormalize for decimal handling, explicit casting, and nonReentrant guards.
+// - Retained original 'this.' usage for internal calls (addFees, deposit, xExecuteOut, yExecuteOut, transact).
+// - Aligned with prior changes: Aligned with MFPLiquidityTemplate, added getPrice() in x/yPrepOut, fixed abi.decode typo.
+// - Maintained normalize/denormalize, explicit casting, and nonReentrant guards.
 
-import "./imports/SafeERC20.sol";
-import "./imports/ReentrancyGuard.sol";
+import "../imports/SafeERC20.sol";
+import "../imports/ReentrancyGuard.sol";
 
 interface IOMFListing {
     function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
@@ -67,6 +69,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     event FeesAdded(bool isX, uint256 amount);
     event FeesClaimed(bool isX, uint256 amount, address depositor);
     event LiquidityUpdated(uint256 xLiquid, uint256 yLiquid);
+    event SlotDepositorChanged(bool isX, uint256 slotIndex, address indexed oldDepositor, address indexed newDepositor);
 
     constructor() {}
 
@@ -141,6 +144,24 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
             }
         }
         emit LiquidityUpdated(details.xLiquid, details.yLiquid);
+    }
+
+    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external onlyRouter {
+        require(newDepositor != address(0), "Invalid new depositor");
+        Slot storage slot = isX ? xLiquiditySlots[slotIndex] : yLiquiditySlots[slotIndex];
+        require(slot.depositor == caller, "Not depositor");
+        require(slot.allocation > 0, "Invalid slot");
+        address oldDepositor = slot.depositor;
+        slot.depositor = newDepositor;
+        for (uint256 i = 0; i < userIndex[oldDepositor].length; i++) {
+            if (userIndex[oldDepositor][i] == slotIndex) {
+                userIndex[oldDepositor][i] = userIndex[oldDepositor][userIndex[oldDepositor].length - 1];
+                userIndex[oldDepositor].pop();
+                break;
+            }
+        }
+        userIndex[newDepositor].push(slotIndex);
+        emit SlotDepositorChanged(isX, slotIndex, oldDepositor, newDepositor);
     }
 
     function addFees(address caller, bool isX, uint256 fee) external onlyRouter nonReentrant {

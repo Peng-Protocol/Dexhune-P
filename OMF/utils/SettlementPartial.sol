@@ -3,172 +3,33 @@ pragma solidity 0.8.2;
 
 // Version: 0.1.3
 // Most Recent Changes:
-// - From v0.1.2: Fixed undeclared identifier errors for listingAddress in prepBuyOrderCores, prepSellOrderCores, processPrepBuyOrderCores, processPrepSellOrderCores, buildBuySecondaryUpdate, and buildSellSecondaryUpdate.
-// - Added listingAddress parameter to prepBuyOrderCores, prepSellOrderCores, processPrepBuyOrderCores, processPrepSellOrderCores, buildBuySecondaryUpdate, and buildSellSecondaryUpdate.
-// - Updated prepareBuyBatchPrimaryUpdates, prepareSellBatchPrimaryUpdates, prepareBuyBatchSecondaryUpdates, and prepareSellBatchSecondaryUpdates to pass listingAddress to their helpers.
-// - Preserved stack depth fixes: prepareBatchSecondaryUpdates split into prepareBuyBatchSecondaryUpdates and prepareSellBatchSecondaryUpdates with helpers.
-// - Ensured agent and helper functions (computeOrderAmounts, performTransactionAndAdjust, etc.) are accessible from MainPartial via OrderPartial.
-// - Used explicit casting for interface calls (e.g., IOMFListing).
+// - From v0.1.2: Added settleBuyOrders and settleSellOrders as external user-facing functions.
+// - Preserved executeBuyOrders and executeSellOrders with their helper functions to avoid stack-too-deep errors.
+// - Ensured no liquidity interaction in settleBuyOrders and settleSellOrders; pending amounts remain in listing contract's xBalance or yBalance.
+// - Fixed undeclared identifier errors for listingAddress in prepBuyCores, prepSellCores, etc., by adding listingAddress parameter.
+// - Updated prepareBuyBatchPrimaryUpdates, prepareSellBatchPrimaryUpdates, etc., to pass listingAddress.
+// - Removed count parameter from settle functions in interface and implementation for user-facing simplicity.
+// - Verified all helper functions (prepareBatchExecution, computeOrderAmounts, etc.) are accessible from MainPartial.
 
-import "./OrderPartial.sol";
+import "./MainPartial.sol";
 
-contract SettlementPartial is OrderPartial {
+contract SettlementPartial is MainPartial {
     using SafeERC20 for IERC20;
 
-    function settleBuyOrders(address listingAddress, uint256 count) internal {
-        if (count == 0) return;
+    function settleBuyOrders(address listingAddress) external {
         (bool isValid, , address token0, address baseToken) = IOMF(agent).validateListing(listingAddress);
         require(isValid, "Invalid listing");
         uint256[] memory orderIds = IOMFListing(listingAddress).pendingBuyOrdersView();
-        count = count > orderIds.length ? orderIds.length : count;
-        executeBuyOrders(listingAddress, count);
+        if (orderIds.length == 0) return;
+        executeBuyOrders(listingAddress, orderIds.length);
     }
 
-    function settleSellOrders(address listingAddress, uint256 count) internal {
-        if (count == 0) return;
+    function settleSellOrders(address listingAddress) external {
         (bool isValid, , address token0, address baseToken) = IOMF(agent).validateListing(listingAddress);
         require(isValid, "Invalid listing");
         uint256[] memory orderIds = IOMFListing(listingAddress).pendingSellOrdersView();
-        count = count > orderIds.length ? orderIds.length : count;
-        executeSellOrders(listingAddress, count);
-    }
-
-    function clearSingleOrder(address listingAddress, uint256 orderId, bool isBuy) internal {
-        (address maker, , uint8 status) = isBuy
-            ? IOMFListing(listingAddress).buyOrderCoreView(orderId)
-            : IOMFListing(listingAddress).sellOrderCoreView(orderId);
-        require(status != 0, "Order already cleared");
-        UpdateType[] memory updates = new UpdateType[](1);
-        updates[0] = UpdateType({
-            updateType: isBuy ? 1 : 2,
-            structId: 0,
-            index: orderId,
-            value: 0,
-            addr: maker,
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0
-        });
-        IOMFListing(listingAddress).update(updates);
-        emit OrderCancelled(orderId, isBuy);
-    }
-
-    function clearOrders(address listingAddress, uint256[] memory orderIds, bool isBuy) internal {
-        for (uint256 i = 0; i < orderIds.length; i++) {
-            clearSingleOrder(listingAddress, orderIds[i], isBuy);
-        }
-    }
-
-    function clearOrdersInternal(address listingAddress, address maker, bool isBuy) internal {
-        uint256[] memory orderIds = IOMFListing(listingAddress).makerPendingOrdersView(maker);
-        for (uint256 i = 0; i < orderIds.length; i++) {
-            (address orderMaker, , uint8 status) = isBuy
-                ? IOMFListing(listingAddress).buyOrderCoreView(orderIds[i])
-                : IOMFListing(listingAddress).sellOrderCoreView(orderIds[i]);
-            if (orderMaker == maker && status != 0) {
-                clearSingleOrder(listingAddress, orderIds[i], isBuy);
-            }
-        }
-    }
-
-    function validateAndPrepareRefund(address listingAddress, uint256 orderId, bool isBuy) internal view returns (uint256 amount, address token, address recipient) {
-        (address maker, address orderRecipient, uint8 status) = isBuy
-            ? IOMFListing(listingAddress).buyOrderCoreView(orderId)
-            : IOMFListing(listingAddress).sellOrderCoreView(orderId);
-        (uint256 pending, ) = isBuy
-            ? IOMFListing(listingAddress).buyOrderAmountsView(orderId)
-            : IOMFListing(listingAddress).sellOrderAmountsView(orderId);
-        require(status == 1 || status == 2, "Invalid order status");
-        (, , address token0, address baseToken) = IOMF(agent).validateListing(listingAddress);
-        return (
-            pending,
-            isBuy ? baseToken : token0,
-            orderRecipient == address(0) ? maker : orderRecipient
-        );
-    }
-
-    function executeRefundAndUpdate(address listingAddress, uint256 orderId, bool isBuy) internal {
-        (uint256 amount, address token, address recipient) = validateAndPrepareRefund(
-            listingAddress,
-            orderId,
-            isBuy
-        );
-        uint8 decimals = IERC20(token).decimals();
-        uint256 denormalizedAmount = denormalize(amount, decimals);
-        IOMFListing(listingAddress).transact(token, denormalizedAmount, recipient);
-        clearSingleOrder(listingAddress, orderId, isBuy);
-    }
-
-    function prepBuyOrderCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal view returns (PrimaryOrderUpdate memory) {
-        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).buyOrderCoreView(orderId);
-        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).buyOrderAmountsView(orderId);
-        require(status == 1 || status == 2, "Invalid order status");
-        (uint256 baseTokenAmount, uint256 token0Amount) = computeOrderAmounts(
-            state.price,
-            pending,
-            true,
-            state.token0Decimals,
-            state.baseTokenDecimals
-        );
-        return PrimaryOrderUpdate({
-            updateType: 1,
-            structId: 2,
-            orderId: orderId,
-            pendingValue: baseTokenAmount,
-            recipient: recipient,
-            maxPrice: 0,
-            minPrice: 0
-        });
-    }
-
-    function prepSellOrderCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal view returns (PrimaryOrderUpdate memory) {
-        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).sellOrderCoreView(orderId);
-        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).sellOrderAmountsView(orderId);
-        require(status == 1 || status == 2, "Invalid order status");
-        (uint256 baseTokenAmount, uint256 token0Amount) = computeOrderAmounts(
-            state.price,
-            pending,
-            false,
-            state.token0Decimals,
-            state.baseTokenDecimals
-        );
-        return PrimaryOrderUpdate({
-            updateType: 2,
-            structId: 2,
-            orderId: orderId,
-            pendingValue: token0Amount,
-            recipient: recipient,
-            maxPrice: 0,
-            minPrice: 0
-        });
-    }
-
-    function processPrepBuyOrderCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (uint256) {
-        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).buyOrderCoreView(orderId);
-        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).buyOrderAmountsView(orderId);
-        require(status == 1 || status == 2, "Invalid order status");
-        (, uint256 token0Amount) = computeOrderAmounts(
-            state.price,
-            pending,
-            true,
-            state.token0Decimals,
-            state.baseTokenDecimals
-        );
-        return performTransactionAndAdjust(listingAddress, state.token0, token0Amount, recipient, state.token0Decimals);
-    }
-
-    function processPrepSellOrderCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (uint256) {
-        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).sellOrderCoreView(orderId);
-        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).sellOrderAmountsView(orderId);
-        require(status == 1 || status == 2, "Invalid order status");
-        (uint256 baseTokenAmount, ) = computeOrderAmounts(
-            state.price,
-            pending,
-            false,
-            state.token0Decimals,
-            state.baseTokenDecimals
-        );
-        return performTransactionAndAdjust(listingAddress, state.baseToken, baseTokenAmount, recipient, state.baseTokenDecimals);
+        if (orderIds.length == 0) return;
+        executeSellOrders(listingAddress, orderIds.length);
     }
 
     function executeBuyOrders(address listingAddress, uint256 count) internal {
@@ -222,7 +83,7 @@ contract SettlementPartial is OrderPartial {
     ) internal view returns (PrimaryOrderUpdate[] memory) {
         PrimaryOrderUpdate[] memory updates = new PrimaryOrderUpdate[](count);
         for (uint256 i = 0; i < count; i++) {
-            updates[i] = prepBuyOrderCores(listingAddress, state, orderIds[i]);
+            updates[i] = prepBuyCores(listingAddress, state, orderIds[i]);
         }
         return updates;
     }
@@ -235,7 +96,7 @@ contract SettlementPartial is OrderPartial {
     ) internal view returns (PrimaryOrderUpdate[] memory) {
         PrimaryOrderUpdate[] memory updates = new PrimaryOrderUpdate[](count);
         for (uint256 i = 0; i < count; i++) {
-            updates[i] = prepSellOrderCores(listingAddress, state, orderIds[i]);
+            updates[i] = prepSellCores(listingAddress, state, orderIds[i]);
         }
         return updates;
     }
@@ -244,7 +105,7 @@ contract SettlementPartial is OrderPartial {
         UpdateType[] memory listingUpdates = new UpdateType[](updates.length);
         for (uint256 i = 0; i < updates.length; i++) {
             listingUpdates[i] = UpdateType({
-                updateType: 1,
+                updateType: updates[i].updateType,
                 structId: updates[i].structId,
                 index: updates[i].orderId,
                 value: updates[i].pendingValue,
@@ -261,7 +122,7 @@ contract SettlementPartial is OrderPartial {
         UpdateType[] memory listingUpdates = new UpdateType[](updates.length);
         for (uint256 i = 0; i < updates.length; i++) {
             listingUpdates[i] = UpdateType({
-                updateType: 2,
+                updateType: updates[i].updateType,
                 structId: updates[i].structId,
                 index: updates[i].orderId,
                 value: updates[i].pendingValue,
@@ -274,28 +135,6 @@ contract SettlementPartial is OrderPartial {
         IOMFListing(listingAddress).update(listingUpdates);
     }
 
-    function buildBuySecondaryUpdate(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (SecondaryOrderUpdate memory) {
-        uint256 filledValue = processPrepBuyOrderCores(listingAddress, state, orderId);
-        return SecondaryOrderUpdate({
-            updateType: 3,
-            structId: 0,
-            orderId: orderId,
-            filledValue: filledValue,
-            historicalPrice: 0
-        });
-    }
-
-    function buildSellSecondaryUpdate(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (SecondaryOrderUpdate memory) {
-        uint256 filledValue = processPrepSellOrderCores(listingAddress, state, orderId);
-        return SecondaryOrderUpdate({
-            updateType: 3,
-            structId: 0,
-            orderId: orderId,
-            filledValue: filledValue,
-            historicalPrice: 0
-        });
-    }
-
     function prepareBuyBatchSecondaryUpdates(
         address listingAddress,
         LiquidExecutionState memory state,
@@ -304,7 +143,8 @@ contract SettlementPartial is OrderPartial {
     ) internal returns (SecondaryOrderUpdate[] memory) {
         SecondaryOrderUpdate[] memory updates = new SecondaryOrderUpdate[](count);
         for (uint256 i = 0; i < count; i++) {
-            updates[i] = buildBuySecondaryUpdate(listingAddress, state, orderIds[i]);
+            uint256 filledValue = processPrepBuyCores(listingAddress, state, orderIds[i]);
+            updates[i] = buildSecondaryUpdate(orderIds[i], filledValue, true);
         }
         return updates;
     }
@@ -317,7 +157,8 @@ contract SettlementPartial is OrderPartial {
     ) internal returns (SecondaryOrderUpdate[] memory) {
         SecondaryOrderUpdate[] memory updates = new SecondaryOrderUpdate[](count);
         for (uint256 i = 0; i < count; i++) {
-            updates[i] = buildSellSecondaryUpdate(listingAddress, state, orderIds[i]);
+            uint256 filledValue = processPrepSellCores(listingAddress, state, orderIds[i]);
+            updates[i] = buildSecondaryUpdate(orderIds[i], filledValue, false);
         }
         return updates;
     }
@@ -326,8 +167,8 @@ contract SettlementPartial is OrderPartial {
         UpdateType[] memory listingUpdates = new UpdateType[](updates.length);
         for (uint256 i = 0; i < updates.length; i++) {
             listingUpdates[i] = UpdateType({
-                updateType: 3,
-                structId: 0,
+                updateType: updates[i].updateType,
+                structId: updates[i].structId,
                 index: updates[i].orderId,
                 value: updates[i].filledValue,
                 addr: address(0),
@@ -337,17 +178,14 @@ contract SettlementPartial is OrderPartial {
             });
         }
         IOMFListing(listingAddress).update(listingUpdates);
-        for (uint256 i = 0; i < updates.length; i++) {
-            delete tempOrderUpdates[updates[i].orderId];
-        }
     }
 
     function applySellBatchSecondaryUpdates(address listingAddress, SecondaryOrderUpdate[] memory updates) internal {
         UpdateType[] memory listingUpdates = new UpdateType[](updates.length);
         for (uint256 i = 0; i < updates.length; i++) {
             listingUpdates[i] = UpdateType({
-                updateType: 3,
-                structId: 0,
+                updateType: updates[i].updateType,
+                structId: updates[i].structId,
                 index: updates[i].orderId,
                 value: updates[i].filledValue,
                 addr: address(0),
@@ -357,8 +195,87 @@ contract SettlementPartial is OrderPartial {
             });
         }
         IOMFListing(listingAddress).update(listingUpdates);
-        for (uint256 i = 0; i < updates.length; i++) {
-            delete tempOrderUpdates[updates[i].orderId];
-        }
+    }
+
+    function prepBuyCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal view returns (PrimaryOrderUpdate memory) {
+        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).buyOrderCoreView(orderId);
+        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).buyOrderAmountsView(orderId);
+        require(status == 1 || status == 2, "Invalid order status");
+        (uint256 baseTokenAmount, uint256 token0Amount) = computeOrderAmounts(
+            state.price,
+            pending,
+            true,
+            state.token0Decimals,
+            state.baseTokenDecimals
+        );
+        return PrimaryOrderUpdate({
+            updateType: 1,
+            structId: 2,
+            orderId: orderId,
+            pendingValue: baseTokenAmount,
+            recipient: recipient,
+            maxPrice: 0,
+            minPrice: 0
+        });
+    }
+
+    function prepSellCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal view returns (PrimaryOrderUpdate memory) {
+        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).sellOrderCoreView(orderId);
+        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).sellOrderAmountsView(orderId);
+        require(status == 1 || status == 2, "Invalid order status");
+        (uint256 baseTokenAmount, uint256 token0Amount) = computeOrderAmounts(
+            state.price,
+            pending,
+            false,
+            state.token0Decimals,
+            state.baseTokenDecimals
+        );
+        return PrimaryOrderUpdate({
+            updateType: 2,
+            structId: 2,
+            orderId: orderId,
+            pendingValue: token0Amount,
+            recipient: recipient,
+            maxPrice: 0,
+            minPrice: 0
+        });
+    }
+
+    function processPrepBuyCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (uint256) {
+        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).buyOrderCoreView(orderId);
+        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).buyOrderAmountsView(orderId);
+        require(status == 1 || status == 2, "Invalid order status");
+        (, uint256 token0Amount) = computeOrderAmounts(
+            state.price,
+            pending,
+            true,
+            state.token0Decimals,
+            state.baseTokenDecimals
+        );
+        return performTransactionAndAdjust(listingAddress, state.token0, token0Amount, recipient, state.token0Decimals);
+    }
+
+    function processPrepSellCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (uint256) {
+        (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).sellOrderCoreView(orderId);
+        (uint256 pending, uint256 filled) = IOMFListing(listingAddress).sellOrderAmountsView(orderId);
+        require(status == 1 || status == 2, "Invalid order status");
+        (uint256 baseTokenAmount, ) = computeOrderAmounts(
+            state.price,
+            pending,
+            false,
+            state.token0Decimals,
+            state.baseTokenDecimals
+        );
+        return performTransactionAndAdjust(listingAddress, state.baseToken, baseTokenAmount, recipient, state.baseTokenDecimals);
+    }
+
+    function buildSecondaryUpdate(uint256 orderId, uint256 filledValue, bool isBuy) internal pure returns (SecondaryOrderUpdate memory) {
+        return SecondaryOrderUpdate({
+            updateType: 3,
+            structId: 0,
+            orderId: orderId,
+            filledValue: filledValue,
+            historicalPrice: 0
+        });
     }
 }

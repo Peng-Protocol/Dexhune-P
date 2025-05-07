@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.2;
 
-// Version: 0.1.2
+// Version: 0.1.4
 // Most Recent Changes:
-// - From v0.1.1: No functional changes; preserved agent, setAgent, and helper functions for OrderPartial and OMFRouter.
-// - Ensured OrderUpdate struct fix (removed duplicate historicalPrice, corrected typo) is maintained.
-// - Verified all helper functions (transferToken, normalizeAndFee, etc.) are available for OrderPartial and OMFRouter.
+// - From v0.1.3: Added changeSlotDepositor to IOMFLiquidity interface.
+// - Preserved settleBuyOrders, settleSellOrders, settleBuyLiquid, and settleSellLiquid in IOMF interface.
+// - Maintained agent, setAgent, and helper functions for OrderPartial and OMFRouter.
+// - Kept OrderUpdate struct fix (removed duplicate historicalPrice, corrected typo).
+// - Verified helper functions (transferToken, normalizeAndFee, etc.) are available for OrderPartial and OMFRouter.
 
-import "./imports/Ownable.sol";
-import "./imports/SafeERC20.sol";
+import "../imports/Ownable.sol";
+import "../imports/SafeERC20.sol";
 
 interface IOMF {
     function validateListing(address listingAddress) external view returns (bool, address, address, address);
+    function settleBuyOrders(address listingAddress) external;
+    function settleSellOrders(address listingAddress) external;
+    function settleBuyLiquid(address listingAddress) external;
+    function settleSellLiquid(address listingAddress) external;
 }
 
 interface IOMFListing {
@@ -49,6 +55,7 @@ interface IOMFLiquidity {
     function baseToken() external view returns (address);
     function activeXLiquiditySlotsView() external view returns (uint256[] memory);
     function activeYLiquiditySlotsView() external view returns (uint256[] memory);
+    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external;
 }
 
 struct UpdateType {
