@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.2;
 
-// Version: 0.0.11
+// Version: 0.0.13
 // Most Recent Changes:
-// - From v0.0.10: Renamed UpdateType struct to ListingUpdateType to resolve naming conflict with UpdateType in IOMFListing interface.
-// - Updated update function and internal references to use ListingUpdateType.
-// - Kept IOMFListing interface unchanged, using original UpdateType.
-// - Ensured no changes to external interfaces or OMFRouter.
+// - From v0.0.12: Removed onlyRouter modifier from setAgent, now callable by anyone.
+// - Added globalizeUpdate function to sync pending buy/sell orders with OMFAgent via globalizeOrders.
+// - Modified update function to call globalizeUpdate instead of direct globalizeOrders calls.
+// - Ensured globalizeUpdate is externally callable and fetches all pending orders.
+// - Preserved all existing functionality (order creation via update, balance updates, transact, view functions).
 
 import "../imports/SafeERC20.sol";
 
@@ -22,6 +23,20 @@ interface IOMFListing {
     function isOrderCompleteView(uint256 orderId, bool isBuy) external view returns (bool);
     function update(UpdateType[] memory updates) external;
     function transact(address token, uint256 amount, address recipient) external;
+}
+
+interface IOMFAgent {
+    function globalizeOrders(
+        uint256 listingId,
+        address token0,
+        address baseToken,
+        uint256 orderId,
+        bool isBuy,
+        address maker,
+        address recipient,
+        uint256 amount,
+        uint8 status
+    ) external;
 }
 
 interface IERC20 {
@@ -51,6 +66,7 @@ contract OMFListingTemplate {
     address public oracle;
     uint8 public oracleDecimals;
     uint256 public orderIdHeight; // Tracks next available orderId
+    address public agent; // OMFAgent address
 
     struct ListingUpdateType {
         uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
@@ -169,6 +185,56 @@ contract OMFListingTemplate {
         require(_oracle != address(0), "Invalid oracle");
         oracle = _oracle;
         oracleDecimals = _oracleDecimals;
+    }
+
+    function setAgent(address _agent) external {
+        require(agent == address(0), "Agent already set");
+        require(_agent != address(0), "Invalid agent address");
+        agent = _agent;
+    }
+
+    function globalizeUpdate() external {
+        if (agent == address(0)) return;
+
+        // Sync pending buy orders
+        for (uint256 i = 0; i < pendingBuyOrders.length; i++) {
+            uint256 orderId = pendingBuyOrders[i];
+            BuyOrderCore memory core = buyOrderCores[orderId];
+            BuyOrderAmounts memory amounts = buyOrderAmounts[orderId];
+            if (core.status == 1 || core.status == 2) { // Pending or partially filled
+                try IOMFAgent(agent).globalizeOrders(
+                    listingId,
+                    token0,
+                    baseToken,
+                    orderId,
+                    true,
+                    core.makerAddress,
+                    core.recipientAddress,
+                    amounts.pending,
+                    core.status
+                ) {} catch {}
+            }
+        }
+
+        // Sync pending sell orders
+        for (uint256 i = 0; i < pendingSellOrders.length; i++) {
+            uint256 orderId = pendingSellOrders[i];
+            SellOrderCore memory core = sellOrderCores[orderId];
+            SellOrderAmounts memory amounts = sellOrderAmounts[orderId];
+            if (core.status == 1 || core.status == 2) { // Pending or partially filled
+                try IOMFAgent(agent).globalizeOrders(
+                    listingId,
+                    token0,
+                    baseToken,
+                    orderId,
+                    false,
+                    core.makerAddress,
+                    core.recipientAddress,
+                    amounts.pending,
+                    core.status
+                ) {} catch {}
+            }
+        }
     }
 
     function getPrice() external view returns (uint256) {
@@ -304,6 +370,9 @@ contract OMFListingTemplate {
             price = (balances.xBalance * 1e18) / balances.yBalance;
         }
         emit BalancesUpdated(balances.xBalance, balances.yBalance);
+
+        // Sync all pending orders with agent
+        globalizeUpdate();
     }
 
     function transact(address token, uint256 amount, address recipient) external onlyRouter {

@@ -1,17 +1,19 @@
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-License-License: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.12
+// Version: 0.0.13
 // Changes:
-// - From v0.0.11: Added changeSlotDepositor function to update the depositor address of a liquidity slot, restricted to the original depositor via onlyRouter.
+// - From v0.0.12: Added globalizeUpdate to sync liquidity with OMFAgent, called in deposit/xExecuteOut/yExecuteOut.
+// - Added setAgent for one-time agent address setting during initialization.
+// - Added IOMFAgent interface for globalizeLiquidity call.
+// - From v0.0.11: Added changeSlotDepositor function, restricted to original depositor via onlyRouter.
 // - Added SlotDepositorChanged event.
-// - Preserved prior changes: Removed listingId as function parameter, made implicit via stored state.
+// - Removed listingId as function parameter, made implicit via stored state.
 // - Updated mappings to remove listingId key: liquidityDetails, xLiquiditySlots, yLiquiditySlots, activeXLiquiditySlots, activeYLiquiditySlots.
 // - Updated IOMFListing interface: volumeBalances() no longer takes listingId.
 // - Updated LiquidityUpdated event: removed listingId parameter.
-// - Retained original 'this.' usage for internal calls (addFees, deposit, xExecuteOut, yExecuteOut, transact).
-// - Aligned with prior changes: Aligned with MFPLiquidityTemplate, added getPrice() in x/yPrepOut, fixed abi.decode typo.
-// - Maintained normalize/denormalize, explicit casting, and nonReentrant guards.
+// - Aligned with MFPLiquidityTemplate, added getPrice() in x/yPrepOut, fixed abi.decode typo.
+// - Maintained normalize/denormalize, explicit casting, nonReentrant guards.
 
 import "../imports/SafeERC20.sol";
 import "../imports/ReentrancyGuard.sol";
@@ -21,12 +23,17 @@ interface IOMFListing {
     function getPrice() external view returns (uint256);
 }
 
+interface IOMFAgent {
+    function globalizeLiquidity(uint256 listingId, address token0, address baseToken, address user, uint256 amount, bool isDeposit) external;
+}
+
 contract OMFLiquidityTemplate is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     address public router;
     address public listingAddress;
     uint256 public listingId;
+    address public agent;
 
     address public token0;    // Token-0 (listed token)
     address public baseToken; // Token-1 (reference token)
@@ -70,6 +77,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     event FeesClaimed(bool isX, uint256 amount, address depositor);
     event LiquidityUpdated(uint256 xLiquid, uint256 yLiquid);
     event SlotDepositorChanged(bool isX, uint256 slotIndex, address indexed oldDepositor, address indexed newDepositor);
+    event GlobalLiquidityUpdated(bool isX, uint256 amount, bool isDeposit, address caller);
 
     constructor() {}
 
@@ -82,6 +90,12 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
         require(router == address(0), "Router already set");
         require(_router != address(0), "Invalid router");
         router = _router;
+    }
+
+    function setAgent(address _agent) external {
+        require(agent == address(0), "Agent already set");
+        require(_agent != address(0), "Invalid agent");
+        agent = _agent;
     }
 
     function setListingId(uint256 _listingId) external {
@@ -189,7 +203,27 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
         uint256 slotIndex = isX ? activeXLiquiditySlots.length : activeYLiquiditySlots.length;
         updates[0] = UpdateType(isX ? 2 : 3, slotIndex, normalizedAmount, caller, address(0));
         this.update(caller, updates);
+        globalizeUpdate(caller, isX, normalizedAmount, true);
         emit LiquidityAdded(isX, normalizedAmount);
+    }
+
+    function globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit) external onlyRouter nonReentrant {
+        require(amount > 0, "Invalid amount");
+        require(agent != address(0), "Agent not set");
+        address token = isX ? token0 : baseToken;
+        uint256 normalizedAmount = normalize(amount, IERC20(token).decimals());
+        (bool success, ) = agent.call(
+            abi.encodeWithSignature(
+                "globalizeLiquidity(uint256,address,address,address,uint256,bool)",
+                listingId,
+                token0,
+                baseToken,
+                caller,
+                normalizedAmount,
+                isDeposit
+            )
+        );
+        emit GlobalLiquidityUpdated(isX, normalizedAmount, isDeposit, caller);
     }
 
     function xPrepOut(address caller, uint256 amount, uint256 index) external onlyRouter returns (PreparedWithdrawal memory) {
@@ -245,9 +279,11 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
 
         if (withdrawal.amount0 > 0) {
             this.transact(caller, token0, denormalize(withdrawal.amount0, IERC20(token0).decimals()), caller);
+            globalizeUpdate(caller, true, withdrawal.amount0, false);
         }
         if (withdrawal.amount1 > 0) {
             this.transact(caller, baseToken, denormalize(withdrawal.amount1, IERC20(baseToken).decimals()), caller);
+            globalizeUpdate(caller, false, withdrawal.amount1, false);
         }
     }
 
@@ -260,9 +296,11 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
 
         if (withdrawal.amount1 > 0) {
             this.transact(caller, baseToken, denormalize(withdrawal.amount1, IERC20(baseToken).decimals()), caller);
+            globalizeUpdate(caller, false, withdrawal.amount1, false);
         }
         if (withdrawal.amount0 > 0) {
             this.transact(caller, token0, denormalize(withdrawal.amount0, IERC20(token0).decimals()), caller);
+            globalizeUpdate(caller, true, withdrawal.amount0, false);
         }
     }
 
@@ -302,7 +340,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
                 details.yFees -= feeShare;
                 IERC20(baseToken).safeTransfer(caller, denormalize(feeShare, IERC20(baseToken).decimals()));
             }
-            slot.dVolume = tVolume; // Reset dVolume to current tVolume from listing
+            slot.dVolume = tVolume;
             emit FeesClaimed(isX, feeShare, caller);
         }
     }
