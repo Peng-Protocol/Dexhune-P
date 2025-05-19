@@ -7,9 +7,11 @@ Link Dollar v2 (LUSD) is an ERC20-compliant token with 18 decimals, built on Sol
 The `dispense` function allows users to deposit ETH to mint LUSD:
 - Requires non-zero ETH (`msg.value > 0`), set `oracleAddress`, and `feeClaimer`.
 - Uses Chainlink’s `latestAnswer` (8 decimals) to fetch ETH/USD price.
-- Calculates LUSD: `(msg.value * price / 10^8) / 2` minted to caller and `feeClaimer`.
+- Calculates LUSD: `lusdAmount = msg.value * price / 10^8`, minted to caller.
+- Transfers `msg.value` (ETH) to `feeClaimer`, emitting `EthTransferred` on success.
 - Protected by a `nonReentrant` modifier to prevent reentrancy attacks.
-- Calls `TokenRegistry.initializeBalances([address(this)], [msg.sender, feeClaimer])` if `tokenRegistry` is set; otherwise, emits `TokenRegistryNotSet`.
+- Calls `TokenRegistry.initializeBalances([address(this)], [msg.sender])` if `tokenRegistry` is set; otherwise, emits `TokenRegistryNotSet` with `msg.sender`.
+- Emits `Dispense(recipient, feeClaimer, lusdAmount)` to log LUSD minted to `recipient`.
 
 ## Transfer and Fees
 - **Transfer/TransferFrom**: Transfers LUSD, deducts 0.05% (5 basis points) fee to contract’s `contractBalance`.
@@ -39,7 +41,7 @@ The `dispense` function allows users to deposit ETH to mint LUSD:
 - **Setup**: `tokenRegistry` address set via owner-only `setTokenRegistry`.
 - **Usage**:
   - `transfer`/`transferFrom`: Calls `initializeBalances([address(this)], [from, to])`.
-  - `dispense`: Calls `initializeBalances([address(this)], [msg.sender, feeClaimer])`.
+  - `dispense`: Calls `initializeBalances([address(this)], [msg.sender])`.
   - `_distributeRewards`: Calls `initializeBalances([address(this)], [rewarded addresses])`.
   - **Graceful Degradation**: If `tokenRegistry` is unset, skips `initializeBalances` and emits `TokenRegistryNotSet` with the token and affected users.
 
@@ -71,5 +73,5 @@ The `dispense` function allows users to deposit ETH to mint LUSD:
 - **Owner Privileges**: `setOracleAddress`, `setFeeClaimer`, `setTokenRegistry` are owner-only, requiring secure key management.
 - **TokenRegistry**: Graceful degradation ensures functionality if `tokenRegistry` is unset. Assumes `initializeBalances` is permissionless.
 - **Cell Management**: Cell gap-closing ensures efficient `cellHeight`, but empty cells below `cellHeight` may persist and be selected (skipped via `cellBalance == 0`). Consider compacting cells if needed.
-
+- **ETH Transfer**: ETH transfer to `feeClaimer` uses `call` for safety, but `feeClaimer` must accept ETH to avoid reversion.
 

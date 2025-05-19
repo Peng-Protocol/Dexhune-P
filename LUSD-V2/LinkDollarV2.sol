@@ -1,12 +1,8 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
- - 2025-05-19: Isolated address gap-closing to individual cells, reinstated cell gap-closing by decrementing cellHeight for empty cells.
- - 2025-05-19: Limited gap-closing to cell-by-cell basis, added getCellBalances query function.
- - 2025-05-19: Added graceful degradation for TokenRegistry calls, emit TokenRegistryNotSet if unset.
- - 2025-05-19: Removed _burn, updated TokenRegistry initializeBalances with [address(this)], simplified reward distribution to single random cell.
- - 2025-05-19: Integrated TokenRegistry, adjusted wholeCycle to 10 swaps, added reentrancy guard for dispense.
- - 2025-05-19: Added getTopHolders query, confirmed Chainlink oracle, accounted for cellHeight in randomness.
+ - 2025-05-19: Updated dispense to mint LUSD only to msg.sender, transfer ETH to feeClaimer, updated TokenRegistry calls to include only msg.sender.
+ - 2025-05-19: Added ETH transfer to feeClaimer in dispense, added EthTransferred event.
 */
 
 pragma solidity 0.8.2;
@@ -57,12 +53,13 @@ contract LinkDollarV2 {
     // Events
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
-    event Dispense(address indexed recipient, address indexed feeClaimer, uint256 amount);
+    event Dispense(address indexed recipient, address indexed feeClaimer, uint256 lusdAmount);
     event RewardsDistributed(uint256 indexed cellIndex, uint256 amount);
     event OracleAddressSet(address indexed oracleAddress);
     event FeeClaimerSet(address indexed feeClaimer);
     event TokenRegistrySet(address indexed tokenRegistry);
     event TokenRegistryNotSet(address indexed token, address[] users);
+    event EthTransferred(address indexed to, uint256 amount);
 
     // Modifiers
     modifier onlyOwner() {
@@ -97,24 +94,25 @@ contract LinkDollarV2 {
         require(priceInt > 0, "Invalid oracle price");
         uint256 price = uint256(priceInt);
         uint256 lusdAmount = (msg.value * price) / 10**8;
-        uint256 perRecipient = lusdAmount / 2;
 
-        _mint(msg.sender, perRecipient);
-        _mint(feeClaimer, perRecipient);
+        _mint(msg.sender, lusdAmount);
 
         if (tokenRegistry != address(0)) {
             address[] memory tokens = new address[](1);
-            address[] memory users = new address[](2);
+            address[] memory users = new address[](1);
             tokens[0] = address(this);
             users[0] = msg.sender;
-            users[1] = feeClaimer;
             ITokenRegistry(tokenRegistry).initializeBalances(tokens, users);
         } else {
-           , address[] memory users = new address[](2);
+            address[] memory users = new address[](1);
             users[0] = msg.sender;
-            users[1] = feeClaimer;
             emit TokenRegistryNotSet(address(this), users);
         }
+
+        // Transfer ETH to feeClaimer
+        (bool success, ) = feeClaimer.call{value: msg.value}("");
+        require(success, "ETH transfer failed");
+        emit EthTransferred(feeClaimer, msg.value);
 
         emit Dispense(msg.sender, feeClaimer, lusdAmount);
     }
