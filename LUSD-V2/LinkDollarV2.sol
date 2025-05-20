@@ -1,6 +1,9 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-05-20: Added try-catch for initializeBalances in _transfer and dispense, added TokenRegistryCallFailed event.
+ - 2025-05-20: Updated ITokenRegistry interface to use initializeBalances(address token, address[] memory users).
+ - 2025-05-20: Renamed totalSupply to _totalSupply, balances to _balances, allowances to _allowances to resolve naming conflicts with ERC20 functions.
  - 2025-05-19: Updated dispense to mint LUSD only to msg.sender, transfer ETH to feeClaimer, updated TokenRegistry calls to include only msg.sender.
  - 2025-05-19: Added ETH transfer to feeClaimer in dispense, added EthTransferred event.
 */
@@ -21,24 +24,24 @@ interface IOracle {
 }
 
 interface ITokenRegistry {
-    function initializeBalances(address[] memory tokens, address[] memory users) external;
+    function initializeBalances(address token, address[] memory users) external;
 }
 
 contract LinkDollarV2 {
     // State variables
-    mapping(address => uint256) private balances;
-    mapping(address => mapping(address => uint256)) private allowances;
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
     mapping(uint256 => address[100]) private cells;
     mapping(address => uint256) private addressToCell;
     mapping(uint256 => uint256) private cellCycle;
-    uint256 private totalSupply;
+    uint256 private _totalSupply;
     uint256 private wholeCycle;
     uint256 private swapCount;
-    uint256 private cellHeight;
-    address private owner;
-    address private oracleAddress;
-    address private feeClaimer;
-    address private tokenRegistry;
+    uint256 public cellHeight;
+    address public owner;
+    address public oracleAddress;
+    address public feeClaimer;
+    address public tokenRegistry;
     uint256 private contractBalance;
     bool private locked;
 
@@ -59,6 +62,7 @@ contract LinkDollarV2 {
     event FeeClaimerSet(address indexed feeClaimer);
     event TokenRegistrySet(address indexed tokenRegistry);
     event TokenRegistryNotSet(address indexed token, address[] users);
+    event TokenRegistryCallFailed(address indexed token, address[] users);
     event EthTransferred(address indexed to, uint256 amount);
 
     // Modifiers
@@ -76,12 +80,12 @@ contract LinkDollarV2 {
 
     constructor() {
         owner = msg.sender;
-        totalSupply = 5 * 10**uint256(DECIMALS);
-        balances[msg.sender] = totalSupply;
+        _totalSupply = 5 * 10**uint256(DECIMALS);
+        _balances[msg.sender] = _totalSupply;
         cells[0][0] = msg.sender;
         addressToCell[msg.sender] = 0;
         cellHeight = 0;
-        emit Transfer(address(0), msg.sender, totalSupply);
+        emit Transfer(address(0), msg.sender, _totalSupply);
     }
 
     // External functions
@@ -98,11 +102,14 @@ contract LinkDollarV2 {
         _mint(msg.sender, lusdAmount);
 
         if (tokenRegistry != address(0)) {
-            address[] memory tokens = new address[](1);
             address[] memory users = new address[](1);
-            tokens[0] = address(this);
             users[0] = msg.sender;
-            ITokenRegistry(tokenRegistry).initializeBalances(tokens, users);
+            try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
+                // Success, no action needed
+            } catch {
+                emit TokenRegistryCallFailed(address(this), users);
+                emit TokenRegistryNotSet(address(this), users);
+            }
         } else {
             address[] memory users = new address[](1);
             users[0] = msg.sender;
@@ -123,15 +130,15 @@ contract LinkDollarV2 {
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        uint256 allowed = allowances[from][msg.sender];
+        uint256 allowed = _allowances[from][msg.sender];
         require(allowed >= amount, "Insufficient allowance");
-        unchecked { allowances[from][msg.sender] = allowed - amount; }
+        unchecked { _allowances[from][msg.sender] = allowed - amount; }
         _transfer(from, to, amount);
         return true;
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
-        allowances[msg.sender][spender] = amount;
+        _allowances[msg.sender][spender] = amount;
         emit Approval(msg.sender, spender, amount);
         return true;
     }
@@ -170,7 +177,7 @@ contract LinkDollarV2 {
         for (uint256 i = 0; i < CELL_SIZE; i++) {
             address account = cells[cellIndex][i];
             if (account == address(0)) continue;
-            uint256 balance = balances[account];
+            uint256 balance = _balances[account];
             if (balance == 0) continue;
             tempAddresses[count] = account;
             tempBalances[count] = balance;
@@ -194,7 +201,7 @@ contract LinkDollarV2 {
             for (uint256 j = 0; j < CELL_SIZE; j++) {
                 address addr = cells[i][j];
                 if (addr == address(0)) continue;
-                uint256 bal = balances[addr];
+                uint256 bal = _balances[addr];
                 if (bal == 0) continue;
 
                 if (found < count) {
@@ -226,15 +233,15 @@ contract LinkDollarV2 {
 
     // View functions
     function balanceOf(address account) external view returns (uint256) {
-        return balances[account];
+        return _balances[account];
     }
 
     function allowance(address owner_, address spender) external view returns (uint256) {
-        return allowances[owner_][spender];
+        return _allowances[owner_][spender];
     }
 
     function totalSupply() external view returns (uint256) {
-        return totalSupply;
+        return _totalSupply;
     }
 
     function decimals() external pure returns (uint8) {
@@ -259,27 +266,30 @@ contract LinkDollarV2 {
     function _transfer(address from, address to, uint256 amount) private {
         require(from != address(0), "Transfer from zero address");
         require(to != address(0), "Transfer to zero address");
-        require(balances[from] >= amount, "Insufficient balance");
+        require(_balances[from] >= amount, "Insufficient balance");
 
         uint256 fee = (amount * FEE_BPS) / 10000;
         uint256 amountAfterFee = amount - fee;
 
         unchecked {
-            balances[from] -= amount;
-            balances[to] += amountAfterFee;
+            _balances[from] -= amount;
+            _balances[to] += amountAfterFee;
             contractBalance += fee;
         }
 
-        _updateCells(from, balances[from]);
-        _updateCells(to, balances[to]);
+        _updateCells(from, _balances[from]);
+        _updateCells(to, _balances[to]);
 
         if (tokenRegistry != address(0)) {
-            address[] memory tokens = new address[](1);
             address[] memory users = new address[](2);
-            tokens[0] = address(this);
             users[0] = from;
             users[1] = to;
-            ITokenRegistry(tokenRegistry).initializeBalances(tokens, users);
+            try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
+                // Success, no action needed
+            } catch {
+                emit TokenRegistryCallFailed(address(this), users);
+                emit TokenRegistryNotSet(address(this), users);
+            }
         } else {
             address[] memory users = new address[](2);
             users[0] = from;
@@ -299,9 +309,9 @@ contract LinkDollarV2 {
 
     function _mint(address account, uint256 amount) private {
         require(account != address(0), "Mint to zero address");
-        totalSupply += amount;
-        unchecked { balances[account] += amount; }
-        _updateCells(account, balances[account]);
+        _totalSupply += amount;
+        unchecked { _balances[account] += amount; }
+        _updateCells(account, _balances[account]);
         emit Transfer(address(0), account, amount);
     }
 
@@ -373,7 +383,7 @@ contract LinkDollarV2 {
         for (uint256 i = 0; i < CELL_SIZE; i++) {
             address account = cells[selectedCell][i];
             if (account == address(0)) continue;
-            cellBalance += balances[account];
+            cellBalance += _balances[account];
         }
         if (cellBalance == 0) return;
 
@@ -384,11 +394,11 @@ contract LinkDollarV2 {
         for (uint256 i = 0; i < CELL_SIZE; i++) {
             address account = cells[selectedCell][i];
             if (account == address(0)) continue;
-            uint256 accountBalance = balances[account];
+            uint256 accountBalance = _balances[account];
             if (accountBalance == 0) continue;
             uint256 accountReward = (rewardAmount * accountBalance) / cellBalance;
-            unchecked { balances[account] += accountReward; }
-            _updateCells(account, balances[account]);
+            unchecked { _balances[account] += accountReward; }
+            _updateCells(account, _balances[account]);
             rewardedUsers[rewardedCount] = account;
             rewardedCount++;
             emit Transfer(address(this), account, accountReward);
@@ -396,13 +406,16 @@ contract LinkDollarV2 {
 
         if (rewardedCount > 0) {
             if (tokenRegistry != address(0)) {
-                address[] memory tokens = new address[](1);
                 address[] memory users = new address[](rewardedCount);
-                tokens[0] = address(this);
                 for (uint256 i = 0; i < rewardedCount; i++) {
                     users[i] = rewardedUsers[i];
                 }
-                ITokenRegistry(tokenRegistry).initializeBalances(tokens, users);
+                try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
+                    // Success, no action needed
+                } catch {
+                    emit TokenRegistryCallFailed(address(this), users);
+                    emit TokenRegistryNotSet(address(this), users);
+                }
             } else {
                 address[] memory users = new address[](rewardedCount);
                 for (uint256 i = 0; i < rewardedCount; i++) {
