@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.2;
 
-// Version: 0.0.13
+// Version: 0.0.21
 // Most Recent Changes:
-// - From v0.0.12: Removed onlyRouter modifier from setAgent, now callable by anyone.
-// - Added globalizeUpdate function to sync pending buy/sell orders with OMFAgent via globalizeOrders.
-// - Modified update function to call globalizeUpdate instead of direct globalizeOrders calls.
-// - Ensured globalizeUpdate is externally callable and fetches all pending orders.
-// - Preserved all existing functionality (order creation via update, balance updates, transact, view functions).
+// - From v0.0.20: Renamed registryAddress function to getRegistryAddress to resolve naming conflict with state variable (line 77).
+// - Changed updateRegistry to _updateRegistry with internal visibility to resolve undeclared identifier error in transact (line 564).
+// - From v0.0.19: Changed globalizeUpdate visibility to internal to resolve undeclared identifier error (line 369).
+// - Removed 'this.' from globalizeUpdate call in update function.
+// - From v0.0.18: Corrected _findVolumeChange to calculate volume difference from lastDay (midnight) to present timestamp.
+// - Iterates historicalData backwards to find first entry with timestamp >= lastDay, uses earliest entry as fallback.
+// - From v0.0.17: Made maxIterations a caller-provided parameter in queryYield.
+// - From v0.0.16: Added lastDay to track first volume update per day, optimized queryYield with internal helpers.
+// - From v0.0.15: Updated queryYield to check current-day updates.
+// - Preserved all existing functionality (order creation, balance updates, transact, view functions).
 
 import "../imports/SafeERC20.sol";
 
@@ -23,6 +28,8 @@ interface IOMFListing {
     function isOrderCompleteView(uint256 orderId, bool isBuy) external view returns (bool);
     function update(UpdateType[] memory updates) external;
     function transact(address token, uint256 amount, address recipient) external;
+    function queryYield(bool isX, uint256 maxIterations) external view returns (uint256);
+    function getRegistryAddress() external view returns (address);
 }
 
 interface IOMFAgent {
@@ -39,10 +46,12 @@ interface IOMFAgent {
     ) external;
 }
 
-interface IERC20 {
-    function decimals() external view returns (uint8);
-    function balanceOf(address account) external view returns (uint256);
-    function transfer(address recipient, uint256 amount) external returns (bool);
+interface ITokenRegistry {
+    function initializeBalances(address token, address[] memory users) external;
+}
+
+interface IOMFLiquidityTemplate {
+    function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
 }
 
 struct UpdateType {
@@ -67,6 +76,8 @@ contract OMFListingTemplate {
     uint8 public oracleDecimals;
     uint256 public orderIdHeight; // Tracks next available orderId
     address public agent; // OMFAgent address
+    address public registryAddress; // TokenRegistry address
+    uint256 public lastDay; // Timestamp of first volume update of current day (midnight)
 
     struct ListingUpdateType {
         uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
@@ -145,9 +156,11 @@ contract OMFListingTemplate {
 
     event OrderUpdated(uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 xBalance, uint256 yBalance);
+    event RegistryUpdateFailed(string reason);
 
     constructor() {
         orderIdHeight = 0; // Initialize orderIdHeight
+        lastDay = 0; // Initialize lastDay
     }
 
     modifier onlyRouter() {
@@ -193,7 +206,13 @@ contract OMFListingTemplate {
         agent = _agent;
     }
 
-    function globalizeUpdate() external {
+    function setRegistry(address _registryAddress) external {
+        require(registryAddress == address(0), "Registry already set");
+        require(_registryAddress != address(0), "Invalid registry address");
+        registryAddress = _registryAddress;
+    }
+
+    function globalizeUpdate() internal {
         if (agent == address(0)) return;
 
         // Sync pending buy orders
@@ -237,6 +256,126 @@ contract OMFListingTemplate {
         }
     }
 
+    function _updateRegistry() internal {
+        if (registryAddress == address(0)) {
+            emit RegistryUpdateFailed("Registry not set");
+            return;
+        }
+
+        // Randomly select buy or sell orders (0 = buy, 1 = sell)
+        bool isBuy = block.timestamp % 2 == 0;
+        uint256[] memory orders = isBuy ? pendingBuyOrders : pendingSellOrders;
+        address token = isBuy ? baseToken : token0;
+
+        if (orders.length == 0) {
+            emit RegistryUpdateFailed("No pending orders");
+            return;
+        }
+
+        // Collect unique maker addresses
+        address[] memory tempMakers = new address[](orders.length);
+        uint256 makerCount = 0;
+        for (uint256 i = 0; i < orders.length; i++) {
+            address maker = isBuy ? buyOrderCores[orders[i]].makerAddress : sellOrderCores[orders[i]].makerAddress;
+            if (maker != address(0)) {
+                bool exists = false;
+                for (uint256 j = 0; j < makerCount; j++) {
+                    if (tempMakers[j] == maker) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    tempMakers[makerCount] = maker;
+                    makerCount++;
+                }
+            }
+        }
+
+        // Resize array to unique makers
+        address[] memory makers = new address[](makerCount);
+        for (uint256 i = 0; i < makerCount; i++) {
+            makers[i] = tempMakers[i];
+        }
+
+        // Call initializeBalances on TokenRegistry
+        try ITokenRegistry(registryAddress).initializeBalances(token, makers) {} catch {
+            emit RegistryUpdateFailed("Registry update failed");
+        }
+    }
+
+    function _isSameDay(uint256 time1, uint256 time2) internal pure returns (bool) {
+        uint256 midnight1 = time1 - (time1 % 86400);
+        uint256 midnight2 = time2 - (time2 % 86400);
+        return midnight1 == midnight2;
+    }
+
+    function _floorToMidnight(uint256 timestamp) internal pure returns (uint256) {
+        return timestamp - (timestamp % 86400);
+    }
+
+    function _findVolumeChange(bool isX, uint256 startTime, uint256 maxIterations) internal view returns (uint256) {
+        VolumeBalance memory bal = volumeBalance;
+        uint256 currentVolume = isX ? bal.xVolume : bal.yVolume;
+        uint256 iterationsLeft = maxIterations;
+        uint256 volumeChange = 0;
+
+        if (historicalData.length == 0) {
+            return 0; // No data
+        }
+
+        // Find first entry with timestamp >= startTime (midnight of current day)
+        for (uint256 i = historicalData.length; i > 0 && iterationsLeft > 0; i--) {
+            HistoricalData memory data = historicalData[i - 1];
+            iterationsLeft--;
+            if (data.timestamp >= startTime) {
+                volumeChange = currentVolume - (isX ? data.xVolume : data.yVolume);
+                return volumeChange;
+            }
+        }
+
+        // Fallback: Use earliest entry if no entry found since startTime
+        if (iterationsLeft == 0 || historicalData.length <= maxIterations) {
+            HistoricalData memory earliest = historicalData[0];
+            volumeChange = currentVolume - (isX ? earliest.xVolume : earliest.yVolume);
+            return volumeChange;
+        }
+
+        return 0; // No valid entry found
+    }
+
+    function queryYield(bool isX, uint256 maxIterations) external view returns (uint256) {
+        require(maxIterations > 0, "Invalid maxIterations");
+
+        // Check if lastDay is set and has updates today
+        if (lastDay == 0 || historicalData.length == 0 || !_isSameDay(block.timestamp, lastDay)) {
+            return 0; // No updates today
+        }
+
+        // Find volume change from lastDay (midnight) to now
+        uint256 volumeChange = _findVolumeChange(isX, lastDay, maxIterations);
+        if (volumeChange == 0) {
+            return 0; // No valid historical data
+        }
+
+        // Fetch liquidity from OMFLiquidityTemplate
+        uint256 liquidity = 0;
+        try IOMFLiquidityTemplate(liquidityAddress).liquidityAmounts() returns (uint256 xLiquid, uint256 yLiquid) {
+            liquidity = isX ? xLiquid : yLiquid;
+        } catch {
+            return 0; // Graceful degradation
+        }
+
+        // Calculate fees (0.05% rate)
+        uint256 dailyFees = (volumeChange * 5) / 10000;
+        if (liquidity == 0) return 0;
+
+        // Calculate APY
+        uint256 dailyYield = (dailyFees * 1e18) / liquidity;
+        uint256 apy = dailyYield * 365;
+        return apy;
+    }
+
     function getPrice() external view returns (uint256) {
         (bool success, bytes memory returnData) = oracle.staticcall(abi.encodeWithSignature("latestPrice()"));
         require(success, "Price fetch failed");
@@ -250,6 +389,25 @@ contract OMFListingTemplate {
 
     function update(ListingUpdateType[] memory updates) external onlyRouter {
         VolumeBalance storage balances = volumeBalance;
+
+        // Update lastDay for volume changes
+        bool volumeUpdated = false;
+        for (uint256 i = 0; i < updates.length; i++) {
+            ListingUpdateType memory u = updates[i];
+            if (u.updateType == 0 && (u.index == 2 || u.index == 3)) {
+                volumeUpdated = true;
+                break;
+            } else if (u.updateType == 1 && u.structId == 2 && u.value > 0) {
+                volumeUpdated = true;
+                break;
+            } else if (u.updateType == 2 && u.structId == 2 && u.value > 0) {
+                volumeUpdated = true;
+                break;
+            }
+        }
+        if (volumeUpdated && (lastDay == 0 || block.timestamp >= lastDay + 86400)) {
+            lastDay = _floorToMidnight(block.timestamp);
+        }
 
         for (uint256 i = 0; i < updates.length; i++) {
             ListingUpdateType memory u = updates[i];
@@ -380,6 +538,11 @@ contract OMFListingTemplate {
         uint8 decimals = IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
 
+        // Update lastDay for volume changes
+        if (lastDay == 0 || block.timestamp >= lastDay + 86400) {
+            lastDay = _floorToMidnight(block.timestamp);
+        }
+
         if (token == token0) {
             require(balances.xBalance >= normalizedAmount, "Insufficient xBalance");
             balances.xBalance -= normalizedAmount;
@@ -398,6 +561,10 @@ contract OMFListingTemplate {
             price = (balances.xBalance * 1e18) / balances.yBalance;
         }
         emit BalancesUpdated(balances.xBalance, balances.yBalance);
+
+        // Update registry with pending orders
+        _updateRegistry();
+        globalizeUpdate();
     }
 
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
@@ -485,5 +652,9 @@ contract OMFListingTemplate {
 
     function isOrderCompleteView(uint256 orderId, bool isBuy) external view returns (bool) {
         return isBuy ? isBuyOrderComplete[orderId] : isSellOrderComplete[orderId];
+    }
+
+    function getRegistryAddress() external view returns (address) {
+        return registryAddress;
     }
 }

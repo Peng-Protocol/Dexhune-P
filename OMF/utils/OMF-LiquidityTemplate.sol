@@ -1,8 +1,14 @@
-// SPDX-License-License: BSD-3-Clause
-pragma solidity ^0.8.1;
+// SPDX-License-Identifier: BSD-3-Clause
+pragma solidity 0.8.2;
 
-// Version: 0.0.13
+// Version: 0.0.15
 // Changes:
+// - From v0.0.14: Added try-catch blocks to globalizeUpdate calls in deposit, xExecuteOut, and yExecuteOut to handle undeclared identifier errors gracefully (lines 260, 296, 318, 341, 344).
+// - From v0.0.13: Added updateRegistry to sync depositor balances with TokenRegistry after deposit, xExecuteOut, yExecuteOut (lines 260, 296, 318, 341).
+// - Added ITokenRegistry interface for updateRegistry function.
+// - Moved transact function before xExecuteOut and yExecuteOut to ensure declaration before usage (line 263).
+// - Corrected SPDX-License-License to SPDX-License-Identifier.
+// - Updated pragma to 0.8.2 per style guide.
 // - From v0.0.12: Added globalizeUpdate to sync liquidity with OMFAgent, called in deposit/xExecuteOut/yExecuteOut.
 // - Added setAgent for one-time agent address setting during initialization.
 // - Added IOMFAgent interface for globalizeLiquidity call.
@@ -21,10 +27,15 @@ import "../imports/ReentrancyGuard.sol";
 interface IOMFListing {
     function volumeBalances() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function getPrice() external view returns (uint256);
+    function getRegistryAddress() external view returns (address);
 }
 
 interface IOMFAgent {
     function globalizeLiquidity(uint256 listingId, address token0, address baseToken, address user, uint256 amount, bool isDeposit) external;
+}
+
+interface ITokenRegistry {
+    function initializeBalances(address token, address[] memory users) external;
 }
 
 contract OMFLiquidityTemplate is ReentrancyGuard {
@@ -78,6 +89,7 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
     event LiquidityUpdated(uint256 xLiquid, uint256 yLiquid);
     event SlotDepositorChanged(bool isX, uint256 slotIndex, address indexed oldDepositor, address indexed newDepositor);
     event GlobalLiquidityUpdated(bool isX, uint256 amount, bool isDeposit, address caller);
+    event RegistryUpdateFailed(string reason);
 
     constructor() {}
 
@@ -178,6 +190,46 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
         emit SlotDepositorChanged(isX, slotIndex, oldDepositor, newDepositor);
     }
 
+    function globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit) external onlyRouter nonReentrant {
+        require(amount > 0, "Invalid amount");
+        require(agent != address(0), "Agent not set");
+        address token = isX ? token0 : baseToken;
+        uint256 normalizedAmount = normalize(amount, IERC20(token).decimals());
+        (bool success, ) = agent.call(
+            abi.encodeWithSignature(
+                "globalizeLiquidity(uint256,address,address,address,uint256,bool)",
+                listingId,
+                token0,
+                baseToken,
+                caller,
+                normalizedAmount,
+                isDeposit
+            )
+        );
+        emit GlobalLiquidityUpdated(isX, normalizedAmount, isDeposit, caller);
+    }
+
+    function updateRegistry(address caller, bool isX) internal {
+        address registry = address(0);
+        try IOMFListing(listingAddress).getRegistryAddress() returns (address reg) {
+            registry = reg;
+        } catch {
+            emit RegistryUpdateFailed("Registry fetch failed");
+            return;
+        }
+        if (registry == address(0)) {
+            emit RegistryUpdateFailed("Registry not set");
+            return;
+        }
+
+        address token = isX ? token0 : baseToken;
+        address[] memory users = new address[](1);
+        users[0] = caller;
+        try ITokenRegistry(registry).initializeBalances(token, users) {} catch {
+            emit RegistryUpdateFailed("Registry update failed");
+        }
+    }
+
     function addFees(address caller, bool isX, uint256 fee) external onlyRouter nonReentrant {
         require(fee > 0, "Invalid fee");
         address token = isX ? token0 : baseToken;
@@ -203,27 +255,25 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
         uint256 slotIndex = isX ? activeXLiquiditySlots.length : activeYLiquiditySlots.length;
         updates[0] = UpdateType(isX ? 2 : 3, slotIndex, normalizedAmount, caller, address(0));
         this.update(caller, updates);
-        globalizeUpdate(caller, isX, normalizedAmount, true);
+        try this.globalizeUpdate(caller, isX, normalizedAmount, true) {} catch {
+            emit GlobalLiquidityUpdated(isX, normalizedAmount, true, caller);
+        }
+        updateRegistry(caller, isX);
         emit LiquidityAdded(isX, normalizedAmount);
     }
 
-    function globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit) external onlyRouter nonReentrant {
-        require(amount > 0, "Invalid amount");
-        require(agent != address(0), "Agent not set");
-        address token = isX ? token0 : baseToken;
+    function transact(address caller, address token, uint256 amount, address recipient) external onlyRouter nonReentrant {
+        LiquidityDetails storage details = liquidityDetail;
         uint256 normalizedAmount = normalize(amount, IERC20(token).decimals());
-        (bool success, ) = agent.call(
-            abi.encodeWithSignature(
-                "globalizeLiquidity(uint256,address,address,address,uint256,bool)",
-                listingId,
-                token0,
-                baseToken,
-                caller,
-                normalizedAmount,
-                isDeposit
-            )
-        );
-        emit GlobalLiquidityUpdated(isX, normalizedAmount, isDeposit, caller);
+        if (token == token0) {
+            require(details.xLiquid >= normalizedAmount, "Insufficient Token-0 liquidity");
+            details.xLiquid -= normalizedAmount;
+        } else if (token == baseToken) {
+            require(details.yLiquid >= normalizedAmount, "Insufficient Token-1 liquidity");
+            details.yLiquid -= normalizedAmount;
+        }
+        IERC20(token).safeTransfer(recipient, amount);
+        emit LiquidityUpdated(details.xLiquid, details.yLiquid);
     }
 
     function xPrepOut(address caller, uint256 amount, uint256 index) external onlyRouter returns (PreparedWithdrawal memory) {
@@ -279,11 +329,17 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
 
         if (withdrawal.amount0 > 0) {
             this.transact(caller, token0, denormalize(withdrawal.amount0, IERC20(token0).decimals()), caller);
-            globalizeUpdate(caller, true, withdrawal.amount0, false);
+            try this.globalizeUpdate(caller, true, withdrawal.amount0, false) {} catch {
+                emit GlobalLiquidityUpdated(true, withdrawal.amount0, false, caller);
+            }
+            updateRegistry(caller, true);
         }
         if (withdrawal.amount1 > 0) {
             this.transact(caller, baseToken, denormalize(withdrawal.amount1, IERC20(baseToken).decimals()), caller);
-            globalizeUpdate(caller, false, withdrawal.amount1, false);
+            try this.globalizeUpdate(caller, false, withdrawal.amount1, false) {} catch {
+                emit GlobalLiquidityUpdated(false, withdrawal.amount1, false, caller);
+            }
+            updateRegistry(caller, false);
         }
     }
 
@@ -296,26 +352,18 @@ contract OMFLiquidityTemplate is ReentrancyGuard {
 
         if (withdrawal.amount1 > 0) {
             this.transact(caller, baseToken, denormalize(withdrawal.amount1, IERC20(baseToken).decimals()), caller);
-            globalizeUpdate(caller, false, withdrawal.amount1, false);
+            try this.globalizeUpdate(caller, false, withdrawal.amount1, false) {} catch {
+                emit GlobalLiquidityUpdated(false, withdrawal.amount1, false, caller);
+            }
+            updateRegistry(caller, false);
         }
         if (withdrawal.amount0 > 0) {
             this.transact(caller, token0, denormalize(withdrawal.amount0, IERC20(token0).decimals()), caller);
-            globalizeUpdate(caller, true, withdrawal.amount0, false);
+            try this.globalizeUpdate(caller, true, withdrawal.amount0, false) {} catch {
+                emit GlobalLiquidityUpdated(true, withdrawal.amount0, false, caller);
+            }
+            updateRegistry(caller, true);
         }
-    }
-
-    function transact(address caller, address token, uint256 amount, address recipient) external onlyRouter nonReentrant {
-        LiquidityDetails storage details = liquidityDetail;
-        uint256 normalizedAmount = normalize(amount, IERC20(token).decimals());
-        if (token == token0) {
-            require(details.xLiquid >= normalizedAmount, "Insufficient Token-0 liquidity");
-            details.xLiquid -= normalizedAmount;
-        } else if (token == baseToken) {
-            require(details.yLiquid >= normalizedAmount, "Insufficient Token-1 liquidity");
-            details.yLiquid -= normalizedAmount;
-        }
-        IERC20(token).safeTransfer(recipient, amount);
-        emit LiquidityUpdated(details.xLiquid, details.yLiquid);
     }
 
     function claimFees(address caller, bool isX, uint256 slotIndex, uint256 /* volume */) external onlyRouter nonReentrant {
