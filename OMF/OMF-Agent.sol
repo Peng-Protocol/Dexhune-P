@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.2;
 
-// Version: 0.0.11
+// Version: 0.0.13
 // Changes:
-// - From v0.0.10: Modified setAgent to be called in _initializePair, ensuring listing contract links to this agent.
-// - Updated globalizeOrders access control to only allow valid listing contracts (msg.sender == getListing[token0][baseToken]).
-// - Ensured globalOrders, pairOrders, userOrders are persistent; removed removeOrder function to keep canceled/filled orders.
+// - From v0.0.12: Fixed TypeError in getUserLiquidityAcrossPairs by correcting amounts array type from address[] to uint256[] (line 446).
+// - From v0.0.11: Removed caps on query functions (getTopLiquidityProviders, getUserLiquidityAcrossPairs, getAllPairsByLiquidity, getTopTradersByVolume, getAllPairsByOrderVolume), replaced with user-supplied maxIterations parameter.
+// - Added setRegistry function (onlyOwner) and public registryAddress state variable, called in _initializeListing to set registry on listing contract.
+// - Split _initializePair into _initializeListing and _initializeLiquidity to reduce stack depth, using InitData struct.
+// - Updated IOMFListingTemplate interface to include setRegistry.
 // - Preserved all liquidity management, listing creation, and existing view functions unchanged.
 // - Maintained GlobalOrderChanged event for order updates.
 
@@ -19,6 +21,7 @@ interface IOMFListingTemplate {
     function setTokens(address _tokenA, address _tokenB) external;
     function setOracleDetails(address oracle, uint8 decimals, bytes4 viewFunction) external;
     function setAgent(address _agent) external;
+    function setRegistry(address _registryAddress) external;
 }
 
 interface IOMFLiquidityTemplate {
@@ -48,7 +51,7 @@ contract OMFAgent is Ownable {
     address public listingLogicAddress;
     address public liquidityLogicAddress;
     address public baseToken; // Token-1 (reference token)
-    
+    address public registryAddress; // TokenRegistry address
     uint256 public listingCount;
 
     mapping(address => mapping(address => address)) public getListing; // tokenA (Token-0) to baseToken (Token-1)
@@ -82,6 +85,17 @@ contract OMFAgent is Ownable {
         bytes32 listingSalt;
         bytes32 liquiditySalt;
         address tokenA; // Token-0
+        address oracleAddress;
+        uint8 oracleDecimals;
+        bytes4 oracleViewFunction;
+    }
+
+    struct InitData {
+        address listingAddress;
+        address liquidityAddress;
+        address tokenA;
+        address tokenB;
+        uint256 listingId;
         address oracleAddress;
         uint8 oracleDecimals;
         bytes4 oracleViewFunction;
@@ -138,6 +152,11 @@ contract OMFAgent is Ownable {
         baseToken = _baseToken; // Token-1
     }
 
+    function setRegistry(address _registryAddress) external onlyOwner {
+        require(_registryAddress != address(0), "Invalid registry address");
+        registryAddress = _registryAddress;
+    }
+
     function checkCallerBalance(address tokenA, uint256 totalSupply) internal view returns (bool) {
         uint256 decimals = IERC20(tokenA).decimals();
         uint256 requiredBalance = totalSupply / 100; // 1% of total supply
@@ -147,28 +166,22 @@ contract OMFAgent is Ownable {
         return IERC20(tokenA).balanceOf(msg.sender) >= requiredBalance;
     }
 
-    function _initializePair(
-        address listingAddress,
-        address liquidityAddress,
-        address tokenA, // Token-0
-        address tokenB, // Token-1 (baseToken)
-        uint256 listingId,
-        address oracleAddress,
-        uint8 oracleDecimals,
-        bytes4 oracleViewFunction
-    ) internal {
-        IOMFListingTemplate(listingAddress).setRouter(routerAddress);
-        IOMFListingTemplate(listingAddress).setListingId(listingId);
-        IOMFListingTemplate(listingAddress).setLiquidityAddress(liquidityAddress);
-        IOMFListingTemplate(listingAddress).setTokens(tokenA, tokenB);
-        IOMFListingTemplate(listingAddress).setOracleDetails(oracleAddress, oracleDecimals, oracleViewFunction);
-        IOMFListingTemplate(listingAddress).setAgent(address(this));
+    function _initializeListing(InitData memory init) internal {
+        IOMFListingTemplate(init.listingAddress).setRouter(routerAddress);
+        IOMFListingTemplate(init.listingAddress).setListingId(init.listingId);
+        IOMFListingTemplate(init.listingAddress).setLiquidityAddress(init.liquidityAddress);
+        IOMFListingTemplate(init.listingAddress).setTokens(init.tokenA, init.tokenB);
+        IOMFListingTemplate(init.listingAddress).setOracleDetails(init.oracleAddress, init.oracleDecimals, init.oracleViewFunction);
+        IOMFListingTemplate(init.listingAddress).setAgent(address(this));
+        IOMFListingTemplate(init.listingAddress).setRegistry(registryAddress);
+    }
 
-        IOMFLiquidityTemplate(liquidityAddress).setRouter(routerAddress);
-        IOMFLiquidityTemplate(liquidityAddress).setListingId(listingId);
-        IOMFLiquidityTemplate(liquidityAddress).setListingAddress(listingAddress);
-        IOMFLiquidityTemplate(liquidityAddress).setTokens(tokenA, tokenB);
-        IOMFLiquidityTemplate(liquidityAddress).setAgent(address(this));
+    function _initializeLiquidity(InitData memory init) internal {
+        IOMFLiquidityTemplate(init.liquidityAddress).setRouter(routerAddress);
+        IOMFLiquidityTemplate(init.liquidityAddress).setListingId(init.listingId);
+        IOMFLiquidityTemplate(init.liquidityAddress).setListingAddress(init.listingAddress);
+        IOMFLiquidityTemplate(init.liquidityAddress).setTokens(init.tokenA, init.tokenB);
+        IOMFLiquidityTemplate(init.liquidityAddress).setAgent(address(this));
     }
 
     function prepListing(
@@ -200,7 +213,7 @@ contract OMFAgent is Ownable {
         address listingAddress = IOMFListingLogic(listingLogicAddress).deploy(prep.listingSalt);
         address liquidityAddress = IOMFLiquidityLogic(liquidityLogicAddress).deploy(prep.liquiditySalt);
 
-        _initializePair(
+        InitData memory init = InitData(
             listingAddress,
             liquidityAddress,
             prep.tokenA,
@@ -210,6 +223,9 @@ contract OMFAgent is Ownable {
             prep.oracleDecimals,
             prep.oracleViewFunction
         );
+
+        _initializeListing(init);
+        _initializeLiquidity(init);
 
         getListing[prep.tokenA][baseToken] = listingAddress;
         allListings.push(listingAddress);
@@ -324,7 +340,7 @@ contract OMFAgent is Ownable {
         emit GlobalLiquidityChanged(listingId, token0, baseToken, user, amount, isDeposit);
     }
 
-    // Warning: getPairLiquidityTrend and getUserLiquidityTrend may consume high gas for large time ranges or many tokens due to uncapped results.
+    // Warning: getPairLiquidityTrend and getUserLiquidityTrend may consume high gas for large time ranges or many tokens.
     function getPairLiquidityTrend(
         address token0,
         bool focusOnToken0,
@@ -371,7 +387,7 @@ contract OMFAgent is Ownable {
         }
     }
 
-    // Warning: getPairLiquidityTrend and getUserLiquidityTrend may consume high gas for large time ranges or many tokens due to uncapped results.
+    // Warning: getPairLiquidityTrend and getUserLiquidityTrend may consume high gas for large time ranges or many tokens.
     function getUserLiquidityTrend(
         address user,
         bool focusOnToken0,
@@ -407,12 +423,13 @@ contract OMFAgent is Ownable {
         }
     }
 
-    function getUserLiquidityAcrossPairs(address user)
+    function getUserLiquidityAcrossPairs(address user, uint256 maxIterations)
         external
         view
         returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory amounts)
     {
-        uint256 maxPairs = allListedTokens.length > 100 ? 100 : allListedTokens.length;
+        require(maxIterations > 0, "Invalid maxIterations");
+        uint256 maxPairs = maxIterations < allListedTokens.length ? maxIterations : allListedTokens.length;
         TrendData[] memory temp = new TrendData[](maxPairs);
         uint256 count = 0;
 
@@ -435,12 +452,13 @@ contract OMFAgent is Ownable {
         }
     }
 
-    function getTopLiquidityProviders(uint256 listingId, uint256 limit)
+    function getTopLiquidityProviders(uint256 listingId, uint256 maxIterations)
         external
         view
         returns (address[] memory users, uint256[] memory amounts)
     {
-        uint256 maxLimit = limit > 50 ? 50 : limit;
+        require(maxIterations > 0, "Invalid maxIterations");
+        uint256 maxLimit = maxIterations < allListings.length ? maxIterations : allListings.length;
         TrendData[] memory temp = new TrendData[](maxLimit);
         uint256 count = 0;
 
@@ -472,12 +490,13 @@ contract OMFAgent is Ownable {
         share = total > 0 ? (userAmount * 1e18) / total : 0;
     }
 
-    function getAllPairsByLiquidity(uint256 minLiquidity, bool focusOnToken0)
+    function getAllPairsByLiquidity(uint256 minLiquidity, bool focusOnToken0, uint256 maxIterations)
         external
         view
         returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory amounts)
     {
-        uint256 maxPairs = allListedTokens.length > 100 ? 100 : allListedTokens.length;
+        require(maxIterations > 0, "Invalid maxIterations");
+        uint256 maxPairs = maxIterations < allListedTokens.length ? maxIterations : allListedTokens.length;
         TrendData[] memory temp = new TrendData[](maxPairs);
         uint256 count = 0;
 
@@ -554,11 +573,11 @@ contract OMFAgent is Ownable {
         view
         returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory volumes)
     {
-        uint256 maxPairs = allListedTokens.length > 100 ? 100 : allListedTokens.length;
+        uint256 maxPairs = allListedTokens.length;
         TrendData[] memory temp = new TrendData[](maxPairs);
         uint256 count = 0;
 
-        for (uint256 i = 0; i < allListedTokens.length && count < maxPairs; i++) {
+        for (uint256 i = 0; i < allListedTokens.length; i++) {
             address token0 = allListedTokens[i];
             uint256 volume = userTradingSummaries[user][token0][baseToken];
             if (volume > 0) {
@@ -577,12 +596,13 @@ contract OMFAgent is Ownable {
         }
     }
 
-    function getTopTradersByVolume(uint256 listingId, uint256 limit)
+    function getTopTradersByVolume(uint256 listingId, uint256 maxIterations)
         external
         view
         returns (address[] memory traders, uint256[] memory volumes)
     {
-        uint256 maxLimit = limit > 50 ? 50 : limit;
+        require(maxIterations > 0, "Invalid maxIterations");
+        uint256 maxLimit = maxIterations < allListings.length ? maxIterations : allListings.length;
         TrendData[] memory temp = new TrendData[](maxLimit);
         uint256 count = 0;
 
@@ -613,12 +633,13 @@ contract OMFAgent is Ownable {
         }
     }
 
-    function getAllPairsByOrderVolume(uint256 minVolume, bool focusOnToken0)
+    function getAllPairsByOrderVolume(uint256 minVolume, bool focusOnToken0, uint256 maxIterations)
         external
         view
         returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory volumes)
     {
-        uint256 maxPairs = allListedTokens.length > 100 ? 100 : allListedTokens.length;
+        require(maxIterations > 0, "Invalid maxIterations");
+        uint256 maxPairs = maxIterations < allListedTokens.length ? maxIterations : allListedTokens.length;
         TrendData[] memory temp = new TrendData[](maxPairs);
         uint256 count = 0;
 
