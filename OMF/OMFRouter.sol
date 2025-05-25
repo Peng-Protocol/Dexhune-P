@@ -1,16 +1,17 @@
-// SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.2;
 
-// Version: 0.2.4
+// SPDX-License-Identifier: BSD-3-Clause
+
+// Version: 0.2.5
 // Most Recent Changes:
-// - From v0.2.3: Removed transferLiquidity function.
-// - Added changeDepositor as an external user-facing function to update the depositor address of a liquidity slot via IOMFLiquidity.changeSlotDepositor.
-// - Added DepositorChanged event.
+// - From v0.2.4: Added try-catch in processPrimaryUpdates, prepareBuyLiquidSecondaryUpdates, and prepareSellLiquidSecondaryUpdates for graceful degradation.
+// - Added OrderProcessingFailed event emission for failed orders.
+// - Modified processPrimaryUpdates, prepareBuyLiquidSecondaryUpdates, and prepareSellLiquidSecondaryUpdates to use dynamic arrays for successful updates only.
+// - Ensured no listing or liquidity updates (IOMFListing.update, IOMFLiquidity.deposit) occur for failed orders.
 // - Preserved settleBuyLiquid and settleSellLiquid with transferToLiquidity helper for liquid settlement.
-// - Maintained executeBuyLiquid and executeSellLiquid as internal with helpers (prepareExecutionState, fetchPendingOrders, processPrimaryUpdates, transferToLiquidity, processSecondaryUpdates) to avoid stack-too-deep errors.
+// - Maintained executeBuyLiquid and executeSellLiquid as internal with helpers to avoid stack-too-deep errors.
 // - Preserved claimFees update to fetch volume from IOMFListing.volumeBalances().
-// - Fixed undeclared identifier errors for listingAddress in prepBuyLiquidCores, prepSellLiquidCores, etc.
-// - Ensured compatibility with MainPartial.sol, SettlementPartial.sol, and OMF-LiquidityTemplate.sol.
+// - Removed try-catch around safeTransferFrom in transferToLiquidity, relying on its built-in revert mechanism.
 
 import "./utils/SettlementPartial.sol";
 
@@ -97,8 +98,27 @@ contract OMFRouter is SettlementPartial {
         uint256 count,
         bool isBuy
     ) internal returns (PrimaryOrderUpdate[] memory) {
-        PrimaryOrderUpdate[] memory updates = prepareLiquidPrimaryUpdates(listingAddress, state, orderIds, count, isBuy);
-        applyLiquidPrimaryUpdates(listingAddress, updates, isBuy);
+        PrimaryOrderUpdate[] memory tempUpdates = new PrimaryOrderUpdate[](count);
+        uint256 validCount = 0;
+        for (uint256 i = 0; i < count; i++) {
+            try this.prepareLiquidPrimaryUpdates(listingAddress, state, orderIds, i + 1, isBuy) returns (PrimaryOrderUpdate[] memory singleUpdate) {
+                if (singleUpdate.length > 0) {
+                    tempUpdates[validCount] = singleUpdate[0];
+                    validCount++;
+                }
+            } catch Error(string memory reason) {
+                emit OrderProcessingFailed(listingAddress, orderIds[i], isBuy, reason);
+            } catch {
+                emit OrderProcessingFailed(listingAddress, orderIds[i], isBuy, "Unknown error");
+            }
+        }
+        PrimaryOrderUpdate[] memory updates = new PrimaryOrderUpdate[](validCount);
+        for (uint256 i = 0; i < validCount; i++) {
+            updates[i] = tempUpdates[i];
+        }
+        if (updates.length > 0) {
+            applyLiquidPrimaryUpdates(listingAddress, updates, isBuy);
+        }
         return updates;
     }
 
@@ -115,7 +135,13 @@ contract OMFRouter is SettlementPartial {
                 address token = isBuy ? state.baseToken : state.token0;
                 uint8 decimals = isBuy ? state.baseTokenDecimals : state.token0Decimals;
                 IERC20(token).safeTransferFrom(listingAddress, liquidityAddress, denormalize(amount, decimals));
-                IOMFLiquidity(liquidityAddress).deposit(address(this), isBuy, amount);
+                try IOMFLiquidity(liquidityAddress).deposit(address(this), isBuy, amount) {
+                    // Success
+                } catch Error(string memory reason) {
+                    emit OrderProcessingFailed(listingAddress, primaryUpdates[i].orderId, isBuy, string(abi.encodePacked("Liquidity deposit failed: ", reason)));
+                } catch {
+                    emit OrderProcessingFailed(listingAddress, primaryUpdates[i].orderId, isBuy, "Liquidity deposit failed: Unknown error");
+                }
             }
         }
     }
@@ -131,7 +157,9 @@ contract OMFRouter is SettlementPartial {
         SecondaryOrderUpdate[] memory secondaryUpdates = isBuy
             ? prepareBuyLiquidSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, count)
             : prepareSellLiquidSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, count);
-        applyLiquidSecondaryUpdates(listingAddress, secondaryUpdates, isBuy);
+        if (secondaryUpdates.length > 0) {
+            applyLiquidSecondaryUpdates(listingAddress, secondaryUpdates, isBuy);
+        }
     }
 
     function executeBuyLiquid(address listingAddress, uint256 count) internal {
@@ -145,7 +173,9 @@ contract OMFRouter is SettlementPartial {
         if (adjustedCount == 0) return;
         
         PrimaryOrderUpdate[] memory primaryUpdates = processPrimaryUpdates(listingAddress, state, orderIds, adjustedCount, true);
-        transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, true);
+        if (primaryUpdates.length > 0) {
+            transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, true);
+        }
         processSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, adjustedCount, true);
     }
 
@@ -160,7 +190,9 @@ contract OMFRouter is SettlementPartial {
         if (adjustedCount == 0) return;
         
         PrimaryOrderUpdate[] memory primaryUpdates = processPrimaryUpdates(listingAddress, state, orderIds, adjustedCount, false);
-        transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, false);
+        if (primaryUpdates.length > 0) {
+            transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, false);
+        }
         processSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, adjustedCount, false);
     }
 
@@ -170,11 +202,10 @@ contract OMFRouter is SettlementPartial {
         uint256[] memory orderIds,
         uint256 count,
         bool isBuy
-    ) internal view returns (PrimaryOrderUpdate[] memory) {
-        PrimaryOrderUpdate[] memory updates = new PrimaryOrderUpdate[](count);
-        for (uint256 i = 0; i < count; i++) {
-            updates[i] = isBuy ? prepBuyLiquidCores(listingAddress, state, orderIds[i]) : prepSellLiquidCores(listingAddress, state, orderIds[i]);
-        }
+    ) external view returns (PrimaryOrderUpdate[] memory) {
+        require(count <= orderIds.length, "Invalid count");
+        PrimaryOrderUpdate[] memory updates = new PrimaryOrderUpdate[](1);
+        updates[0] = isBuy ? prepBuyLiquidCores(listingAddress, state, orderIds[count - 1]) : prepSellLiquidCores(listingAddress, state, orderIds[count - 1]);
         return updates;
     }
 
@@ -192,7 +223,13 @@ contract OMFRouter is SettlementPartial {
                 minPrice: updates[i].minPrice
             });
         }
-        IOMFListing(listingAddress).update(listingUpdates);
+        try IOMFListing(listingAddress).update(listingUpdates) {
+            // Success
+        } catch Error(string memory reason) {
+            emit OrderProcessingFailed(listingAddress, 0, isBuy, string(abi.encodePacked("Batch update failed: ", reason)));
+        } catch {
+            emit OrderProcessingFailed(listingAddress, 0, isBuy, "Batch update failed: Unknown error");
+        }
     }
 
     function applyLiquidSecondaryUpdates(address listingAddress, SecondaryOrderUpdate[] memory updates, bool isBuy) internal {
@@ -209,7 +246,13 @@ contract OMFRouter is SettlementPartial {
                 minPrice: 0
             });
         }
-        IOMFListing(listingAddress).update(listingUpdates);
+        try IOMFListing(listingAddress).update(listingUpdates) {
+            // Success
+        } catch Error(string memory reason) {
+            emit OrderProcessingFailed(listingAddress, 0, isBuy, string(abi.encodePacked("Batch update failed: ", reason)));
+        } catch {
+            emit OrderProcessingFailed(listingAddress, 0, isBuy, "Batch update failed: Unknown error");
+        }
     }
 
     function prepBuyLiquidCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal view returns (PrimaryOrderUpdate memory) {
@@ -256,7 +299,7 @@ contract OMFRouter is SettlementPartial {
         });
     }
 
-    function processPrepBuyLiquidCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (uint256) {
+    function processPrepBuyLiquidCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) external returns (uint256) {
         (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).buyOrderCoreView(orderId);
         (uint256 pending, uint256 filled) = IOMFListing(listingAddress).buyOrderAmountsView(orderId);
         require(status == 1 || status == 2, "Invalid order status");
@@ -270,7 +313,7 @@ contract OMFRouter is SettlementPartial {
         return performTransactionAndAdjust(listingAddress, state.token0, token0Amount, recipient, state.token0Decimals);
     }
 
-    function processPrepSellLiquidCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) internal returns (uint256) {
+    function processPrepSellLiquidCores(address listingAddress, LiquidExecutionState memory state, uint256 orderId) external returns (uint256) {
         (address maker, address recipient, uint8 status) = IOMFListing(listingAddress).sellOrderCoreView(orderId);
         (uint256 pending, uint256 filled) = IOMFListing(listingAddress).sellOrderAmountsView(orderId);
         require(status == 1 || status == 2, "Invalid order status");
@@ -305,10 +348,21 @@ contract OMFRouter is SettlementPartial {
         uint256[] memory orderIds,
         uint256 count
     ) internal returns (SecondaryOrderUpdate[] memory) {
-        SecondaryOrderUpdate[] memory updates = new SecondaryOrderUpdate[](count);
+        SecondaryOrderUpdate[] memory tempUpdates = new SecondaryOrderUpdate[](count);
+        uint256 validCount = 0;
         for (uint256 i = 0; i < count; i++) {
-            uint256 filledValue = processPrepBuyLiquidCores(listingAddress, state, orderIds[i]);
-            updates[i] = buildLiquidSecondaryUpdate(orderIds[i], filledValue, true);
+            try this.processPrepBuyLiquidCores(listingAddress, state, orderIds[i]) returns (uint256 filledValue) {
+                tempUpdates[validCount] = buildLiquidSecondaryUpdate(orderIds[i], filledValue, true);
+                validCount++;
+            } catch Error(string memory reason) {
+                emit OrderProcessingFailed(listingAddress, orderIds[i], true, reason);
+            } catch {
+                emit OrderProcessingFailed(listingAddress, orderIds[i], true, "Unknown error");
+            }
+        }
+        SecondaryOrderUpdate[] memory updates = new SecondaryOrderUpdate[](validCount);
+        for (uint256 i = 0; i < validCount; i++) {
+            updates[i] = tempUpdates[i];
         }
         return updates;
     }
@@ -320,10 +374,21 @@ contract OMFRouter is SettlementPartial {
         uint256[] memory orderIds,
         uint256 count
     ) internal returns (SecondaryOrderUpdate[] memory) {
-        SecondaryOrderUpdate[] memory updates = new SecondaryOrderUpdate[](count);
+        SecondaryOrderUpdate[] memory tempUpdates = new SecondaryOrderUpdate[](count);
+        uint256 validCount = 0;
         for (uint256 i = 0; i < count; i++) {
-            uint256 filledValue = processPrepSellLiquidCores(listingAddress, state, orderIds[i]);
-            updates[i] = buildLiquidSecondaryUpdate(orderIds[i], filledValue, false);
+            try this.processPrepSellLiquidCores(listingAddress, state, orderIds[i]) returns (uint256 filledValue) {
+                tempUpdates[validCount] = buildLiquidSecondaryUpdate(orderIds[i], filledValue, false);
+                validCount++;
+            } catch Error(string memory reason) {
+                emit OrderProcessingFailed(listingAddress, orderIds[i], false, reason);
+            } catch {
+                emit OrderProcessingFailed(listingAddress, orderIds[i], false, "Unknown error");
+            }
+        }
+        SecondaryOrderUpdate[] memory updates = new SecondaryOrderUpdate[](validCount);
+        for (uint256 i = 0; i < validCount; i++) {
+            updates[i] = tempUpdates[i];
         }
         return updates;
     }
