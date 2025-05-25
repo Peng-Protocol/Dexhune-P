@@ -1,6 +1,7 @@
+
 # OMF Contracts System Specification
 
-This document specifies the decentralized exchange (DEX) system comprising `OMFAgent.sol`, `OMFLiquidityTemplate.sol`, `OMFListingTemplate.sol`, `OMFListingLogic.sol`, `OMFLiquidityLogic.sol`, and `OMFRouter.sol` (incorporating `MainPartial.sol`, `OrderPartial.sol`, and `SettlementPartial.sol` as a single contract via imports). Built for Solidity 0.8.2 with BSD-3-Clause license, the contracts manage token listings - liquidity pools - order books - and settlements, price is acquired from an oracle address and function supplied in each listing, all assets are listed as ASSET/USD. The system ensures security, gas efficiency, and decimal normalization (18 decimals). `TokenRegistry.sol` is referenced for balance tracking but is not part of the OMF system. This specification details data structures, operations, and design considerations, incorporating the provided contracts.
+This document specifies the decentralized exchange (DEX) system comprising `OMFAgent.sol`, `OMFLiquidityTemplate.sol`, `OMFListingTemplate.sol`, `OMFListingLogic.sol`, `OMFLiquidityLogic.sol`, and `OMFRouter.sol` (incorporating `MainPartial.sol`, `OrderPartial.sol`, and `SettlementPartial.sol` as a single contract via imports). Built for Solidity 0.8.2 with BSD-3-Clause license, the contracts manage token listings, liquidity pools, order books, and settlements. Price is acquired from an oracle address and function supplied in each listing, with all assets listed as ASSET/USD. The system ensures security, gas efficiency, and decimal normalization (18 decimals). `TokenRegistry.sol` is referenced for balance tracking but is not part of the OMF system. This specification details data structures, operations, and design considerations, incorporating the provided contracts with updates for graceful degradation in settlement functions.
 
 ## OMFAgent.sol
 
@@ -140,7 +141,7 @@ This document specifies the decentralized exchange (DEX) system comprising `OMFA
   - Returns: `PreparedWithdrawal`.
 - **yPrepOut(caller, amount, index)** (onlyRouter):
   - Similar to `xPrepOut`, for baseToken.
-- **xExecuteOut(caller, index, withdrawal)** (onlyRouter, nonReentrant):
+- **xExecuteOut(caller, index, withdrawal)** (onlyRouter, non施行
   - Updates slot allocation, transfers tokens (denormalized), calls `transact`, `globalizeUpdate`, `updateRegistry`.
 - **yExecuteOut(caller, index, withdrawal)** (onlyRouter, nonReentrant):
   - Similar to `xExecuteOut`, for baseToken and token0.
@@ -248,13 +249,13 @@ This document specifies the decentralized exchange (DEX) system comprising `OMFA
   - Validates listing and `newDepositor`, calls `changeSlotDepositor`.
   - Emits: `DepositorChanged`.
 - **settleBuyOrders(listingAddress)**:
-  - Validates listing, executes buy orders via `executeBuyOrders`.
+  - Validates listing, executes buy orders via `executeBuyOrders` with graceful degradation.
 - **settleSellOrders(listingAddress)**:
-  - Validates listing, executes sell orders via `executeSellOrders`.
+  - Validates listing, executes sell orders via `executeSellOrders` with graceful degradation.
 - **settleBuyLiquid(listingAddress)**:
-  - Validates listing, executes buy orders with liquidity via `executeBuyLiquid`.
+  - Validates listing, executes buy orders with liquidity via `executeBuyLiquid` with graceful degradation.
 - **settleSellLiquid(listingAddress)**:
-  - Validates listing, executes sell orders with liquidity via `executeSellLiquid`.
+  - Validates listing, executes sell orders with liquidity via `executeSellLiquid` with graceful degradation.
 - **createBuyOrder(listingAddress, amount, maxPrice, minPrice, recipient)**:
   - Validates listing, prepares and applies order updates, emits `OrderCreated`.
 - **createSellOrder(listingAddress, amount, maxPrice, minPrice, recipient)**:
@@ -262,32 +263,46 @@ This document specifies the decentralized exchange (DEX) system comprising `OMFA
 
 ### 2. Internal Functions
 - **executeBuyOrders(listingAddress, count)**:
-  - Prepares state, processes primary and secondary updates.
+  - Prepares state, processes primary and secondary updates using `try/catch` for individual order failures.
+  - Skips failed orders (e.g., invalid status, insufficient balance) without reverting, emitting `OrderProcessingFailed`.
 - **executeSellOrders(listingAddress, count)**:
-  - Similar to `executeBuyOrders` for sell orders.
+  - Similar to `executeBuyOrders` for sell orders with graceful degradation.
 - **executeBuyLiquid(listingAddress, count)**:
   - Prepares state, fetches orders, processes primary updates, transfers to liquidity, processes secondary updates.
+  - Uses `try/catch` to skip failed orders, ensuring no listing or liquidity updates for failed orders.
 - **executeSellLiquid(listingAddress, count)**:
-  - Similar to `executeBuyLiquid` for sell orders.
+  - Similar to `executeBuyLiquid` for sell orders with graceful degradation.
 - **prepareExecutionState(listingAddress)**: Returns `LiquidExecutionState`.
 - **fetchPendingOrders(listingAddress, count, isBuy)**: Returns orderIds, adjusted count.
-- **processPrimaryUpdates(listingAddress, state, orderIds, count, isBuy)**: Prepares and applies primary updates.
-- **transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, isBuy)**: Transfers tokens to liquidity.
-- **processSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, count, isBuy)**: Prepares and applies secondary updates.
+- **processPrimaryUpdates(listingAddress, state, orderIds, count, isBuy)**:
+  - Prepares and applies primary updates using dynamic arrays, skipping failed orders.
+- **transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, isBuy)**:
+  - Transfers tokens to liquidity for successful orders only, using `try/catch`.
+- **processSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, count, isBuy)**:
+  - Prepares and applies secondary updates for successful orders only.
 - **prepBuyOrderCore**, **prepSellOrderCore**, **prepBuyOrderPricing**, **prepSellOrderPricing**, **prepBuyOrderAmounts**, **prepSellOrderAmounts**: Prepare order updates.
 - **applySinglePrimaryUpdate**, **applySingleSecondaryUpdate**: Apply single updates.
 - **prepBuyCores**, **prepSellCores**, **processPrepBuyCores**, **processPrepSellCores**: Process order updates for settlements.
+- **prepareBuyBatchPrimaryUpdates**, **prepareSellBatchPrimaryUpdates**, **prepareBuyBatchSecondaryUpdates**, **prepareSellBatchSecondaryUpdates**: Use `try/catch` to build dynamic arrays of successful updates.
+- **prepareBuyLiquidSecondaryUpdates**, **prepareSellLiquidSecondaryUpdates**: Similar to batch updates, ensuring no updates for failed orders.
 
-### 3. Design Notes
+### 3. Events
+- **OrderProcessingFailed(listingAddress, orderId, isBuy, reason)**:
+  - Emitted when an order fails processing (e.g., invalid status, token transfer failure).
+  - Ensures transparency for skipped orders during settlement.
+
+### 4. Design Notes
 - **Decimal Handling**: Uses `normalize`/`denormalize` from `MainPartial`.
-- **Gas Efficiency**: Splits updates to avoid stack issues. Loops bounded by `count`.
+- **Gas Efficiency**: Splits updates to avoid stack issues. Loops bounded by `count`. Graceful degradation via `try/catch` ensures partial processing without reverting.
 - **Access Control**: Public for user-facing functions.
 - **Registry Usage**: Relies on listing contract for registry interactions.
+- **Graceful Degradation**: Settlement functions (`settleBuyOrders`, `settleSellOrders`, `settleBuyLiquid`, `settleSellLiquid`) skip failed orders, emitting `OrderProcessingFailed` without affecting listing or liquidity state.
 
 ## System Considerations
-- **Security**: Ownable (`OMFAgent`), `onlyRouter` guards, non-reentrant functions, `SafeERC20`.
-- **Gas Efficiency**: Sparse storage, `maxIterations`, batch updates. Trend queries and `globalizeUpdate` risk high gas.
+- **Security**: Ownable (`OMFAgent`), `onlyRouter` guards, non-reentrant functions, `SafeERC20`, `try/catch` for external calls.
+- **Gas Efficiency**: Sparse storage, `maxIterations`, batch updates, dynamic arrays for successful orders only. Trend queries and `globalizeUpdate` risk high gas.
 - **Decimal Normalization**: 18 decimals using ERC20 `decimals` or oracle data.
 - **Registry Integration**: Optional in liquidity contracts, used in listings for balance tracking.
 - **Modularity**: Logic contracts and partials enhance maintainability.
+- **Graceful Degradation**: Settlement functions handle individual order failures implicitly, ensuring maximum order processing within block gas limits without state changes for failed orders.
 
