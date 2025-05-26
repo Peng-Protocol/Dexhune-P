@@ -1,7 +1,7 @@
 
 # Marker Foundry: Pairing (MFP) AMM-Orderbook Hybrid DEX Specification
 
-This document specifies the Marker Foundry: Pairing (MFP) protocol, a decentralized exchange (DEX) combining an automated market maker (AMM) with a limit orderbook. It details arrays, mappings, functions, and structs across its contracts, organized by suite: Router Suite (`MFPMainPartial.sol`, `MFPOrderPartial.sol`, `MFPSettlementPartial.sol`, `MFPRouter.sol`), Agent Suite (`MFPAgent.sol`, `MFPListingLogic.sol`, `MFPLiquidityLogic.sol`), Listing Template (`MFPListingTemplate.sol`, v0.0.15), and Liquidity Template (`MFPLiquidityTemplate.sol`, v0.0.17). All contracts use Solidity ^0.8.1 under the BSD-3-Clause license.
+This document specifies the Marker Foundry: Pairing (MFP) protocol, a decentralized exchange (DEX) combining an automated market maker (AMM) with a limit orderbook. It details arrays, mappings, functions, and structs across its contracts, organized by suite: Router Suite (`MFPMainPartial.sol`, `MFPOrderPartial.sol`, `MFPSettlementPartial.sol`, `MFPRouter.sol`), Agent Suite (`MFPAgent.sol`, `MFPListingLogic.sol`, `MFPLiquidityLogic.sol`), Listing Template (`MFPListingTemplate.sol`, v0.0.16), and Liquidity Template (`MFPLiquidityTemplate.sol`, v0.0.17). All contracts use Solidity ^0.8.2 under the BSD-3-Clause license.
 
 ## Protocol Overview
 
@@ -18,26 +18,25 @@ Handles user interactions, order creation, settlement with batch partial failure
 
 ### Contracts
 
-- **MFPMainPartial.sol**: Defines structs, interfaces, and helpers.
-- **MFPOrderPartial.sol**: Manages order creation/cancellation.
-- **MFPSettlementPartial.sol**: Handles orderbook/AMM settlement with batch partial settlement support.
-- **MFPRouter.sol**: User-facing interface with updated settlement functions.
+- **MFPMainPartial.sol** (v0.0.22): Defines structs, interfaces, and helpers. Updated `IMFPListing` to use `liquidityAddress()` without `listingId`.
+- **MFPOrderPartial.sol** (v0.0.20): Manages order creation/cancellation with helper functions for buy/sell orders.
+- **MFPSettlementPartial.sol** (v0.0.21): Handles orderbook/AMM settlement with batch partial settlement, using try-catch for robust error handling.
+- **MFPRouter.sol** (v0.0.26): User-facing interface with helper functions to mitigate stack depth issues and fixed try-catch in `processOrderSettlement`.
 
 ### Arrays
 
 - **MFPSettlementPartial.sol**:
   - `ListingUpdateType[]` in `prepBuyLiquid`, `prepSellLiquid`, `executeBuyOrders`, `executeSellOrders`: Stores order updates (core, pricing, amounts) for settlement.
-  - `uint256[] memory successfulOrders`, `uint256[] memory failedOrders` in `executeBuyOrders`, `executeSellOrders`, `executeBuyLiquid`, `executeSellLiquid`: Track successfully and failed settled orders in a batch.
+  - `uint256[] memory orderIds`, `uint256[] memory amounts` in settlement functions: Lists order IDs and amounts for batch settlement.
 
 - **MFPRouter.sol**:
-  - `ListingUpdateType[]` in `createBuyOrder`, `createSellOrder`: Combines order updates for creation.
+  - `ListingUpdateType[]` in `createBuyOrder`, `createSellOrder`, `settleBuyOrders`, `settleSellOrders`, `settleBuyLiquid`, `settleSellLiquid`: Combines order updates for creation and settlement.
   - `uint256[] memory orderIds`, `uint256[] memory amounts` in settlement functions: Lists order IDs and amounts for batch settlement.
-  - `uint256[] memory successfulOrders`, `uint256[] memory failedOrders` in `settleBuyOrders`, `settleSellOrders`, `settleBuyLiquid`, `settleSellLiquid`: Return batch settlement results.
 
 ### Mappings
 
 - **MFPRouter.sol**:
-  - `mapping(uint256 => address) public liquidityAddresses`: Maps listing ID to liquidity contract address for AMM interactions.
+  - None defined; relies on inherited mappings from parent contracts.
 
 ### Structs
 
@@ -53,6 +52,9 @@ Handles user interactions, order creation, settlement with batch partial failure
   - `PreparedWithdrawal`: Stores withdrawal amounts and fees.
   - `OrderPrep`, `BuyOrderDetails`, `SellOrderDetails`, `PreparedUpdate`, `SettlementData`: Helper structs for order processing.
 
+- **MFPRouter.sol**:
+  - `OrderContext`: Groups `tokenA`, `tokenB`, `listingId`, `liquidityAddress` to reduce stack usage.
+
 ### Functions
 
 - **MFPMainPartial.sol (Internal)**:
@@ -67,32 +69,42 @@ Handles user interactions, order creation, settlement with batch partial failure
   - `prepBuyOrderCore`, `prepBuyOrderPricing`, `prepBuyOrderAmounts`: Prepare buy order updates (maker, prices, amounts).
   - `prepSellOrderCore`, `prepSellOrderPricing`, `prepSellOrderAmounts`: Prepare sell order updates.
   - `executeBuyOrderCore`, `executeBuyOrderPricing`, `executeBuyOrderAmounts`: Fetch buy order updates for settlement, support partial filling via pending amount updates.
-  - `executeBuyOrder`, `executeSellOrder`: Combine updates for settlement, validate impact price against price bounds, settle requested amount or revert.
+  - `executeSellOrderCore`, `executeSellOrderPricing`, `executeSellOrderAmounts`: Fetch sell order updates for settlement.
+  - `executeBuyOrder`, `executeSellOrder`: Combine updates for settlement, validate impact price against price bounds, settle requested amount or return empty array.
   - `clearSingleOrder`, `clearOrders`: Cancel one or multiple orders via `IMFPListing`.
 
 - **MFPSettlementPartial.sol (Internal)**:
-  - `prepBuyLiquid`, `prepSellLiquid`: Prepare AMM-based buy/sell settlement updates.
-  - `executeBuyLiquid`, `executeSellLiquid`: Execute AMM-based settlements, return successful/failed orders for batch partial settlement.
-  - `executeBuyOrders`, `executeSellOrders`: Execute orderbook-based settlements, return successful/failed orders with try-catch for batch partial settlement.
+  - `prepBuyLiquid`, `prepSellLiquid`: Prepare AMM-based buy/sell settlement updates with try-catch.
+  - `executeBuyLiquid`, `executeSellLiquid`: Execute AMM-based settlements, apply updates for successful orders.
+  - `executeBuyOrders`, `executeSellOrders`: Execute orderbook-based settlements, apply updates for successful orders with try-catch.
+  - `processOrder`: Executes single order settlement, returns updates.
   - Events: 
-    - `OrderSettlementFailed(address indexed listingAddress, uint256 orderId, string reason)`: Emitted for failed order settlements in a batch.
+    - `OrderSettlementFailed(uint256 orderId, string reason)`: Emitted for failed order settlements.
 
 - **MFPRouter.sol**:
   - External: 
     - `createBuyOrder`, `createSellOrder`: Create limit orders, transfer tokens, update via `IMFPListing`.
-    - `settleBuyOrders`, `settleSellOrders`: Settle orders using orderbook balances, return successful/failed orders for batch partial settlement.
-    - `settleBuyLiquid`, `settleSellLiquid`: Settle orders using AMM pools, return successful/failed orders for batch partial settlement.
+    - `settleBuyOrders`, `settleSellOrders`: Settle orderbook batches with partial failure handling.
+    - `settleBuyLiquid`, `settleSellLiquid`: Settle AMM batches with partial failure handling.
     - `deposit`: Adds tokens to AMM pool.
     - `withdraw`: Removes tokens from AMM pool.
     - `claimFees`: Claims AMM fees for user.
     - `clearSingleOrder`, `clearOrders`: Cancel orders.
     - `viewLiquidity`: Returns liquidity amounts via `IMFPLiquidityTemplate`.
   - External (onlyOwner): 
-    - `setListingAgent`, `setOrderLibrary`, `setAgent`, `setRegistry`, `setLiquidityAddress`: Configure contract addresses.
+    - `setListingAgent`, `setOrderLibrary`, `setAgent`, `setRegistry`: Configure contract addresses.
+  - Internal:
+    - `validateListing`: Verifies listing and returns `OrderContext`.
+    - `transferOrderToken`: Transfers tokens for order creation.
+    - `prepareOrderUpdates`: Combines order updates for creation.
+    - `validateLiquidSettlement`: Validates AMM settlement inputs.
+    - `processOrderSettlement`: Processes individual order settlements with try-catch.
+    - `finalizeSettlement`: Applies final updates.
   - Events: 
-    - `LiquidityAddressSet`: Emitted when liquidity address is set.
-    - `OrderCreated`: Emitted on order creation.
-    - `OrderCancelled`: Emitted on order cancellation.
+    - `OrderCreated(address indexed listingAddress, address maker, uint256 amount, bool isBuy)`: Emitted on order creation.
+    - `OrderCancelled(address listingAddress, uint256 orderId)`: Emitted on order cancellation.
+    - `OrderSettlementSkipped(uint256 orderId, string reason)`: Emitted for skipped settlements.
+    - `OrderSettlementFailed(uint256 orderId, string reason)`: Emitted for failed settlements.
 
 ## Agent Suite
 
@@ -100,7 +112,7 @@ Manages pair listings, deployments, and global tracking, supporting native ETH p
 
 ### Contracts
 
-- **MFPAgent.sol**: Tracks liquidity, orders, and lists pairs, compatible with native token pairs.
+- **MFPAgent.sol** (v0.0.12): Tracks liquidity, orders, and lists pairs, compatible with native token pairs.
 - **MFPListingLogic.sol**: Deploys listing templates.
 - **MFPLiquidityLogic.sol**: Deploys liquidity templates.
 
@@ -108,7 +120,7 @@ Manages pair listings, deployments, and global tracking, supporting native ETH p
 
 - **MFPAgent.sol**:
   - `address[] public allListings`: Stores all listing contract addresses.
-  - `address[] public allListedTokens`: Lists unique tokens in listings.
+  - `address[] publicAddress`: Lists unique tokens in listings.
   - `uint256[] public queryByAddress`: Maps tokens to listing IDs.
   - `uint256[] public pairOrders`: Tracks order IDs per token pair.
   - `uint256[] public userOrders`: Tracks order IDs per user.
@@ -116,17 +128,17 @@ Manages pair listings, deployments, and global tracking, supporting native ETH p
 ### Mappings
 
 - **MFPAgent.sol**:
-  - `mapping(address => mapping(address => address)) public getListing`: Maps tokenA, tokenB to listing address.
+  - `mapping(address => mapping(address => address)) public getMapping`: Maps tokenA, tokenB to listing address.
   - `mapping(address => uint256[]) public queryByAddress`: Maps token to listing IDs.
-  - `mapping(address => mapping(address => mapping(address => uint256))) public globalLiquidity`: Maps tokenA, tokenB, user to liquidity amount.
+  - `mapping(address => mapping(address => mapping(address => uint256))) public globalLiquidity`: Maps tokenA, tokenB, user to amount.
   - `mapping(address => mapping(address => uint256)) public totalLiquidityPerPair`: Maps tokenA, tokenB to total liquidity.
   - `mapping(address => uint256) public userTotalLiquidity`: Maps user to total liquidity across pairs.
-  - `mapping(uint256 => mapping(address => uint256)) public listingLiquidity`: Maps listing ID, user to liquidity amount.
-  - `mapping(address => mapping(address => mapping(uint256 => uint256))) public historicalLiquidityPerPair`: Maps tokenA, tokenB, timestamp to liquidity.
-  - `mapping(address => mapping(address => mapping(address => mapping(uint256 => uint256)))) public historicalLiquidityPerUser`: Maps tokenA, tokenB, user, timestamp to liquidity.
-  - `mapping(address => mapping(address => mapping(uint256 => GlobalOrder))) public globalOrders`: Maps tokenA, tokenB, order ID to order details.
+  - `mapping(uint256 => mapping(address => uint256)) public listingLiquidity`: Maps listing ID, user to amount.
+  - `mapping(address => mapping(address => mapping(uint256 => uint256))) public historicalLiquidityPerPair`: Maps tokenA, tokenB, timestamp to amount.
+  - `mapping(address => mapping(address => mapping(address => uint256))) public historicalLiquidityPerUser`: Maps tokenA, tokenB, user, timestamp to amounts.
+  - `mapping(address => mapping(address => mapping(uint256 => GlobalOrder))) public globalOrders`: Maps tokenA, tokenB, order ID to details.
   - `mapping(address => mapping(address => mapping(uint256 => mapping(uint256 => uint8)))) public historicalOrderStatus`: Maps tokenA, tokenB, order ID, timestamp to status.
-  - `mapping(address => mapping(address => mapping(address => uint256))) public userTradingSummaries`: Maps user, tokenA, tokenB to trading volume.
+  - `mapping(address => mapping(address => mapping(address => uint256))) public userTradingSummaries`: Maps user, tokenA, tokenB to volume.
 
 ### Structs
 
@@ -149,14 +161,14 @@ Manages pair listings, deployments, and global tracking, supporting native ETH p
 - **MFPAgent.sol**:
   - External: 
     - `listToken`: Deploys and initializes token pair listing.
-    - `listNative`: Deploys and initializes ETH pair listing.
+    - `listNative`: Deploys and initializes native ETH pair listing.
     - `globalizeLiquidity`: Updates global liquidity tracking.
-    - `globalizeOrders`: Updates global order tracking, supports native token pairs.
+    - `globalizeOrders`: Updates global order, supports native tokens.
   - External (onlyOwner): 
     - `setRouter`, `setListingLogic`, `setLiquidityLogic`, `setRegistry`: Configure contract addresses.
   - View: 
     - `getUserLiquidityAcrossPairs`: Returns user’s liquidity per pair.
-    - `getTopLiquidityProviders`: Lists top liquidity providers.
+    - `getTopLiquidityProviders`: Returns top liquidity providers.
     - `getUserLiquidityShare`: Returns user’s share in a pair.
     - `getAllPairsByLiquidity`: Lists pairs by liquidity.
     - `getPairLiquidityTrend`: Returns liquidity trend for a pair.
@@ -180,9 +192,9 @@ Manages pair listings, deployments, and global tracking, supporting native ETH p
     - `GlobalLiquidityChanged`: Emitted on liquidity update.
     - `GlobalOrderChanged`: Emitted on order update.
 
-## Listing Template
+## Listings Template
 
-Manages orderbooks, balances, and yield queries, supporting partial order filling via pending amount updates.
+Manages orderbooks, balances, and yield queries, supporting partial filling via pending amount updates.
 
 ### Arrays
 
@@ -194,14 +206,9 @@ Manages orderbooks, balances, and yield queries, supporting partial order fillin
 ### Mappings
 
 - `mapping(uint256 => VolumeBalance) public volumeBalances`: Maps listing ID to token balances and volumes.
-- `mapping(uint256 => address) public liquidityAddresses`: Maps listing ID to liquidity contract address.
 - `mapping(uint256 => uint256) public prices`: Maps listing ID to current price (xBalance * 1e18 / yBalance).
-- `mapping(uint256 => BuyOrderCore) public buyOrderCores`: Maps order ID to buy order maker, recipient, status.
-- `mapping(uint256 => BuyOrderPricing) public buyOrderPricings`: Maps order ID to buy order price bounds.
-- `mapping(uint256 => BuyOrderAmounts) public buyOrderAmounts`: Maps order ID to buy order amounts, updated for partial fills.
-- `mapping(uint256 => SellOrderCore) public sellOrderCores`: Maps order ID to sell order maker, recipient, status.
-- `mapping(uint256 => SellOrderPricing) public sellOrderPricings`: Maps order ID to sell order price bounds.
-- `mapping(uint256 => SellOrderAmounts) public sellOrderAmounts`: Maps order ID to sell order amounts, updated for partial fills.
+- `mapping(uint256 => BuyOrderDetailsType) public buyOrders`: Maps order ID to buy order maker, core, pricing, amounts.
+- `mapping(uint256 => SellOrderDetailsType) public sellOrders`: Maps order ID to sell order maker, core, pricing, amounts.
 - `mapping(uint256 => bool) public isBuyOrderComplete`: Maps order ID to buy order completion status.
 - `mapping(uint256 => bool) public isSellOrderComplete`: Maps order ID to sell order completion status.
 
@@ -218,7 +225,7 @@ Manages orderbooks, balances, and yield queries, supporting partial order fillin
 - External:
   - `setRouter`: Sets router address.
   - `setListingId`: Sets listing ID.
-  - `setLiquidityAddress`: Sets liquidity contract address.
+  - `setLiquidityAddress`: Sets liquidity contract address (single address, v0.0.16).
   - `setTokens`: Sets tokenA, tokenB addresses.
   - `setAgent`: Sets agent address.
   - `setRegistry`: Sets token registry address.
@@ -264,7 +271,7 @@ Manages AMM pools, fees, and liquidity operations.
 
 ### Mappings
 
-- `mapping(uint256 => Slot) public xLiquiditySlots`: Maps slot index to tokenA slot details (depositor, allocation, volume).
+- `mapping(uint256 => Slot) public xLiquiditySlots`: Maps slot index to tokenA slot details.
 - `mapping(uint256 => Slot) public yLiquiditySlots`: Maps slot index to tokenB slot details.
 - `mapping(address => uint256[]) public userIndex`: Maps user to their slot indices.
 
