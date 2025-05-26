@@ -1,487 +1,323 @@
-# **Premise**
-A succinct and homogenized version of `MF-PairingFoundry.md` and `MF-FixedFoundry.md`. 
 
-# **General**
-The system is made up of (4) contracts, `MFP-Listing`, `MFP-Liquidity`, `MFP-Router`, `MFP-Agent`. 
+# Marker Foundry: Pairing (MFP) AMM-Orderbook Hybrid DEX Specification
+
+This document specifies the Marker Foundry: Pairing (MFP) protocol, a decentralized exchange (DEX) combining an automated market maker (AMM) with a limit orderbook. It details arrays, mappings, functions, and structs across its contracts, organized by suite: Router Suite (`MFPMainPartial.sol`, `MFPOrderPartial.sol`, `MFPSettlementPartial.sol`, `MFPRouter.sol`), Agent Suite (`MFPAgent.sol`, `MFPListingLogic.sol`, `MFPLiquidityLogic.sol`), Listing Template (`MFPListingTemplate.sol`, v0.0.15), and Liquidity Template (`MFPLiquidityTemplate.sol`, v0.0.17). All contracts use Solidity ^0.8.1 under the BSD-3-Clause license.
+
+## Protocol Overview
+
+MFP enables hybrid trading with limit orders and AMM liquidity pools, supporting ERC20 tokens and ETH. Users place limit orders, provide liquidity, and earn 0.05% fees. Global tracking enhances integration. Key features:
 
----
+- **Orderbook**: Limit orders with price bounds, settled within user-defined ranges using impact price validation, supporting partial filling of individual orders over multiple transactions.
+- **AMM**: Liquidity pools with fee distribution.
+- **Global Sync**: Tracks liquidity/orders across pairs, supporting native ETH pairs.
+- **Deterministic Deployment**: Consistent contract addresses.
+
+## Router Suite
+
+Handles user interactions, order creation, settlement with batch partial failure handling, and shared logic. Supports partial settlement of batches (some orders settle, others fail) and incremental partial filling of individual orders.
+
+### Contracts
+
+- **MFPMainPartial.sol**: Defines structs, interfaces, and helpers.
+- **MFPOrderPartial.sol**: Manages order creation/cancellation.
+- **MFPSettlementPartial.sol**: Handles orderbook/AMM settlement with batch partial settlement support.
+- **MFPRouter.sol**: User-facing interface with updated settlement functions.
+
+### Arrays
+
+- **MFPSettlementPartial.sol**:
+  - `ListingUpdateType[]` in `prepBuyLiquid`, `prepSellLiquid`, `executeBuyOrders`, `executeSellOrders`: Stores order updates (core, pricing, amounts) for settlement.
+  - `uint256[] memory successfulOrders`, `uint256[] memory failedOrders` in `executeBuyOrders`, `executeSellOrders`, `executeBuyLiquid`, `executeSellLiquid`: Track successfully and failed settled orders in a batch.
+
+- **MFPRouter.sol**:
+  - `ListingUpdateType[]` in `createBuyOrder`, `createSellOrder`: Combines order updates for creation.
+  - `uint256[] memory orderIds`, `uint256[] memory amounts` in settlement functions: Lists order IDs and amounts for batch settlement.
+  - `uint256[] memory successfulOrders`, `uint256[] memory failedOrders` in `settleBuyOrders`, `settleSellOrders`, `settleBuyLiquid`, `settleSellLiquid`: Return batch settlement results.
+
+### Mappings
+
+- **MFPRouter.sol**:
+  - `mapping(uint256 => address) public liquidityAddresses`: Maps listing ID to liquidity contract address for AMM interactions.
+
+### Structs
+
+- **MFPMainPartial.sol**:
+  - `ListingUpdateType`: Defines orderbook update fields (core, pricing, amounts).
+  - `VolumeBalance`: Tracks token balances and trading volumes.
+  - `BuyOrderCore`, `BuyOrderPricing`, `BuyOrderAmounts`: Store buy order maker, recipient, status, prices, and amounts.
+  - `SellOrderCore`, `SellOrderPricing`, `SellOrderAmounts`: Store sell order equivalents.
+  - `HistoricalData`: Records trade price, balances, volumes, timestamp.
+  - `LiquidityDetails`: Tracks AMM pool balances and fees.
+  - `Slot`: Defines liquidity slot depositor, allocation, volume, timestamp.
+  - `UpdateType`: Defines AMM update fields.
+  - `PreparedWithdrawal`: Stores withdrawal amounts and fees.
+  - `OrderPrep`, `BuyOrderDetails`, `SellOrderDetails`, `PreparedUpdate`, `SettlementData`: Helper structs for order processing.
+
+### Functions
+
+- **MFPMainPartial.sol (Internal)**:
+  - `normalize(uint256 amount, uint8 decimals)`: Converts amount to 18 decimals.
+  - `denormalize(uint256 amount, uint8 decimals)`: Converts from 18 decimals.
+  - `calculateImpactPrice(uint256 amount, uint256 price, uint256 balance)`: Calculates impact price for validation against order price bounds.
+  - `_transferToken(address token, address from, address to, uint256 amount)`: Transfers tokens or ETH, checks for transfer fees.
+  - `_normalizeAndFee(address token, uint256 amount, bool isBuy)`: Normalizes amount, applies 0.05% fee.
+  - `_createOrderUpdate(...)`: Builds order update array.
+
+- **MFPOrderPartial.sol (Internal)**:
+  - `prepBuyOrderCore`, `prepBuyOrderPricing`, `prepBuyOrderAmounts`: Prepare buy order updates (maker, prices, amounts).
+  - `prepSellOrderCore`, `prepSellOrderPricing`, `prepSellOrderAmounts`: Prepare sell order updates.
+  - `executeBuyOrderCore`, `executeBuyOrderPricing`, `executeBuyOrderAmounts`: Fetch buy order updates for settlement, support partial filling via pending amount updates.
+  - `executeBuyOrder`, `executeSellOrder`: Combine updates for settlement, validate impact price against price bounds, settle requested amount or revert.
+  - `clearSingleOrder`, `clearOrders`: Cancel one or multiple orders via `IMFPListing`.
+
+- **MFPSettlementPartial.sol (Internal)**:
+  - `prepBuyLiquid`, `prepSellLiquid`: Prepare AMM-based buy/sell settlement updates.
+  - `executeBuyLiquid`, `executeSellLiquid`: Execute AMM-based settlements, return successful/failed orders for batch partial settlement.
+  - `executeBuyOrders`, `executeSellOrders`: Execute orderbook-based settlements, return successful/failed orders with try-catch for batch partial settlement.
+  - Events: 
+    - `OrderSettlementFailed(address indexed listingAddress, uint256 orderId, string reason)`: Emitted for failed order settlements in a batch.
+
+- **MFPRouter.sol**:
+  - External: 
+    - `createBuyOrder`, `createSellOrder`: Create limit orders, transfer tokens, update via `IMFPListing`.
+    - `settleBuyOrders`, `settleSellOrders`: Settle orders using orderbook balances, return successful/failed orders for batch partial settlement.
+    - `settleBuyLiquid`, `settleSellLiquid`: Settle orders using AMM pools, return successful/failed orders for batch partial settlement.
+    - `deposit`: Adds tokens to AMM pool.
+    - `withdraw`: Removes tokens from AMM pool.
+    - `claimFees`: Claims AMM fees for user.
+    - `clearSingleOrder`, `clearOrders`: Cancel orders.
+    - `viewLiquidity`: Returns liquidity amounts via `IMFPLiquidityTemplate`.
+  - External (onlyOwner): 
+    - `setListingAgent`, `setOrderLibrary`, `setAgent`, `setRegistry`, `setLiquidityAddress`: Configure contract addresses.
+  - Events: 
+    - `LiquidityAddressSet`: Emitted when liquidity address is set.
+    - `OrderCreated`: Emitted on order creation.
+    - `OrderCancelled`: Emitted on order cancellation.
+
+## Agent Suite
+
+Manages pair listings, deployments, and global tracking, supporting native ETH pairs.
+
+### Contracts
+
+- **MFPAgent.sol**: Tracks liquidity, orders, and lists pairs, compatible with native token pairs.
+- **MFPListingLogic.sol**: Deploys listing templates.
+- **MFPLiquidityLogic.sol**: Deploys liquidity templates.
+
+### Arrays
+
+- **MFPAgent.sol**:
+  - `address[] public allListings`: Stores all listing contract addresses.
+  - `address[] public allListedTokens`: Lists unique tokens in listings.
+  - `uint256[] public queryByAddress`: Maps tokens to listing IDs.
+  - `uint256[] public pairOrders`: Tracks order IDs per token pair.
+  - `uint256[] public userOrders`: Tracks order IDs per user.
+
+### Mappings
+
+- **MFPAgent.sol**:
+  - `mapping(address => mapping(address => address)) public getListing`: Maps tokenA, tokenB to listing address.
+  - `mapping(address => uint256[]) public queryByAddress`: Maps token to listing IDs.
+  - `mapping(address => mapping(address => mapping(address => uint256))) public globalLiquidity`: Maps tokenA, tokenB, user to liquidity amount.
+  - `mapping(address => mapping(address => uint256)) public totalLiquidityPerPair`: Maps tokenA, tokenB to total liquidity.
+  - `mapping(address => uint256) public userTotalLiquidity`: Maps user to total liquidity across pairs.
+  - `mapping(uint256 => mapping(address => uint256)) public listingLiquidity`: Maps listing ID, user to liquidity amount.
+  - `mapping(address => mapping(address => mapping(uint256 => uint256))) public historicalLiquidityPerPair`: Maps tokenA, tokenB, timestamp to liquidity.
+  - `mapping(address => mapping(address => mapping(address => mapping(uint256 => uint256)))) public historicalLiquidityPerUser`: Maps tokenA, tokenB, user, timestamp to liquidity.
+  - `mapping(address => mapping(address => mapping(uint256 => GlobalOrder))) public globalOrders`: Maps tokenA, tokenB, order ID to order details.
+  - `mapping(address => mapping(address => mapping(uint256 => mapping(uint256 => uint8)))) public historicalOrderStatus`: Maps tokenA, tokenB, order ID, timestamp to status.
+  - `mapping(address => mapping(address => mapping(address => uint256))) public userTradingSummaries`: Maps user, tokenA, tokenB to trading volume.
+
+### Structs
+
+- **MFPAgent.sol**:
+  - `InitData`: Stores pair initialization data (tokens, listing ID).
+  - `TrendData`: Tracks liquidity/order trends over time.
+  - `GlobalOrder`: Stores global order details (maker, amount, price).
+  - `OrderData`: Stores order view data for queries.
+
+### Functions
+
+- **MFPListingLogic.sol**:
+  - External: 
+    - `deploy(bytes32 salt)`: Deploys `MFPListingTemplate` with deterministic salt.
+
+- **MFPLiquidityLogic.sol**:
+  - External: 
+    - `deploy(bytes32 salt)`: Deploys `MFPLiquidityTemplate` with deterministic salt.
+
+- **MFPAgent.sol**:
+  - External: 
+    - `listToken`: Deploys and initializes token pair listing.
+    - `listNative`: Deploys and initializes ETH pair listing.
+    - `globalizeLiquidity`: Updates global liquidity tracking.
+    - `globalizeOrders`: Updates global order tracking, supports native token pairs.
+  - External (onlyOwner): 
+    - `setRouter`, `setListingLogic`, `setLiquidityLogic`, `setRegistry`: Configure contract addresses.
+  - View: 
+    - `getUserLiquidityAcrossPairs`: Returns user’s liquidity per pair.
+    - `getTopLiquidityProviders`: Lists top liquidity providers.
+    - `getUserLiquidityShare`: Returns user’s share in a pair.
+    - `getAllPairsByLiquidity`: Lists pairs by liquidity.
+    - `getPairLiquidityTrend`: Returns liquidity trend for a pair.
+    - `getUserLiquidityTrend`: Returns user’s liquidity trend.
+    - `getOrderActivityByPair`: Returns order activity for a pair.
+    - `getUserTradingProfile`: Returns user’s trading summary.
+    - `getTopTradersByVolume`: Lists top traders by volume.
+    - `getAllPairsByOrderVolume`: Lists pairs by order volume.
+    - `queryByAddressView`: Returns listing IDs for a token.
+    - `allListingsLength`: Returns number of listings.
+  - Internal: 
+    - `tokenExists`: Checks if token is listed.
+    - `_deployPair`: Deploys listing and liquidity contracts.
+    - `_initializePair`: Initializes pair contracts.
+    - `_updateState`: Updates global state.
+    - `prepListing`, `executeListing`: Prepare/execute listing deployment.
+    - `_updateGlobalLiquidity`: Updates liquidity mappings.
+    - `_sortDescending`: Sorts arrays in descending order.
+  - Events: 
+    - `ListingCreated`: Emitted on pair listing.
+    - `GlobalLiquidityChanged`: Emitted on liquidity update.
+    - `GlobalOrderChanged`: Emitted on order update.
+
+## Listing Template
+
+Manages orderbooks, balances, and yield queries, supporting partial order filling via pending amount updates.
+
+### Arrays
+
+- `uint256[] public pendingBuyOrders`: Lists active buy order IDs.
+- `uint256[] public pendingSellOrders`: Lists active sell order IDs.
+- `uint256[] public makerPendingOrders`: Lists order IDs per maker.
+- `HistoricalData[] public historicalData`: Stores trade history (price, balances, volumes, timestamp).
+
+### Mappings
+
+- `mapping(uint256 => VolumeBalance) public volumeBalances`: Maps listing ID to token balances and volumes.
+- `mapping(uint256 => address) public liquidityAddresses`: Maps listing ID to liquidity contract address.
+- `mapping(uint256 => uint256) public prices`: Maps listing ID to current price (xBalance * 1e18 / yBalance).
+- `mapping(uint256 => BuyOrderCore) public buyOrderCores`: Maps order ID to buy order maker, recipient, status.
+- `mapping(uint256 => BuyOrderPricing) public buyOrderPricings`: Maps order ID to buy order price bounds.
+- `mapping(uint256 => BuyOrderAmounts) public buyOrderAmounts`: Maps order ID to buy order amounts, updated for partial fills.
+- `mapping(uint256 => SellOrderCore) public sellOrderCores`: Maps order ID to sell order maker, recipient, status.
+- `mapping(uint256 => SellOrderPricing) public sellOrderPricings`: Maps order ID to sell order price bounds.
+- `mapping(uint256 => SellOrderAmounts) public sellOrderAmounts`: Maps order ID to sell order amounts, updated for partial fills.
+- `mapping(uint256 => bool) public isBuyOrderComplete`: Maps order ID to buy order completion status.
+- `mapping(uint256 => bool) public isSellOrderComplete`: Maps order ID to sell order completion status.
+
+### Structs
+
+- `ListingUpdateType`: Defines orderbook update fields.
+- `VolumeBalance`: Tracks balances and volumes.
+- `BuyOrderCore`, `BuyOrderPricing`, `BuyOrderAmounts`: Store buy order data.
+- `SellOrderCore`, `SellOrderPricing`, `SellOrderAmounts`: Store sell order data.
+- `HistoricalData`: Stores trade history.
+
+### Functions
+
+- External:
+  - `setRouter`: Sets router address.
+  - `setListingId`: Sets listing ID.
+  - `setLiquidityAddress`: Sets liquidity contract address.
+  - `setTokens`: Sets tokenA, tokenB addresses.
+  - `setAgent`: Sets agent address.
+  - `setRegistry`: Sets token registry address.
+  - `update(address caller, ListingUpdateType[] memory updates)`: Updates balances, orders, historical data, triggers `globalizeOrders`.
+  - `transact(address caller, address token, uint256 amount, address recipient)`: Transfers tokens, updates balances.
+  - `nextOrderId`: Increments and returns order ID.
+  - `queryYield(bool isX, uint256 maxIterations)`: Calculates APY from volume and liquidity.
+- View:
+  - `listingVolumeBalancesView`: Returns balances and volumes.
+  - `listingPriceView`: Returns current price.
+  - `pendingBuyOrdersView`, `pendingSellOrdersView`: Return active order IDs.
+  - `makerPendingOrdersView`: Returns maker’s orders.
+  - `getHistoricalDataView`: Returns trade history.
+  - `historicalDataLengthView`: Returns history length.
+  - `getHistoricalDataByNearestTimestamp`: Returns history by timestamp.
+  - `buyOrderCoreView`, `buyOrderPricingView`, `buyOrderAmountsView`: Return buy order data.
+  - `sellOrderCoreView`, `sellOrderPricingView`, `sellOrderAmountsView`: Return sell order data.
+  - `isOrderCompleteView`: Returns order completion status.
+  - `getListingId`: Returns listing ID.
+  - `getRegistryAddress`: Returns registry address.
+- Internal:
+  - `normalize`, `denormalize`: Adjust decimals.
+  - `removePendingOrder`: Removes order from pending lists.
+  - `globalizeUpdate`: Syncs updates with agent.
+  - `_updateRegistry`: Updates token registry.
+  - `_isSameDay`: Checks if timestamps are same day.
+  - `_floorToMidnight`: Floors timestamp to midnight.
+  - `_findVolumeChange`: Calculates volume change.
+- Events:
+  - `OrderUpdated`: Emitted on order update.
+  - `BalancesUpdated`: Emitted on balance update.
+  - `RegistryUpdateFailed`: Emitted on registry update failure.
+
+## Liquidity Template
+
+Manages AMM pools, fees, and liquidity operations.
+
+### Arrays
+
+- `uint256[] public activeXLiquiditySlots`: Lists active tokenA liquidity slot indices.
+- `uint256[] public activeYLiquiditySlots`: Lists active tokenB liquidity slot indices.
+- `uint256[] public userIndex`: Maps users to their slot indices.
+
+### Mappings
+
+- `mapping(uint256 => Slot) public xLiquiditySlots`: Maps slot index to tokenA slot details (depositor, allocation, volume).
+- `mapping(uint256 => Slot) public yLiquiditySlots`: Maps slot index to tokenB slot details.
+- `mapping(address => uint256[]) public userIndex`: Maps user to their slot indices.
+
+### Structs
+
+- `LiquidityDetails`: Tracks pool balances and fees.
+- `Slot`: Stores slot depositor, allocation, volume, timestamp.
+- `UpdateType`: Defines AMM update fields.
+- `PreparedWithdrawal`: Stores withdrawal amounts and fees.
+
+### Functions
+
+- External:
+  - `setRouter`: Sets router address.
+  - `setListingId`: Sets listing ID.
+  - `setListingAddress`: Sets listing contract address.
+  - `setTokens`: Sets tokenA, tokenB addresses.
+  - `setAgent`: Sets agent address.
+  - `update(address caller, UpdateType[] memory updates)`: Updates pool balances, fees, slots.
+  - `globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit)`: Syncs liquidity with agent.
+  - `changeSlotDepositor`: Updates slot depositor address.
+  - `claimFees`: Claims fees based on volume share.
+  - `addFees`: Adds fees to pool.
+  - `deposit`: Deposits tokens to pool.
+  - `transact`: Transfers tokens from pool.
+  - `xPrepOut`, `yPrepOut`: Prepare tokenA, tokenB withdrawal amounts.
+  - `xExecuteOut`, `yExecuteOut`: Execute tokenA, tokenB withdrawals.
+- View:
+  - `liquidityAmounts`: Returns pool liquidity amounts.
+  - `feeAmounts`: Returns accumulated fees.
+  - `liquidityDetailsView`: Returns pool details.
+  - `activeXLiquiditySlotsView`, `activeYLiquiditySlotsView`: Return active slot indices.
+  - `userIndexView`: Returns user’s slot indices.
+  - `getXSlotView`, `getYSlotView`: Return slot details.
+  - `getListingId`: Returns listing ID.
+  - `validateListing`: Validates listing address.
+- Internal:
+  - `normalize`, `denormalize`: Adjust decimals.
+  - `updateRegistry`: Updates token registry.
+  - `removeSlot`: Removes slot from active list.
+  - `calculateFeeShare`: Calculates user’s fee share.
+- Events:
+  - `LiquidityUpdated`: Emitted on pool update.
+  - `FeesUpdated`: Emitted on fee update.
+  - `FeesClaimed`: Emitted on fee claim.
+  - `GlobalLiquidityUpdated`: Emitted on global sync.
+  - `SlotDepositorChanged`: Emitted on depositor change.
+  - `RegistryUpdateFailed`: Emitted on registry update failure.
+
+## Real-World Applications
+
+- **Hybrid DEX**: Combines limit orders and AMM (e.g., Uniswap with orderbook).
+- **Yield Farming**: Earn 0.05% fees via `claimFees` (e.g., DeFi platforms).
+- **DeFi Infrastructure**: Price feeds for lending (e.g., collateralized loans).
+- **Analytics**: `MFPAgent` view functions for insights (e.g., DeFi dashboards).
 
-## **MFP-Listing**
-
-### **Data**
-- routerAddress 
-
-Stores the valid router address that can call `transact` or `update`. 
-
-- Listing Data (6) 
-
-Separate Mappings
-Contract Name : (string), 
-Token-A address : (address), 
-Token-B address : (address), 
-Price : (uint256), 
-Liquidity Address : (address), 
-
-Struct for Volume and Balance data, 
-Same Mapping
-xBalance : (uint256), 
-yBalance : (uint256),
-xVolume : (uint256), 
-yVolume : (uint256), 
-
-`Token-$ address` can be `0` indicating [NATIVE]. 
-
-- Buy Order Slots (9)
-
-A struct for buy orders,
-
-Maker Address: (address),
-Recipient Address: (address),
-Max Price: (uint256),
-Min Price: (uint256),
-Principal:  (`TOKEN-0`),
-Pending:  (`TOKEN-0`),
-Filled : (uint256), 
-Order ID: (uint256),
-Status: (uint256),
-
-`Recipient Address` is where the settlement is sent, this is necessary for Multihop. 
-
-`Filled` stores how much of the destination token the maker has received, is updated after every settlement - partial or whole. Router checks the recipient address before and after settlement to note actual filled amount in case of tax on transfer. 
-
-`Status` is `Pending`, `Filled`, or `Cancelled` (1, 2, 3), Cancelled orders can No longer be settled. 
-
-
-- Sell Order Slots (9)
-
-Same as "Buy Order Slots" but for sell orders. But `Principal` and `Pending` are in Token-1. 
-
-
-- price 
-
-Price is calculated as; 
-
-`Token-0 Balance / Token-1 Balance`
-
-
-If price can not be acquired then default price is lowest divisible unit of Token-1 
-
-Whenever price is updated, the prior price becomes historical, this updates all historical data as well. 
-
-
-
-- historicalSellVolume 
-
-A mapping that stores entries for previous yVolume appended with index + timestamp. Is queryable by index. Is added to after every order or settlement. 
-
-- historicalBuyVolume 
-
-A mapping that stores entries for previous xVolume appended with index + timestamp. Is queryable by index. Is added to after every order or settlement. 
-
-- historicalPrice
-
-A mapping that stores entries for previous price entries appended with an index + timestamp. Is queryable by index. Is added to after every order or settlement. 
-
-- historyCount
-
-An array that stores the total number of historicalPrice, historicalBuyVolume, buy orders, sell orders, and historicalSellVolume entries, Is added to after every order or settlement. 
-
-- makerOrders 
-
-An array that stores the order IDs for a given maker address, is added to or subtracted from after every order or settlement by or to an address. 
-
-- buyOrders
-
-A mapping that stores the details of all buy orders, is public and queryable by order ID. 
-
-- Order ID 
-
-All orders are tagged on a rigid indexing scheme that only increments, does not close gaps, is rigid and does not change number. Is queryable, returns the full details of an order by ID number. 
-
-- dayStart
-
-A mapping that stores the index number for historical various data entries, is updated whenever the previous data entry of a given array or mapping is from the previous day, while the newer entry is from a new day. Router proceeds to update `dayStart` with the latest indexes for the new day. 
-
-### **Functions**
-
-- update (Router only)
-
-Changes the details of up to (100) arrays or mappings, either creating - updating or clearing entries for orders, historical data etc, 
-
-- transact (Router only)
-
-Used by the router to move `TOKEN-0` or `TOKEN-1` out of the Listing contract to a recipient. 
-
-- setRouter (ownerOnly)
-
-Determines the router address. 
-
-- queryYield 
-
-Has a boolean param for determining "x" or "y" yield. Calculates and returns the real yield rate for fees collected. First gets the latest historical (x or y)volume entry and attempts to find a volume entry from dayStart. Then calculates;
-
-``` 
-Latest (x or y)volume height - oldest 24hr (x or y)volume height = total 24hr (x or y)volume 
-
-Total 24hr (x or y)Volume / 100 * 0.05 = total (x or y)Fees 
-
-Total (x or y)Fees / total (x or y)Liquid * 100 = daily (x or y)Yield 
-
-Daily (x or y)Yield * 365 = (x or y)APY
-``` 
-
-This function fetches (x or y)Liquid data from liquidity contract.
-
-
-
-## **MFP-Liquidity**
-
-### **Data**
-
-- routerAddress 
-
-Stores the valid router address that can call `transact` or `update`. 
-
-
-- Liquidity Details
-
-Separate mapping, 
-Listing : (address), 
-
-Same Mapping 
-xLiquid : (uint256), 
-yLiquid : (uint256), 
-xFees : (uint256), 
-yFees : (uint256), 
-
-
-
-- xLiquidity Slots 
-
-Struct for xLiquidity slots, 
-Same Mapping
-depositor : (address),
-xRatio : (uint256),
-xAllocation : (uint256),
-dVolume : (uint256),
-index : (uint256),
-
-
-- yLiquidity Slots 
-
-Same as "xLiquidity Slots", but for yLiquidity. 
-
-`Ratios` store how much of the overall liquidity the depositor owns, is calculated during deposit from the router. 
-
-- Liquidity Index
-
-A mapping that stores the index numbers of all liquidity slots, indexes are queryable and fixed, they do not fill gaps or decrease in number. 
-
-- User Index 
-
-An array that stores the liquidity index numbers for each address, is updated after every user deposit or withdrawal. Is queryable. 
-
-### **Functions**
-- update (Router only)
-
-Changes the details of up to (100) arrays or mappings, either creating - updating or clearing entries for liquidity slots, historical data etc,  
-
-- transact (Router only)
-
-Used by the router to move `TOKEN-0` or `TOKEN-1` out of the liquidity contract to a recipient. 
-
-- setRouter (ownerOnly)
-
-Determines the router address. 
-
-
- 
-## **MFP-Router**
-
-### *** Libraries 
-The MFP Router uses "library contracts" and inherits logic from said libraries which it uses to execute functions. 
-
-- **MFP-ProxyRouter**
-
-Manages states and inherits logic from libraries, allows user facing functions. 
-
-- **MFP-OrderLibrary**
-
-Stores the logic for order related functions. 
-
-- **MFP-SettlementLibrary** 
-
-Stores the logic for settlement related functions. 
-
-- **MFP-LiquidLibrary**
-
-Stores the logic for liquidity related functions. 
-
-### **Data**
-
-- listingAgent
-
-Stores the listing agent contract address where validation data is updated or fetched from. Only interacts with listings that are on the listing validation, otherwise various functions fail. 
-
-### **Functions**
-
-- **createBuyOrder**
-
-Requires Listing Address 
-Takes Order Details
-Checks decimals
-Normalizes input to 18 decimals 
-Checks `balanceOf` of the target listing address for token-A
-Notes balance
-Calls transferFrom for the order amount from the caller to the target listing 
-Subtracts 0.05% from order amount to xFees 
-Checks balanceOf at the listing address for token-A
-Notes new listing contract balance 
-Subtracts new listing balance with old balance 
-Difference becomes order's principal 
-Sets order details into a new order slot
-Updates xVolume, adds order amount
-Updates xFees balance data on liquidity contract 
-Note differences in call/query functions if the transacted token is `NATIVE`. 
-
-
-- createSellOrder
-
-Same as `createBuyOrder` but with sell order details, spends token-B of the listing, updates yVolume and yFees. 
-
-- clearSingleOrder
-
-Requires orderID param, 
-Notes the order pending amount,
-Sets the order status to `cancelled`,
-Sends the pending amount to the `Recipient Address`,
-Can only be called by the maker,
-If there are insufficient tokens units to cover the cancellation then function fails. 
-
-
-- clearOrders 
-
-Similar to `clearSingleOrder` but searches for up to (100) pending orders a caller has and executes `clearSingleOrder` on all of them.
-
-
-   
-- settleBuyOrders 
-
-Requires a Listing Address,
-Updates Price on listing contract,
-Searches for up to (100) pending buy orders,
-Calculates their settlement amount,
-Obtains the available y balance,
-Settles as many orders that can be settled wholly,
-Settles as many orders that can only be settled partially,
-
-Buys are settled as; 
-
-`Order amount / price = pre output
-yLiquidity - pre output = impact-y
- x-liquid / impact-y = impact price`
-
-`order amount / impact price = settlement-y`
-
-- settleSellOrders 
-
-Similar to `settleBuyOrders` but uses x balance to settle pending sell orders. 
-
-Sells are settled as;
-
-`Order amount * price = pre output
-xLiquidity - pre output = impact-x
- impact-x / y-liquid = impact price`
-
-`order amount * impact price = settlement-x`
-
-
-Only settles orders whose max/min prices are met,
-Updates Price on listing contract again,
-Note that all numbers in all formulas need to use some form of safe math to account for decimals
-Note that all decimals should be normalized to 18. 
-
-
-- settleBuyLiquid 
-
-Similar to `settleBuyOrders` but uses y liquids to settle pending buy orders. 
-Moves settled principal to xLiquid. 
-
-- settleSellLiquid
-
-Similar to `settleSellOrders` but uses x liquids to settle pending sell orders,
-Moves settled principal to y liquid. 
-
-
-- xDeposit
-
-Requires a Listing Address,
-Finds Liquidity Address on Listing Address ,
-Moves Token-0 from the caller into the Liquidity Contract,
-
-Calculates and stores Ratio as; 
-
-`x-deposit / impact x-amount = x-ratio`
-
-Fetches xVolume from Listing Address,
-Saves dVolume,
-Stores allocation,
-Updates Liquidity index,
-Note differences in call/query functions if the transacted token is `NATIVE`. 
-
-- yDeposit
-
-Similar to xDeposit but ... 
-
-Calculates and stores Ratio as; 
-
-`y-deposit / impact y-amount = y-ratio`
-
-Fetches yVolume from Listing Address. 
-
-- xWithdraw
-
-Requires withdrawal amount,
-Requires index,
-Fetches `x-liquidity`, `x-ratio`, `xAllocation`, `price`,
-Pays requested amount of xLiquid,
-
-If the liquidity contract has insufficient Token-A units, the calculates a compensation as: 
-
-`deficit / price` 
-
-Compensation is paid in Token-B or simply pays whatever is available. 
-
-When a withdrawal leaves `0` allocation then the liquidity slot is erased and the liquidity index is updated,
-Forfeits unclaimed fees if slot is erased. 
-
-
-
-- yWithdraw
-
-Same as xWithdraw but deals with Y-Type liquidity slots and their details.
-
-Compensation is calculated as: `deficit * price`. 
-
-- claimFees 
-
-Requires user liquidity index number
-fetches current x or y volume depending on liquidity slot type 
-Fetches total x or y liquidity depending on liquidity slot type
-fetches dVolume
-
-Calculates; 
-
-`Current (x or y)Volume - (x or y)Volume at deposit = contributed volume`
-
-`contributed volume / 100 * 0.05 = fees accrued`
-
-`user Liquidity / total Liquidity = Liquidity contribution` 
-
-`fees accrued * liquidity contribution = output amount` 
-
-
-Resets dVolume to current (x or y)Volume
-Output amount cannot be greater than available fees, if greater then only pay available fees. 
-
-
-
-- transferLiquidity 
-
-Requires a user liquidity index number,
-Changes the `depositor` of stated index to a new, address,
-Stating `0` sets this to the burn address,
-Can only be called by the current depositor. 
-
-
- 
-- setAgent 
-
-Determines the `Listing Agent` contract. 
-
-
-
-
-## **MFP-Agent**
-The listing agent, creates new Listing and Liquidity contracts, stores `validation` details for the router to retrieve or update.  
-
-### *** Libraries 
-The MFP Agent uses "library contracts" and inherits logic from said libraries which it uses to deploy templates. 
-
-- **MFP-ListingLibrary**
-
-Stores the Listing Template, allows deployment using provided encoded "salt". 
-
-- **MFP-LiquidityLibrary**
-
-Stores the Liquidity Template, allows deployment using provided encoded "salt". 
-
-### **Data**
-
-- **Listing Validation**
-
-A struct for listing validation entries, 
-Same mapping
-Listing Address ;  (address),
-Listed Token(s) ;  (address, address), 
-Index : (uint256), 
-
-Each listing validation mapping is queryable by listing address or index. 
-
-- Listing Index 
-
-An array that stores each listing validation entry by index number and token address. Each time a token is listed the index of the listing validation is stored against the token address. Is queryable by token address. The token address for `NATIVE` is "0". Only returns the first (1000) entries, requires an incremental number param to query additional (1000). 
-
-- listingCount 
-
-Stores the total number of listings made. Is increased whenever a new listing is made. 
-
-- tokenAddresses 
-
-Stores listed token addresses against an index, is an array. 
-
-### **Functions**
-- setRouter (ownerOnly) 
-
-Determines the router address, the router can update various mappings and possible arrays. 
-
-- listToken 
-
-Searches Listing validation for the exact token pair,
-Cannot list existing pair,
-Requires a Token-0 and Token-1,
-Stating `0` as a Token address sets the token to, `NATIVE`,
-Creates a new listing and liquidity contract,
-Verifies contracts,
-Writes listing contract details,
-Writes liquidity contract details,
-
-
-
-# **Examples**
-E1 : A listing with the price of `0.25` implies that the Token-1 is worth 0.25 `TOKEN-0`. If a user puts an order to spend 250 `TOKEN-0` to buy the Token-1, the exchange calculates; 250 / 0.25 = 1000. If they were selling (1000) `TOKEN-1` then the equation is; (1000) * 0.25 = 250. 
-
-E2 : If a listing address has 500 `TOKEN-0` and 100 `TOKEN-1`, 500 / 100 = 5, this means the price is 5 `TOKEN-0'. If a user was buying 250 `TOKEN-0` worth of `TOKEN-1` this is; 250 / 5 = 50. Whereas if they were to sell 50 `TOKEN-1` it would be; 50 * 5 = 250.  
-
-E3 : Assuming a token has a price of `2` and a yBalance with (100) `TOKEN-1`, while a user's order has 300 `TOKEN-0` pending, the contract settles them 50 `TOKEN-1` and updates the order to show that they have 200  `TOKEN-0` pending, while reducing the yBalance to (50), and increasing the xBalance by `100`. This is Partial settlement and also applies to settleLiquid. 
-
-E4 : If an order with 200 `TOKEN-0` was settled for (100) `TOKEN-1` using `settleOrders`, this `TOKEN-0` amount becomes xBalance, but with settleLiquid this becomes xLiquid, vice versa for `TOKEN-1` with yBalance and yLiquid. 
-
-E5 : If an order with 200 `TOKEN-0` was stored in xBalance, and was then settled using settleLiquid, this deducts the stored amount from xBalance and adds it to xLiquid, while deducting the respective `TOKEN-1` amount from yLiquid to settle the associated orders. Vice versa for `TOKEN-1` with yBalance and yLiquid. 
-
-E6 : Someone sends (1000) units of Token-A to the listing contract, existing balances were (50) and (10), price is (5). Balances after the transfer are; (1050) and (10), price is (105), this affects future or pending orders. 
-
-E7 : A user places an order for (50) Token-A, but the token has tax on transfer active, the amount is taxed 10%, leaving (45), the contract correctly checks balances before and after transfering the stated order amount, therefore the recorded principal will be (45) and not (50).
-Likewise when settlement is triggered the contract checks how much was filled after each transfer for sells, settling (45) instead of (50), this is recorded in `filled` for each order. 
-
-E8 : If a user attempted to sell (1000) `TOKEN-1` at a price of `1` but liquidity fees are active, their actual order will be subtracted by 0.05% equalling; 999.5, the 0.5 `TOKEN-0` fee is sent to the Liquidity contract and recorded under `yFees`. 
-
-If the user attempts to buy (1000) `TOKEN-1` in the same vein, fees are subtracted from the order. The actual order would have a principal of 999.5 `TOKEN-0`. 
-
-E9 : A buy order is made for a token. At the time the order is made the price is 5, their impact is 1%, once the order is placed the price goes up to 5.025, then once the order is settled the impact price is 5.05, this represents the post settlement price and is the price the user is settled at. 
-
-With the price now at 5.05, when the user attempts to sell; if the impact is 1% again then the price they would be settled at is 5 or less and not 5.05.
- 
-The buyer makes no profit from trading with themselves and in fact loses due to fees or unforseen changes in balance. 
-
-E10 : Same as E9 but after the first user buys; any number of users then also buy the token, driving the price up by 10%, now the price is 5.55. When the user attempts to sell; the price they sell at is 5.4945 due to changes that occur when their principal is added to the listing contract and pending amount is paid. Thus they made profit at the expense of the other buyer(s). 
