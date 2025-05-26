@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity 0.8.2;
 
-// Version: 0.1.4
+// Version: 0.1.5
 // Most Recent Changes:
-// - From v0.1.3: Added changeSlotDepositor to IOMFLiquidity interface.
+// - From v0.1.4: Added OrderProcessingFailed event to IOMF interface for graceful degradation.
 // - Preserved settleBuyOrders, settleSellOrders, settleBuyLiquid, and settleSellLiquid in IOMF interface.
 // - Maintained agent, setAgent, and helper functions for OrderPartial and OMFRouter.
 // - Kept OrderUpdate struct fix (removed duplicate historicalPrice, corrected typo).
@@ -74,7 +74,7 @@ struct OrderUpdate {
     uint8 structId;   // 0 = Core, 1 = Pricing, 2 = Amounts
     uint256 orderId;
     uint256 value;
-    uint256 historicalPrice; // Fixed: Removed duplicate and corrected typo
+    uint256 historicalPrice;
     address recipient;
 }
 
@@ -152,6 +152,7 @@ contract MainPartial is Ownable {
 
     event OrderCreated(uint256 orderId, bool isBuy);
     event OrderCancelled(uint256 orderId, bool isBuy);
+    event OrderProcessingFailed(address indexed listingAddress, uint256 indexed orderId, bool isBuy, string reason);
 
     function setAgent(address _agent) external onlyOwner {
         require(_agent != address(0), "Invalid agent address");
