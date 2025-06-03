@@ -1,44 +1,72 @@
-
 # OMF Contracts System Specification
 
-This document specifies the decentralized exchange (DEX) system comprising `OMFAgent.sol`, `OMFLiquidityTemplate.sol`, `OMFListingTemplate.sol`, `OMFListingLogic.sol`, `OMFLiquidityLogic.sol`, and `OMFRouter.sol` (incorporating `MainPartial.sol`, `OrderPartial.sol`, and `SettlementPartial.sol` as a single contract via imports). Built for Solidity 0.8.2 with BSD-3-Clause license, the contracts manage token listings, liquidity pools, order books, and settlements. Price is acquired from an oracle address and function supplied in each listing, with all assets listed as ASSET/USD. The system ensures security, gas efficiency, and decimal normalization (18 decimals). `TokenRegistry.sol` is referenced for balance tracking but is not part of the OMF system. This specification details data structures, operations, and design considerations, incorporating the provided contracts with updates for graceful degradation in settlement functions.
+This document specifies the decentralized exchange (DEX) system comprising `OMFAgent.sol`, `OMFLiquidityTemplate.sol`, `OMFListingTemplate.sol`, `OMFListingLogic.sol`, `OMFLiquidityLogic.sol`, and `OMFRouter.sol` (incorporating `MainPartial.sol`, `OrderPartial.sol`, and `SettlementPartial.sol` as a single contract via imports). Built for Solidity 0.8.2 with BSD-3-Clause license, the contracts manage token listings, liquidity pools, order books, and settlements. Price is acquired from an oracle address and function supplied in each listing, with all assets listed as ASSET/USD. The system ensures security, gas efficiency, and decimal normalization (18 decimals). `TokenRegistry.sol` is referenced for balance tracking but is not part of the OMF system. This specification details data structures, operations, and design considerations, incorporating updates to `OMFAgent.sol` for the implementation of `validateListing` to ensure compatibility with `OrderPartial.sol`.
 
 ## OMFAgent.sol
 
-`OMFAgent.sol` is an ownable contract orchestrating token listings, liquidity aggregation, and order tracking. It deploys listing and liquidity contracts via logic contracts and maintains global state.
+`OMFAgent.sol` is an ownable contract orchestrating token listings, liquidity aggregation, and order tracking. It deploys listing and liquidity contracts via logic contracts, maintains global state, and validates listings for order creation. The contract was updated in version 0.0.14 to implement `validateListing` for compatibility with `OrderPartial.sol`.
 
 ### 1. Configuration
 - **State Variables**:
-  - `routerAddress`: Router for mediating interactions.
-  - `listingLogicAddress`, `liquidityLogicAddress`: Logic contracts for proxy deployment.
-  - `baseToken`: Reference token (Token-1) for pairs.
-  - `registryAddress`: `TokenRegistry.sol` address, set via `setRegistry` (onlyOwner).
-  - `listingCount`: Tracks deployed listings.
+  - `routerAddress`: Address of the router contract mediating interactions.
+  - `listingLogicAddress`: Address of `OMFListingLogic` for proxy deployment.
+  - `liquidityLogicAddress`: Address of `OMFLiquidityLogic` for proxy deployment.
+  - `baseToken`: Reference token (Token-1) for all pairs, set via `setBaseToken`.
+  - `registryAddress`: Address of `TokenRegistry.sol`, set via `setRegistry` for balance tracking.
+  - `listingCount`: Counter for deployed listings, incremented per new listing.
 - **Setters** (onlyOwner):
-  - `setRouter`, `setListingLogic`, `setLiquidityLogic`, `setBaseToken`, `setRegistry`.
+  - `setRouter(_routerAddress)`: Sets `routerAddress`, requires non-zero address.
+  - `setListingLogic(_listingLogic)`: Sets `listingLogicAddress`, requires non-zero address.
+  - `setLiquidityLogic(_liquidityLogic)`: Sets `liquidityLogicAddress`, requires non-zero address.
+  - `setBaseToken(_baseToken)`: Sets `baseToken`, requires non-zero address (native token disallowed).
+  - `setRegistry(_registryAddress)`: Sets `registryAddress`, requires non-zero address.
 
 ### 2. Token Listing
-- **listToken(tokenA, oracleAddress, oracleDecimals, oracleViewFunction)**:
-  - Validates: Non-zero `tokenA`, distinct from `baseToken`, unlisted, caller holds ≥1% of `tokenA` supply (checked via ERC20 `balanceOf`, normalized to 18 decimals).
-  - Deploys: Listing and liquidity proxies via `OMFListingLogic` and `OMFLiquidityLogic` using deterministic salts (`keccak256(tokenA, baseToken, listingCount)`).
-  - Initializes: Listing with router, tokens, `listingId`, agent, registry, oracle data, liquidity address; liquidity with router, tokens, `listingId`, agent, listing address.
-  - Stores: Maps pair to listing (`getListing[tokenA][baseToken]`), tracks listings (`allListings`), tokens (`allListedTokens`).
-  - Increments `listingCount`.
-- **Events**:
-  - `ListingCreated(tokenA, tokenB, listingAddress, liquidityAddress, listingId)`.
+- **listToken(tokenA, oracleAddress, oracleDecimals, oracleViewFunction) → (listingAddress, liquidityAddress)**:
+  - **Parameters**:
+    - `tokenA`: Address of Token-0, must be non-zero and distinct from `baseToken`.
+    - `oracleAddress`: Address of the price oracle, must be non-zero.
+    - `oracleDecimals`: Decimals of oracle price data.
+    - `oracleViewFunction`: Function selector for oracle price query.
+  - **Validations**:
+    - Ensures `baseToken` is set, `tokenA` is unlisted (`getListing[tokenA][baseToken] == address(0)`), and caller holds ≥1% of `tokenA` supply (via `checkCallerBalance`).
+    - Checks non-zero `routerAddress`, `listingLogicAddress`, `liquidityLogicAddress`, and `oracleAddress`.
+  - **Operations**:
+    - Generates deterministic salts: `listingSalt = keccak256(tokenA, baseToken, listingCount)`, `liquiditySalt = keccak256(baseToken, tokenA, listingCount)`.
+    - Deploys listing via `OMFListingLogic.deploy(listingSalt)` and liquidity via `OMFLiquidityLogic.deploy(liquiditySalt)`.
+    - Initializes listing with `setRouter`, `setListingId`, `setLiquidityAddress`, `setTokens`, `setOracleDetails`, `setAgent`, `setRegistry`.
+    - Initializes liquidity with `setRouter`, `setListingId`, `setListingAddress`, `setTokens`, `setAgent`.
+    - Stores pair in `getListing[tokenA][baseToken]`, adds to `allListings`, adds `tokenA` to `allListedTokens` if new.
+    - Increments `listingCount`.
+  - **Returns**: Deployed `listingAddress` and `liquidityAddress`.
+  - **Events**:
+    - `ListingCreated(tokenA, tokenB, listingAddress, liquidityAddress, listingId)`.
 
 ### 3. Liquidity Aggregation
 - **Mappings**:
-  - `globalLiquidity[token0][baseToken][user]`: User liquidity per pair.
-  - `totalLiquidityPerPair[token0][baseToken]`: Total pair liquidity.
-  - `userTotalLiquidity[user]`: User’s total liquidity.
-  - `listingLiquidity[listingId][user]`: Liquidity per listing.
+  - `globalLiquidity[token0][baseToken][user]`: User’s liquidity for a pair.
+  - `totalLiquidityPerPair[token0][baseToken]`: Total liquidity for a pair.
+  - `userTotalLiquidity[user]`: User’s total liquidity across pairs.
+  - `listingLiquidity[listingId][user]`: User’s liquidity for a listing.
   - `historicalLiquidityPerPair[token0][baseToken][timestamp]`: Pair liquidity at timestamp.
   - `historicalLiquidityPerUser[token0][baseToken][user][timestamp]`: User liquidity at timestamp.
 - **globalizeLiquidity(listingId, token0, baseToken, user, amount, isDeposit)**:
-  - Validates: Non-zero tokens, user, valid `listingId`, caller is liquidity contract.
-  - Updates: Increments (deposits) or decrements (withdrawals) liquidity mappings after sufficiency checks. Records historical data at `block.timestamp`.
-  - Emits: `GlobalLiquidityChanged`.
+  - **Parameters**:
+    - `listingId`: ID of the listing, must be less than `listingCount`.
+    - `token0`: Token-0 address, must be non-zero.
+    - `baseToken`: Base token address, must be non-zero.
+    - `user`: User address, must be non-zero.
+    - `amount`: Liquidity amount (normalized to 18 decimals).
+    - `isDeposit`: True for deposits, false for withdrawals.
+  - **Validations**:
+    - Ensures non-zero `token0`, `baseToken`, `user`, valid `listingId`.
+    - Verifies caller is the liquidity contract (`IOMFListing(listingAddress).liquidityAddress() == msg.sender`).
+    - For withdrawals, checks sufficient liquidity in `globalLiquidity`, `totalLiquidityPerPair`, `userTotalLiquidity`, `listingLiquidity`.
+  - **Operations**:
+    - Updates liquidity mappings: increments for deposits, decrements for withdrawals.
+    - Records historical data at `block.timestamp`.
+  - **Events**:
+    - `GlobalLiquidityChanged(listingId, token0, baseToken, user, amount, isDeposit)`.
 
 ### 4. Order Tracking
 - **Struct**:
@@ -50,40 +78,84 @@ This document specifies the decentralized exchange (DEX) system comprising `OMFA
   - `historicalOrderStatus[token0][baseToken][orderId][timestamp]`: Order status at timestamp.
   - `userTradingSummaries[user][token0][baseToken]`: User’s trading volume.
 - **globalizeOrders(listingId, token0, baseToken, orderId, isBuy, maker, recipient, amount, status)**:
-  - Validates: Non-zero tokens, maker, valid `listingId`, caller is listing contract.
-  - Creates: New order if `maker` is unset and `status` non-zero.
-  - Updates: Existing order’s `amount`, `status`, `timestamp`.
-  - Stores: Order in `pairOrders`, `userOrders`, and `historicalOrderStatus`. Increments `userTradingSummaries`.
-  - Emits: `GlobalOrderChanged`.
+  - **Parameters**:
+    - `listingId`: ID of the listing, must be less than `listingCount`.
+    - `token0`: Token-0 address, must be non-zero.
+    - `baseToken`: Base token address, must be non-zero.
+    - `orderId`: Unique order identifier.
+    - `isBuy`: True for buy orders, false for sell orders.
+    - `maker`: Order creator, must be non-zero.
+    - `recipient`: Order recipient address.
+    - `amount`: Order amount (normalized).
+    - `status`: Order status (0–3).
+  - **Validations**:
+    - Ensures non-zero `token0`, `baseToken`, `maker`, valid `listingId`.
+    - Verifies caller is the listing contract (`getListing[token0][baseToken] == msg.sender`).
+  - **Operations**:
+    - For new orders (`maker == address(0)` and `status != 0`): creates `GlobalOrder`, adds to `pairOrders` and `userOrders`.
+    - For existing orders: updates `amount`, `status`, `timestamp`.
+    - Records `historicalOrderStatus` at `block.timestamp`.
+    - Increments `userTradingSummaries` if `amount > 0`.
+  - **Events**:
+    - `GlobalOrderChanged(listingId, token0, baseToken, orderId, isBuy, maker, amount, status)`.
 
-### 5. View Functions
-- **getUserLiquidityAcrossPairs(user, maxIterations)**: Returns user’s non-zero liquidity pairs.
-- **getTopLiquidityProviders(listingId, maxIterations)**: Returns top providers for a listing, sorted descending.
-- **getUserLiquidityShare(user, token0, baseToken)**: Returns user’s share (`userAmount * 1e18 / total`) and total liquidity.
-- **getAllPairsByLiquidity(minLiquidity, focusOnToken0, maxIterations)**: Lists pairs with liquidity ≥ `minLiquidity`.
-- **getPairLiquidityTrend(token0, focusOnToken0, startTime, endTime)**: Returns non-zero liquidity timestamps and amounts.
-- **getUserLiquidityTrend(user, focusOnToken0, startTime, endTime)**: Returns user’s non-zero liquidity tokens, timestamps, amounts.
-- **getOrderActivityByPair(token0, baseToken, startTime, endTime)**: Returns orderIds and details within time range.
-- **getUserTradingProfile(user)**: Returns user’s trading volumes per pair.
-- **getTopTradersByVolume(listingId, maxIterations)**: Returns top traders by volume, sorted descending.
-- **getAllPairsByOrderVolume(minVolume, focusOnToken0, maxIterations)**: Lists pairs with volume ≥ `minVolume`.
-- **allListingsLength**(): Returns number of listings.
-- **validateListing(listingAddress)**: Returns validity, agent, `token0`, `baseToken`.
+### 5. Listing Validation
+- **validateListing(listingAddress) → (isValid, listingAddress, token0, baseToken)**:
+  - **Parameters**:
+    - `listingAddress`: Address of the listing contract to validate.
+  - **Validations**:
+    - Checks if `listingAddress` is non-zero.
+    - Ensures `baseToken` is set (non-zero).
+    - Searches `allListedTokens` to find `token0` where `getListing[token0][baseToken] == listingAddress`.
+  - **Operations**:
+    - If `listingAddress` is zero or no matching `token0` is found, returns `(false, address(0), address(0), address(0))`.
+    - If valid, returns `(true, listingAddress, token0, baseToken)`.
+  - **Purpose**:
+    - Used by `OrderPartial.sol` in `createBuyOrder` and `createSellOrder` to verify listing validity before order creation.
+    - Ensures `listingAddress` corresponds to a registered pair in `getListing`, providing `token0` and `baseToken` for order processing.
+  - **Notes**:
+    - Added in version 0.0.14 to ensure compatibility with `OrderPartial.sol`.
+    - Iterates `allListedTokens`, which may be gas-intensive for large lists; future optimizations could include a reverse mapping.
 
-### 6. Design Notes
-- **Decimal Handling**: Normalizes to 18 decimals in `checkCallerBalance`.
-- **Gas Efficiency**: Sparse mappings; `maxIterations` limits loops. Trend queries risk high gas.
-- **Access Control**: `globalizeOrders` restricted to listing contracts; `globalizeLiquidity` to liquidity contracts.
+### 6. View Functions
+- **getUserLiquidityAcrossPairs(user, maxIterations) → (token0s, baseTokens, amounts)**:
+  - Returns up to `maxIterations` non-zero liquidity pairs for `user`.
+- **getTopLiquidityProviders(listingId, maxIterations) → (users, amounts)**:
+  - Returns top liquidity providers for `listingId`, sorted descending, up to `maxIterations`.
+- **getUserLiquidityShare(user, token0, baseToken) → (share, total)**:
+  - Returns user’s liquidity share (`userAmount * 1e18 / total`) and total pair liquidity.
+- **getAllPairsByLiquidity(minLiquidity, focusOnToken0, maxIterations) → (token0s, baseTokens, amounts)**:
+  - Lists pairs with liquidity ≥ `minLiquidity`, up to `maxIterations`.
+- **getPairLiquidityTrend(token0, focusOnToken0, startTime, endTime) → (timestamps, amounts)**:
+  - Returns non-zero liquidity timestamps and amounts for a pair within time range.
+- **getUserLiquidityTrend(user, focusOnToken0, startTime, endTime) → (tokens, timestamps, amounts)**:
+  - Returns user’s non-zero liquidity tokens, timestamps, amounts within time range.
+- **getOrderActivityByPair(token0, baseToken, startTime, endTime) → (orderIds, orders)**:
+  - Returns orderIds and details for a pair within time range.
+- **getUserTradingProfile(user) → (token0s, baseTokens, volumes)**:
+  - Returns user’s trading volumes per pair.
+- **getTopTradersByVolume(listingId, maxIterations) → (traders, volumes)**:
+  - Returns top traders by volume for `listingId`, sorted descending, up to `maxIterations`.
+- **getAllPairsByOrderVolume(minVolume, focusOnToken0, maxIterations) → (token0s, baseTokens, volumes)**:
+  - Lists pairs with order volume ≥ `minVolume`, up to `maxIterations`.
+- **allListingsLength() → (uint256)**:
+  - Returns number of listings.
+
+### 7. Design Notes
+- **Decimal Handling**: Normalizes to 18 decimals in `checkCallerBalance` using ERC20 `decimals`.
+- **Gas Efficiency**: Sparse mappings; `maxIterations` limits loops. `validateListing` and trend queries may consume high gas due to array iteration.
+- **Access Control**: `globalizeOrders` restricted to listing contracts; `globalizeLiquidity` to liquidity contracts; setters restricted to owner.
 - **Registry Usage**: Sets `registryAddress` in new listings for balance tracking; does not directly use registry for balances.
+- **Updates**: Version 0.0.14 added `validateListing` to support `OrderPartial.sol`’s order creation, ensuring robust listing verification.
 
 ## OMFListingLogic.sol
 
 `OMFListingLogic.sol` deploys `OMFListingTemplate` contracts using deterministic salts.
 
 ### 1. Core Functions
-- **deploy(listingSalt)**:
-  - Deploys: `OMFListingTemplate` with `listingSalt`.
-  - Returns: Deployed contract address.
+- **deploy(listingSalt) → (listingAddress)**:
+  - Deploys `OMFListingTemplate` with `listingSalt` via CREATE2.
+  - Returns deployed contract address.
 
 ### 2. Design Notes
 - **Purpose**: Separates listing deployment from `OMFAgent`, resolving `SafeERC20` import conflicts.
@@ -95,9 +167,9 @@ This document specifies the decentralized exchange (DEX) system comprising `OMFA
 `OMFLiquidityLogic.sol` deploys `OMFLiquidityTemplate` contracts using deterministic salts.
 
 ### 1. Core Functions
-- **deploy(liquiditySalt)**:
-  - Deploys: `OMFLiquidityTemplate` with `liquiditySalt`.
-  - Returns: Deployed contract address.
+- **deploy(liquiditySalt) → (liquidityAddress)**:
+  - Deploys `OMFLiquidityTemplate` with `liquiditySalt` via CREATE2.
+  - Returns deployed contract address.
 
 ### 2. Design Notes
 - **Purpose**: Isolates liquidity deployment, resolving `SafeERC20` import conflicts.
@@ -136,12 +208,12 @@ This document specifies the decentralized exchange (DEX) system comprising `OMFA
   - Creates slot, updates `activeXLiquiditySlots` or `activeYLiquiditySlots`, `userIndex`.
   - Calls `update`, `globalizeUpdate`, `updateRegistry`.
 - **xPrepOut(caller, amount, index)** (onlyRouter):
-  - Validates: Caller is depositor, sufficient allocation.
-  - Calculates: `withdrawAmount0` (capped at `xLiquid`), `withdrawAmount1` (deficit converted via listing’s price, capped at `yLiquid`).
-  - Returns: `PreparedWithdrawal`.
+  - Validates caller as depositor, sufficient allocation.
+  - Calculates `withdrawAmount0` (capped at `xLiquid`), `withdrawAmount1` (deficit converted via listing’s price, capped at `yLiquid`).
+  - Returns `PreparedWithdrawal`.
 - **yPrepOut(caller, amount, index)** (onlyRouter):
   - Similar to `xPrepOut`, for baseToken.
-- **xExecuteOut(caller, index, withdrawal)** (onlyRouter, non施行
+- **xExecuteOut(caller, index, withdrawal)** (onlyRouter, nonReentrant):
   - Updates slot allocation, transfers tokens (denormalized), calls `transact`, `globalizeUpdate`, `updateRegistry`.
 - **yExecuteOut(caller, index, withdrawal)** (onlyRouter, nonReentrant):
   - Similar to `xExecuteOut`, for baseToken and token0.
@@ -249,60 +321,57 @@ This document specifies the decentralized exchange (DEX) system comprising `OMFA
   - Validates listing and `newDepositor`, calls `changeSlotDepositor`.
   - Emits: `DepositorChanged`.
 - **settleBuyOrders(listingAddress)**:
-  - Validates listing, executes buy orders via `executeBuyOrders` with graceful degradation.
+  - Validates listing, executes buy orders via `executeBuyOrders`.
 - **settleSellOrders(listingAddress)**:
-  - Validates listing, executes sell orders via `executeSellOrders` with graceful degradation.
+  - Validates listing, executes sell orders via `executeSellOrders`.
 - **settleBuyLiquid(listingAddress)**:
-  - Validates listing, executes buy orders with liquidity via `executeBuyLiquid` with graceful degradation.
+  - Validates listing, executes buy orders with liquidity via `executeBuyLiquid`.
 - **settleSellLiquid(listingAddress)**:
-  - Validates listing, executes sell orders with liquidity via `executeSellLiquid` with graceful degradation.
+  - Validates listing, executes sell orders with liquidity via `executeSellLiquid`.
 - **createBuyOrder(listingAddress, amount, maxPrice, minPrice, recipient)**:
-  - Validates listing, prepares and applies order updates, emits `OrderCreated`.
+  - Validates listing via `OMFAgent.validateListing`, prepares and applies order updates, emits `OrderCreated`.
 - **createSellOrder(listingAddress, amount, maxPrice, minPrice, recipient)**:
   - Similar to `createBuyOrder` for sell orders.
 
 ### 2. Internal Functions
 - **executeBuyOrders(listingAddress, count)**:
-  - Prepares state, processes primary and secondary updates using `try/catch` for individual order failures.
-  - Skips failed orders (e.g., invalid status, insufficient balance) without reverting, emitting `OrderProcessingFailed`.
+  - Prepares state, processes primary and secondary updates.
 - **executeSellOrders(listingAddress, count)**:
-  - Similar to `executeBuyOrders` for sell orders with graceful degradation.
+  - Similar to `executeBuyOrders` for sell orders.
 - **executeBuyLiquid(listingAddress, count)**:
   - Prepares state, fetches orders, processes primary updates, transfers to liquidity, processes secondary updates.
-  - Uses `try/catch` to skip failed orders, ensuring no listing or liquidity updates for failed orders.
 - **executeSellLiquid(listingAddress, count)**:
-  - Similar to `executeBuyLiquid` for sell orders with graceful degradation.
+  - Similar to `executeBuyLiquid` for sell orders.
 - **prepareExecutionState(listingAddress)**: Returns `LiquidExecutionState`.
 - **fetchPendingOrders(listingAddress, count, isBuy)**: Returns orderIds, adjusted count.
 - **processPrimaryUpdates(listingAddress, state, orderIds, count, isBuy)**:
-  - Prepares and applies primary updates using dynamic arrays, skipping failed orders.
+  - Prepares and applies primary updates using dynamic arrays.
 - **transferToLiquidity(listingAddress, liquidityAddress, state, primaryUpdates, isBuy)**:
-  - Transfers tokens to liquidity for successful orders only, using `try/catch`.
+  - Transfers tokens to liquidity for successful orders.
 - **processSecondaryUpdates(listingAddress, liquidityAddress, state, orderIds, count, isBuy)**:
-  - Prepares and applies secondary updates for successful orders only.
+  - Prepares and applies secondary updates.
 - **prepBuyOrderCore**, **prepSellOrderCore**, **prepBuyOrderPricing**, **prepSellOrderPricing**, **prepBuyOrderAmounts**, **prepSellOrderAmounts**: Prepare order updates.
 - **applySinglePrimaryUpdate**, **applySingleSecondaryUpdate**: Apply single updates.
 - **prepBuyCores**, **prepSellCores**, **processPrepBuyCores**, **processPrepSellCores**: Process order updates for settlements.
-- **prepareBuyBatchPrimaryUpdates**, **prepareSellBatchPrimaryUpdates**, **prepareBuyBatchSecondaryUpdates**, **prepareSellBatchSecondaryUpdates**: Use `try/catch` to build dynamic arrays of successful updates.
-- **prepareBuyLiquidSecondaryUpdates**, **prepareSellLiquidSecondaryUpdates**: Similar to batch updates, ensuring no updates for failed orders.
+- **prepareBuyBatchPrimaryUpdates**, **prepareSellBatchPrimaryUpdates**, **prepareBuyBatchSecondaryUpdates**, **prepareSellBatchSecondaryUpdates**: Build dynamic arrays of updates.
+- **prepareBuyLiquidSecondaryUpdates**, **prepareSellLiquidSecondaryUpdates**: Similar to batch updates.
 
 ### 3. Events
 - **OrderProcessingFailed(listingAddress, orderId, isBuy, reason)**:
-  - Emitted when an order fails processing (e.g., invalid status, token transfer failure).
-  - Ensures transparency for skipped orders during settlement.
+  - Emitted when an order fails processing.
 
 ### 4. Design Notes
 - **Decimal Handling**: Uses `normalize`/`denormalize` from `MainPartial`.
-- **Gas Efficiency**: Splits updates to avoid stack issues. Loops bounded by `count`. Graceful degradation via `try/catch` ensures partial processing without reverting.
+- **Gas Efficiency**: Splits updates to avoid stack issues. Loops bounded by `count`.
 - **Access Control**: Public for user-facing functions.
 - **Registry Usage**: Relies on listing contract for registry interactions.
-- **Graceful Degradation**: Settlement functions (`settleBuyOrders`, `settleSellOrders`, `settleBuyLiquid`, `settleSellLiquid`) skip failed orders, emitting `OrderProcessingFailed` without affecting listing or liquidity state.
 
 ## System Considerations
 - **Security**: Ownable (`OMFAgent`), `onlyRouter` guards, non-reentrant functions, `SafeERC20`, `try/catch` for external calls.
-- **Gas Efficiency**: Sparse storage, `maxIterations`, batch updates, dynamic arrays for successful orders only. Trend queries and `globalizeUpdate` risk high gas.
+- **Gas Efficiency**: Sparse storage, `maxIterations`, dynamic arrays. Trend queries and `globalizeUpdate` risk high gas.
 - **Decimal Normalization**: 18 decimals using ERC20 `decimals` or oracle data.
 - **Registry Integration**: Optional in liquidity contracts, used in listings for balance tracking.
 - **Modularity**: Logic contracts and partials enhance maintainability.
-- **Graceful Degradation**: Settlement functions handle individual order failures implicitly, ensuring maximum order processing within block gas limits without state changes for failed orders.
+- **Updates**: `OMFAgent.sol`’s `validateListing` ensures robust listing verification for `OrderPartial.sol`.
+
 
