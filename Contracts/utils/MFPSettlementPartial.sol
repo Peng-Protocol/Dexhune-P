@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.21
+// Version: 0.0.22
 // Changes:
-// - Added override keyword to executeBuyOrder and executeSellOrder to properly override base functions.
-// - Updated all function signatures to use IMFPListing.ListingUpdateType to resolve identifier not found error.
-// - Replaced gasleft() checks with try-catch in executeBuyOrders and executeSellOrders for implicit partial batch settlement.
-// - Ensured updates are only returned for successful orders in executeBuyOrders and executeSellOrders.
-// - Aligned executeBuyLiquid and executeSellLiquid with try-catch approach, applying updates only for successful executions.
-// - Retained impact price validation and empty array return for invalid price ranges from v0.0.18.
-// - Updated array creation to only include successful order updates.
+// - Updated executeBuyOrder and executeSellOrder to use revised calculateImpactPrice with buy/sell-specific logic.
+// - Aligned settlement calculations: amount * impactPrice for buy, amount / impactPrice for sell.
+// - Preserved all prior changes from v0.0.21.
 
 import "./MFPOrderPartial.sol";
 
@@ -158,22 +154,23 @@ contract MFPSettlementPartial is MFPOrderPartial {
         uint256 amount
     ) public override returns (IMFPListing.ListingUpdateType[] memory) {
         uint256 listingId = IMFPListing(listingAddress).getListingId();
+        uint256 maxPrice;
+        uint256 minPrice;
+        uint256 xBalance;
+        uint256 yBalance;
         {
-            uint256 maxPrice;
-            uint256 minPrice;
             (maxPrice, minPrice) = IMFPListing(listingAddress).buyOrderPricingView(orderId);
-            uint256 price = IMFPListing(listingAddress).prices(listingId);
-            uint256 xBalance;
-            uint256 yBalance;
             (xBalance, yBalance,,) = IMFPListing(listingAddress).volumeBalances(listingId);
-            uint256 impactPrice = calculateImpactPrice(amount, price, yBalance);
-            if (impactPrice < minPrice || impactPrice > maxPrice) {
-                return new IMFPListing.ListingUpdateType[](0);
-            }
         }
+        uint256 impactPrice = calculateImpactPrice(amount, xBalance, yBalance, true);
+        if (impactPrice < minPrice || impactPrice > maxPrice) {
+            return new IMFPListing.ListingUpdateType[](0);
+        }
+        // Settlement: amount * impactPrice for tokenA received
+        uint256 amountOut = (amount * impactPrice) / 1e18;
         IMFPListing.ListingUpdateType[] memory core = executeBuyOrderCore(listingId, orderId);
         IMFPListing.ListingUpdateType[] memory pricing = executeBuyOrderPricing(listingId, orderId);
-        IMFPListing.ListingUpdateType[] memory amounts = executeBuyOrderAmounts(listingId, orderId, amount);
+        IMFPListing.ListingUpdateType[] memory amounts = executeBuyOrderAmounts(listingId, orderId, amountOut);
         IMFPListing.ListingUpdateType[] memory updates = new IMFPListing.ListingUpdateType[](core.length + pricing.length + amounts.length);
         uint256 index = 0;
         for (uint256 i = 0; i < core.length; i++) updates[index++] = core[i];
@@ -188,22 +185,23 @@ contract MFPSettlementPartial is MFPOrderPartial {
         uint256 amount
     ) public override returns (IMFPListing.ListingUpdateType[] memory) {
         uint256 listingId = IMFPListing(listingAddress).getListingId();
+        uint256 maxPrice;
+        uint256 minPrice;
+        uint256 xBalance;
+        uint256 yBalance;
         {
-            uint256 maxPrice;
-            uint256 minPrice;
             (maxPrice, minPrice) = IMFPListing(listingAddress).sellOrderPricingView(orderId);
-            uint256 price = IMFPListing(listingAddress).prices(listingId);
-            uint256 xBalance;
-            uint256 yBalance;
             (xBalance, yBalance,,) = IMFPListing(listingAddress).volumeBalances(listingId);
-            uint256 impactPrice = calculateImpactPrice(amount, price, xBalance);
-            if (impactPrice < minPrice || impactPrice > maxPrice) {
-                return new IMFPListing.ListingUpdateType[](0);
-            }
         }
+        uint256 impactPrice = calculateImpactPrice(amount, xBalance, yBalance, false);
+        if (impactPrice < minPrice || impactPrice > maxPrice) {
+            return new IMFPListing.ListingUpdateType[](0);
+        }
+        // Settlement: amount / impactPrice for tokenB received
+        uint256 amountOut = (amount * 1e18) / impactPrice;
         IMFPListing.ListingUpdateType[] memory core = executeSellOrderCore(listingId, orderId);
         IMFPListing.ListingUpdateType[] memory pricing = executeSellOrderPricing(listingId, orderId);
-        IMFPListing.ListingUpdateType[] memory amounts = executeSellOrderAmounts(listingId, orderId, amount);
+        IMFPListing.ListingUpdateType[] memory amounts = executeSellOrderAmounts(listingId, orderId, amountOut);
         IMFPListing.ListingUpdateType[] memory updates = new IMFPListing.ListingUpdateType[](core.length + pricing.length + amounts.length);
         uint256 index = 0;
         for (uint256 i = 0; i < core.length; i++) updates[index++] = core[i];

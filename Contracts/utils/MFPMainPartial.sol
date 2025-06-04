@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.1;
 
-// Version: 0.0.22
+// Version: 0.0.24
 // Changes:
-// - Updated IMFPListing interface to define liquidityAddress() without listingId parameter to match MFPListingTemplate.sol.
-// - Removed liquidityAddress(uint256 listingId) from previous version.
-// - Preserved all prior changes from v0.0.21.
+// - Revised calculateImpactPrice to account only for tokens moved out of the listing during settlement.
+// - For buy orders: Only reduce xBalance (tokenA out), keep yBalance unchanged.
+// - For sell orders: Only reduce yBalance (tokenB out), keep xBalance unchanged.
+// - Preserved all prior changes from v0.0.23.
 
 import "../imports/SafeERC20.sol";
 import "../imports/Ownable.sol";
@@ -202,10 +203,30 @@ contract MFPMainPartial is Ownable, ReentrancyGuard {
         else return amount * 10 ** (decimals - 18);
     }
 
-    function calculateImpactPrice(uint256 amount, uint256 price, uint256 balance) internal pure returns (uint256) {
-        if (balance == 0) return price;
-        uint256 impact = (amount * 1e18) / balance;
-        return (price * (1e18 + impact)) / 1e18;
+    function calculateImpactPrice(
+        uint256 amount,
+        uint256 xBalance,
+        uint256 yBalance,
+        bool isBuy
+    ) internal pure returns (uint256) {
+        require(yBalance > 0, "Zero yBalance");
+        uint256 currentPrice = (xBalance * 1e18) / yBalance;
+        uint256 amountOut = isBuy ? (amount * currentPrice) / 1e18 : (amount * 1e18) / currentPrice;
+        uint256 newXBalance = xBalance;
+        uint256 newYBalance = yBalance;
+
+        if (isBuy) {
+            // Buy: Only tokenA (x) moves out
+            require(xBalance >= amountOut, "Insufficient xBalance");
+            newXBalance = xBalance - amountOut;
+        } else {
+            // Sell: Only tokenB (y) moves out
+            require(yBalance >= amountOut, "Insufficient yBalance");
+            newYBalance = yBalance - amountOut;
+        }
+
+        require(newYBalance > 0, "Zero new yBalance");
+        return (newXBalance * 1e18) / newYBalance;
     }
 
     function _transferToken(address token, address from, address to, uint256 amount) internal virtual {
