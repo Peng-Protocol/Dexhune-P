@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.2;
 
-// Version: 0.0.26
-// Changes:
+// Version: 0.0.27
+// Changes: Removed all references to orderLibrary as it is depreciated. 
+// Changes 0.0.26:
 // - Fixed TypeError in processOrderSettlement by replacing invalid ternary operator in try-catch with if-else blocks for separate try-catch on this.executeBuyOrder and this.executeSellOrder.
 // - Preserved all prior changes from v0.0.25 (stack depth fixes, helper functions, etc.).
 
@@ -12,7 +13,6 @@ contract MFPRouter is MFPSettlementPartial {
     using SafeERC20 for IERC20;
 
     address public listingAgent;
-    address public orderLibrary;
     address public agent;
     address public registryAddress;
 
@@ -30,11 +30,6 @@ contract MFPRouter is MFPSettlementPartial {
     function setListingAgent(address _listingAgent) external onlyOwner {
         require(_listingAgent != address(0), "Invalid listing agent");
         listingAgent = _listingAgent;
-    }
-
-    function setOrderLibrary(address _orderLibrary) external onlyOwner {
-        require(_orderLibrary != address(0), "Invalid order library");
-        orderLibrary = _orderLibrary;
     }
 
     function setAgent(address _agent) external onlyOwner {
