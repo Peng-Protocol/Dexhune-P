@@ -5,8 +5,9 @@ SPDX-License-Identifier: BSD-3-Clause
 // Specifying Solidity version for compatibility
 pragma solidity ^0.8.2;
 
-// Version: 0.0.5
+// Version: 0.0.6
 // Changes:
+// - v0.0.6: Updated IOMFListing and IOMFLiquidityTemplate interfaces to align with OMFInterfaces.sol (v0.0.2) and OMFLiquidityTemplate.sol (v0.0.13). Replaced IOMFListing with full interface including volumeBalances, volumeBalanceView, getPrice, and getRegistryAddress. Updated IOMFLiquidityTemplate to include all external and view functions from OMFInterfaces.sol.
 // - v0.0.5: Fixed DeclarationError in setLiquidityLogic function at line 264 by replacing incorrect 'listingLogic' with 'liquidityLogic' in require statement.
 // - v0.0.4: Fixed getTopLiquidityProviders function to correctly iterate over _listingLiquidity mapping for a given listingId to retrieve users and their liquidity amounts, replacing incorrect use of _allListings as user addresses.
 // - v0.0.3: Fixed ParserError at line 369 in globalizeLiquidity function by replacing invalid 'address Missinfg(61: Invalid user address)address(0)' with 'address(0)' for proper user address validation.
@@ -31,12 +32,71 @@ interface IOMFListingTemplate {
 
 // Defining interface for liquidity template
 interface IOMFLiquidityTemplate {
-    function setRouters(address[] memory _routers) external; // Sets array of routers
-    function setListingId(uint256 _listingId) external; // Sets listing ID
-    function setListingAddress(address _listingAddress) external; // Links listing contract
-    function setTokens(address _tokenA, address _tokenB) external; // Sets token pair
-    function setAgent(address _agent) external; // Sets agent address
-    function getListingAddress(uint256) external view returns (address); // Retrieves listing address
+    // Structs
+    struct LiquidityDetails {
+        uint256 xLiquid; // Token-A liquidity
+        uint256 yLiquid; // Token-B liquidity
+        uint256 xFees; // Token-A fees
+        uint256 yFees; // Token-B fees
+    }
+
+    struct Slot {
+        address depositor; // Slot owner
+        address recipient; // Not used
+        uint256 allocation; // Allocated liquidity
+        uint256 dVolume; // Volume at deposit
+        uint256 timestamp; // Deposit timestamp
+    }
+
+    struct UpdateType {
+        uint8 updateType; // 0 = balance, 1 = fees, 2 = xSlot, 3 = ySlot
+        uint256 index; // 0 = xFees/xLiquid, 1 = yFees/yLiquid, or slot index
+        uint256 value; // Amount or allocation (normalized)
+        address addr; // Depositor
+        address recipient; // Not used
+    }
+
+    struct PreparedWithdrawal {
+        uint256 amountA; // Token-A withdrawal amount
+        uint256 amountB; // Token-B withdrawal amount
+    }
+
+    // External functions
+    function setRouters(address[] memory routers) external; // Sets router addresses
+    function setListingId(uint256 listingId) external; // Sets listing ID
+    function setListingAddress(address listingAddress) external; // Sets listing contract address
+    function setTokens(address tokenA, address tokenB) external; // Sets token addresses
+    function setAgent(address agent) external; // Sets agent address
+    function update(address caller, UpdateType[] memory updates) external; // Updates liquidity or fees
+    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external; // Changes slot depositor
+    function deposit(address caller, address token, uint256 amount) external; // Deposits tokens
+    function xPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory); // Prepares tokenA withdrawal
+    function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external; // Executes tokenA withdrawal
+    function yPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory); // Prepares tokenB withdrawal
+    function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external; // Executes tokenB withdrawal
+    function claimFees(address caller, address listingAddress, uint256 liquidityIndex, bool isX, uint256 volume) external; // Claims fees
+    function transact(address caller, address token, uint256 amount, address recipient) external; // Handles token transfers
+    function addFees(address caller, bool isX, uint256 fee) external; // Adds fees
+    function updateLiquidity(address caller, bool isX, uint256 amount) external; // Updates liquidity balances
+
+    // View functions for state variables and mappings
+    function routersView(address router) external view returns (bool); // Returns router status
+    function routersSetView() external view returns (bool); // Returns routersSet flag
+    function listingAddressView() external view returns (address); // Returns listing address
+    function tokenAView() external view returns (address); // Returns tokenA address
+    function tokenBView() external view returns (address); // Returns tokenB address
+    function decimalAView() external view returns (uint8); // Returns tokenA decimals
+    function decimalBView() external view returns (uint8); // Returns tokenB decimals
+    function listingIdView() external view returns (uint256); // Returns listing ID
+    function agentView() external view returns (address); // Returns agent address
+    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees); // Returns liquidity details
+    function activeXLiquiditySlotsView() external view returns (uint256[] memory); // Returns active tokenA slots
+    function activeYLiquiditySlotsView() external view returns (uint256[] memory); // Returns active tokenB slots
+    function userIndexView(address user) external view returns (uint256[] memory); // Returns user slot indices
+    function getXSlotView(uint256 index) external view returns (Slot memory); // Returns tokenA slot
+    function getYSlotView(uint256 index) external view returns (Slot memory); // Returns tokenB slot
+    function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount); // Returns liquidity amounts
+    function getListingAddress(uint256 listingId) external view returns (address); // Returns listing address
 }
 
 // Defining interface for listing logic
@@ -51,7 +111,11 @@ interface IOMFLiquidityLogic {
 
 // Defining interface for listing contract
 interface IOMFListing {
-    function liquidityAddressView() external view returns (address); // Retrieves liquidity address
+    function liquidityAddressView(uint256 listingId) external view returns (address); // Retrieves liquidity address
+    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance); // Returns volume balances
+    function volumeBalanceView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume); // Returns volume balances
+    function getPrice() external view returns (uint256); // Returns oracle price
+    function getRegistryAddress() external view returns (address); // Returns registry address
 }
 
 contract OMFAgent is Ownable {
@@ -336,7 +400,7 @@ contract OMFAgent is Ownable {
     ) external returns (address listingAddress, address liquidityAddress) {
         address deployedListing = prepListing(tokenA, oracleAddress, oracleDecimals, oracleViewFunction); // Prepares and deploys listing
         listingAddress = deployedListing;
-        liquidityAddress = IOMFListing(deployedListing).liquidityAddressView(); // Retrieves liquidity address
+        liquidityAddress = IOMFListing(deployedListing).liquidityAddressView(_listingCount - 1); // Retrieves liquidity address
         return (listingAddress, liquidityAddress);
     }
 
@@ -374,7 +438,7 @@ contract OMFAgent is Ownable {
 
         address listingAddress = _getListing[tokenA][tokenB]; // Retrieves listing address
         require(listingAddress != address(0), "Listing not found");
-        require(IOMFListing(listingAddress).liquidityAddressView() == msg.sender, "Caller is not liquidity contract");
+        require(IOMFListing(listingAddress).liquidityAddressView(listingId) == msg.sender, "Caller is not liquidity contract");
 
         _updateGlobalLiquidity(listingId, tokenA, tokenB, user, amount, isDeposit); // Updates liquidity
     }
