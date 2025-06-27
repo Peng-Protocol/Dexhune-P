@@ -48,6 +48,7 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
 - `allListings` (address[]): Array of all listing addresses created.
 - `allListedTokens` (address[]): Array of all unique tokens listed.
 - `queryByAddress` (mapping - address, uint256[]): Maps a token to an array of listing IDs involving that token.
+- `liquidityProviders` (mapping - uint256, address[]): Maps listing ID to an array of users who provided liquidity.
 - `globalLiquidity` (mapping - address, address, address, uint256): Tracks liquidity per user for each tokenA-tokenB pair.
 - `totalLiquidityPerPair` (mapping - address, address, uint256): Total liquidity for each tokenA-tokenB pair.
 - `userTotalLiquidity` (mapping - address, uint256): Total liquidity contributed by each user across all pairs.
@@ -160,10 +161,18 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
     - `amount` (uint256): Liquidity amount to add or remove.
     - `isDeposit` (bool): True for deposit, false for withdrawal.
   - **Actions:**
-    - If isDeposit, adds amount to globalLiquidity, totalLiquidityPerPair, userTotalLiquidity, and listingLiquidity.
+    - If isDeposit, adds amount to globalLiquidity, totalLiquidityPerPair, userTotalLiquidity, and listingLiquidity, and appends user to liquidityProviders if their liquidity was previously zero.
     - If not isDeposit, checks sufficient liquidity, then subtracts amount from mappings.
     - Updates historicalLiquidityPerPair and historicalLiquidityPerUser with current timestamp.
     - Emits GlobalLiquidityChanged event.
+- **userExistsInProviders** (Internal)
+  - **Parameters:**
+    - `listingId` (uint256): ID of the listing.
+    - `user` (address): User to check.
+  - **Actions:**
+    - Checks if the user exists in the liquidityProviders array for the given listingId.
+  - **Returns:**
+    - `bool`: True if the user exists in liquidityProviders, false otherwise.
 
 #### Order Management Functions
 - **globalizeOrders**
@@ -246,8 +255,8 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
     - `listingId` (uint256): Listing ID to analyze.
     - `maxIterations` (uint256): Maximum users to return.
   - **Actions:**
-    - Validates non-zero maxIterations.
-    - Limits to maxIterations or allListings length.
+    - Validates non-zero maxIterations and valid listingId.
+    - Limits to maxIterations or liquidityProviders length for the listing.
     - Collects non-zero listingLiquidity amounts into TrendData array.
     - Sorts in descending order via _sortDescending.
     - Returns users and amounts arrays.
@@ -368,7 +377,6 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
     - Retrieves length of allListedTokens array.
   - **Returns:**
     - `uint256`: Total number of listed tokens.
-
 
 # SSListingTemplate Documentation
 
