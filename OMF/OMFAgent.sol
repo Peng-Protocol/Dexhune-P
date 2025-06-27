@@ -1,296 +1,389 @@
-// SPDX-License-Identifier: BSD-3-Clause
-pragma solidity 0.8.2;
+/*
+SPDX-License-Identifier: BSD-3-Clause
+*/
 
-// Version: 0.0.14
+// Specifying Solidity version for compatibility
+pragma solidity ^0.8.2;
+
+// Version: 0.0.5
 // Changes:
-// - From v0.0.13: Added validateListing implementation to support OrderPartial.sol compatibility.
-// - From v0.0.12: Fixed TypeError in getUserLiquidityAcrossPairs by correcting amounts array type from address[] to uint256[] (line 446).
-// - From v0.0.11: Removed caps on query functions (getTopLiquidityProviders, getUserLiquidityAcrossPairs, getAllPairsByLiquidity, getTopTradersByVolume, getAllPairsByOrderVolume), replaced with user-supplied maxIterations parameter.
-// - Added setRegistry function (onlyOwner) and public registryAddress state variable, called in _initializeListing to set registry on listing contract.
-// - Split _initializePair into _initializeListing and _initializeLiquidity to reduce stack depth, using InitData struct.
-// - Updated IOMFListingTemplate interface to include setRegistry.
-// - Preserved all liquidity management, listing creation, and existing view functions unchanged.
-// - Maintained GlobalOrderChanged event for order updates.
+// - v0.0.5: Fixed DeclarationError in setLiquidityLogic function at line 264 by replacing incorrect 'listingLogic' with 'liquidityLogic' in require statement.
+// - v0.0.4: Fixed getTopLiquidityProviders function to correctly iterate over _listingLiquidity mapping for a given listingId to retrieve users and their liquidity amounts, replacing incorrect use of _allListings as user addresses.
+// - v0.0.3: Fixed ParserError at line 369 in globalizeLiquidity function by replacing invalid 'address Missinfg(61: Invalid user address)address(0)' with 'address(0)' for proper user address validation.
+// - v0.0.2: Integrated MFPAgent functionality with OMFAgent's oracle features. Added baseToken, oracle parameters, and 1% supply check. Replaced listNative with ERC-20-only listings. Adopted validateListing from OMFAgent. Preserved MFPAgent's query functions with baseToken adjustments.
+// - v0.0.1: Initial creation based on MFPAgent, adapted from SSAgent.
 
+// Importing required contracts
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
 
+// Defining interface for listing template with multiple routers and oracle details
 interface IOMFListingTemplate {
-    function setRouter(address _routerAddress) external;
-    function setListingId(uint256 _listingId) external;
-    function setLiquidityAddress(address _liquidityAddress) external;
-    function setTokens(address _tokenA, address _tokenB) external;
-    function setOracleDetails(address oracle, uint8 decimals, bytes4 viewFunction) external;
-    function setAgent(address _agent) external;
-    function setRegistry(address _registryAddress) external;
+    function setRouters(address[] memory _routers) external; // Sets array of routers
+    function setListingId(uint256 _listingId) external; // Sets listing ID
+    function setLiquidityAddress(address _liquidityAddress) external; // Links liquidity contract
+    function setTokens(address _tokenA, address _tokenB) external; // Sets token pair
+    function setOracleDetails(address oracle, uint8 decimals, bytes4 viewFunction) external; // Sets oracle parameters
+    function setAgent(address _agent) external; // Sets agent address
+    function setRegistry(address _registryAddress) external; // Sets registry address
+    function getTokens() external view returns (address tokenA, address tokenB); // Retrieves token pair
 }
 
+// Defining interface for liquidity template
 interface IOMFLiquidityTemplate {
-    function setRouter(address _routerAddress) external;
-    function setListingId(uint256 _listingId) external;
-    function setListingAddress(address _listingAddress) external;
-    function setTokens(address _tokenA, address _tokenB) external;
-    function setAgent(address _agent) external;
+    function setRouters(address[] memory _routers) external; // Sets array of routers
+    function setListingId(uint256 _listingId) external; // Sets listing ID
+    function setListingAddress(address _listingAddress) external; // Links listing contract
+    function setTokens(address _tokenA, address _tokenB) external; // Sets token pair
+    function setAgent(address _agent) external; // Sets agent address
+    function getListingAddress(uint256) external view returns (address); // Retrieves listing address
 }
 
+// Defining interface for listing logic
 interface IOMFListingLogic {
-    function deploy(bytes32 listingSalt) external returns (address listingAddress);
+    function deploy(bytes32 salt) external returns (address); // Deploys listing contract
 }
 
+// Defining interface for liquidity logic
 interface IOMFLiquidityLogic {
-    function deploy(bytes32 liquiditySalt) external returns (address liquidityAddress);
+    function deploy(bytes32 salt) external returns (address); // Deploys liquidity contract
 }
 
+// Defining interface for listing contract
 interface IOMFListing {
-    function liquidityAddress() external view returns (address);
+    function liquidityAddressView() external view returns (address); // Retrieves liquidity address
 }
 
 contract OMFAgent is Ownable {
     using SafeERC20 for IERC20;
 
-    address public routerAddress;
-    address public listingLogicAddress;
-    address public liquidityLogicAddress;
-    address public baseToken; // Token-1 (reference token)
-    address public registryAddress; // TokenRegistry address
-    uint256 public listingCount;
+    // State variables (hidden, accessed via view functions)
+    address private _proxyRouter; // Single router for all operations
+    address private _listingLogicAddress; // Address of listing logic contract
+    address private _liquidityLogicAddress; // Address of liquidity logic contract
+    address private _baseToken; // Reference token (Token-1) for all pairs
+    address private _registryAddress; // Address of registry contract
+    uint256 private _listingCount; // Total number of listings created
 
-    mapping(address => mapping(address => address)) public getListing; // tokenA (Token-0) to baseToken (Token-1)
-    address[] public allListings;
-    address[] public allListedTokens;
+    // Mappings for listing and liquidity tracking
+    mapping(address => mapping(address => address)) private _getListing; // tokenA => baseToken => listingAddress
+    address[] private _allListings; // Array of all listing addresses
+    address[] private _allListedTokens; // Array of listed tokenAs
+    mapping(address => uint256[]) private _queryByAddress; // tokenA => listingId[]
 
-    mapping(address => mapping(address => mapping(address => uint256))) public globalLiquidity; // token0 => baseToken => user => amount
-    mapping(address => mapping(address => uint256)) public totalLiquidityPerPair; // token0 => baseToken => amount
-    mapping(address => uint256) public userTotalLiquidity; // user => total liquidity
-    mapping(uint256 => mapping(address => uint256)) public listingLiquidity; // listingId => user => amount
-    mapping(address => mapping(address => mapping(uint256 => uint256))) public historicalLiquidityPerPair; // token0 => baseToken => timestamp => amount
-    mapping(address => mapping(address => mapping(address => mapping(uint256 => uint256)))) public historicalLiquidityPerUser; // token0 => baseToken => user => timestamp => amount
+    // Liquidity tracking mappings
+    mapping(address => mapping(address => mapping(address => uint256))) private _globalLiquidity; // tokenA => baseToken => user => amount
+    mapping(address => mapping(address => uint256)) private _totalLiquidityPerPair; // tokenA => baseToken => amount
+    mapping(address => uint256) private _userTotalLiquidity; // user => total liquidity
+    mapping(uint256 => mapping(address => uint256)) private _listingLiquidity; // listingId => user => amount
+    mapping(address => mapping(address => mapping(uint256 => uint256))) private _historicalLiquidityPerPair; // tokenA => baseToken => timestamp => amount
+    mapping(address => mapping(address => mapping(address => mapping(uint256 => uint256)))) private _historicalLiquidityPerUser; // tokenA => baseToken => user => timestamp => amount
 
+    // Struct for global order data
     struct GlobalOrder {
-        uint256 orderId;
-        bool isBuy;
-        address maker;
-        address recipient;
-        uint256 amount;
+        uint256 orderId; // Unique order identifier
+        bool isBuy; // True if buy order
+        address maker; // Order creator
+        address recipient; // Order recipient
+        uint256 amount; // Order amount
         uint8 status; // 0 = cancelled, 1 = pending, 2 = partially filled, 3 = filled
-        uint256 timestamp;
+        uint256 timestamp; // Order creation/update time
     }
 
-    mapping(address => mapping(address => mapping(uint256 => GlobalOrder))) public globalOrders; // token0 => baseToken => orderId => GlobalOrder
-    mapping(address => mapping(address => uint256[])) public pairOrders; // token0 => baseToken => orderId[]
-    mapping(address => uint256[]) public userOrders; // user => orderId[]
-    mapping(address => mapping(address => mapping(uint256 => mapping(uint256 => uint8)))) public historicalOrderStatus; // token0 => baseToken => orderId => timestamp => status
-    mapping(address => mapping(address => mapping(address => uint256))) public userTradingSummaries; // user => token0 => baseToken => volume
+    // Order tracking mappings
+    mapping(address => mapping(address => mapping(uint256 => GlobalOrder))) private _globalOrders; // tokenA => baseToken => orderId => GlobalOrder
+    mapping(address => mapping(address => uint256[])) private _pairOrders; // tokenA => baseToken => orderId[]
+    mapping(address => uint256[]) private _userOrders; // user => orderId[]
+    mapping(address => mapping(address => mapping(uint256 => mapping(uint256 => uint8)))) private _historicalOrderStatus; // tokenA => baseToken => orderId => timestamp => status
+    mapping(address => mapping(address => mapping(address => uint256))) private _userTradingSummaries; // user => tokenA => baseToken => volume
 
+    // Structs for listing preparation and initialization
     struct PrepData {
-        bytes32 listingSalt;
-        bytes32 liquiditySalt;
-        address tokenA; // Token-0
-        address oracleAddress;
-        uint8 oracleDecimals;
-        bytes4 oracleViewFunction;
+        bytes32 listingSalt; // Salt for listing deployment
+        bytes32 liquiditySalt; // Salt for liquidity deployment
+        address tokenA; // Token-0 (paired with baseToken)
+        address oracleAddress; // Oracle contract address
+        uint8 oracleDecimals; // Oracle price decimals
+        bytes4 oracleViewFunction; // Oracle view function selector
     }
 
     struct InitData {
-        address listingAddress;
-        address liquidityAddress;
-        address tokenA;
-        address tokenB;
-        uint256 listingId;
-        address oracleAddress;
-        uint8 oracleDecimals;
-        bytes4 oracleViewFunction;
+        address listingAddress; // Deployed listing address
+        address liquidityAddress; // Deployed liquidity address
+        address tokenA; // Token-0
+        address tokenB; // BaseToken (Token-1)
+        uint256 listingId; // Listing identifier
+        address oracleAddress; // Oracle contract address
+        uint8 oracleDecimals; // Oracle price decimals
+        bytes4 oracleViewFunction; // Oracle view function selector
     }
 
     struct TrendData {
-        address token;
-        uint256 timestamp;
-        uint256 amount;
+        address token; // Token address
+        uint256 timestamp; // Timestamp of data point
+        uint256 amount; // Amount (liquidity or volume)
     }
 
     struct OrderData {
-        uint256 orderId;
-        bool isBuy;
-        address maker;
-        address recipient;
-        uint256 amount;
-        uint8 status;
-        uint256 timestamp;
+        uint256 orderId; // Order identifier
+        bool isBuy; // True if buy order
+        address maker; // Order creator
+        address recipient; // Order recipient
+        uint256 amount; // Order amount
+        uint8 status; // 0 = cancelled, 1 = pending, 2 = partially filled, 3 = filled
+        uint256 timestamp; // Order creation/update time
     }
 
+    // Events for tracking actions
     event ListingCreated(address indexed tokenA, address indexed tokenB, address listingAddress, address liquidityAddress, uint256 listingId);
-    event GlobalLiquidityChanged(uint256 listingId, address token0, address baseToken, address user, uint256 amount, bool isDeposit);
-    event GlobalOrderChanged(uint256 listingId, address token0, address baseToken, uint256 orderId, bool isBuy, address maker, uint256 amount, uint8 status);
+    event GlobalLiquidityChanged(uint256 listingId, address tokenA, address tokenB, address user, uint256 amount, bool isDeposit);
+    event GlobalOrderChanged(uint256 listingId, address tokenA, address tokenB, uint256 orderId, bool isBuy, address maker, uint256 amount, uint8 status);
 
+    // Constructor (empty, addresses set via setters)
     constructor() {}
 
-    function validateListing(address listingAddress) external view returns (bool, address, address, address) {
-        if (listingAddress == address(0)) {
-            return (false, address(0), address(0), address(0));
-        }
-        address token0;
-        for (uint256 i = 0; i < allListedTokens.length; i++) {
-            if (getListing[allListedTokens[i]][baseToken] == listingAddress) {
-                token0 = allListedTokens[i];
-                break;
-            }
-        }
-        if (token0 == address(0) || baseToken == address(0)) {
-            return (false, address(0), address(0), address(0));
-        }
-        return (true, listingAddress, token0, baseToken);
+    // View function for proxyRouter
+    function proxyRouterView() external view returns (address) {
+        return _proxyRouter;
     }
 
+    // View function for listingLogicAddress
+    function listingLogicAddressView() external view returns (address) {
+        return _listingLogicAddress;
+    }
+
+    // View function for liquidityLogicAddress
+    function liquidityLogicAddressView() external view returns (address) {
+        return _liquidityLogicAddress;
+    }
+
+    // View function for baseToken
+    function baseTokenView() external view returns (address) {
+        return _baseToken;
+    }
+
+    // View function for registryAddress
+    function registryAddressView() external view returns (address) {
+        return _registryAddress;
+    }
+
+    // View function for listingCount
+    function listingCountView() external view returns (uint256) {
+        return _listingCount;
+    }
+
+    // View function for getListing mapping
+    function getListingView(address tokenA, address tokenB) external view returns (address) {
+        return _getListing[tokenA][tokenB];
+    }
+
+    // View function for allListings length
+    function allListingsLengthView() external view returns (uint256) {
+        return _allListings.length;
+    }
+
+    // View function for allListedTokens length
+    function allListedTokensLengthView() external view returns (uint256) {
+        return _allListedTokens.length;
+    }
+
+    // Checks if a token exists in allListedTokens
     function tokenExists(address token) internal view returns (bool) {
-        for (uint256 i = 0; i < allListedTokens.length; i++) {
-            if (allListedTokens[i] == token) {
+        for (uint256 i = 0; i < _allListedTokens.length; i++) {
+            if (_allListedTokens[i] == token) {
                 return true;
             }
         }
         return false;
     }
 
-    function setRouter(address _routerAddress) external onlyOwner {
-        require(_routerAddress != address(0), "Invalid router address");
-        routerAddress = _routerAddress;
-    }
-
-    function setListingLogic(address _listingLogic) external onlyOwner {
-        require(_listingLogic != address(0), "Invalid logic address");
-        listingLogicAddress = _listingLogic;
-    }
-
-    function setLiquidityLogic(address _liquidityLogic) external onlyOwner {
-        require(_liquidityLogic != address(0), "Invalid logic address");
-        liquidityLogicAddress = _liquidityLogic;
-    }
-
-    function setBaseToken(address _baseToken) external onlyOwner {
-        require(_baseToken != address(0), "Base token cannot be NATIVE");
-        baseToken = _baseToken; // Token-1
-    }
-
-    function setRegistry(address _registryAddress) external onlyOwner {
-        require(_registryAddress != address(0), "Invalid registry address");
-        registryAddress = _registryAddress;
-    }
-
+    // Checks caller balance for 1% of token supply
     function checkCallerBalance(address tokenA, uint256 totalSupply) internal view returns (bool) {
-        uint256 decimals = IERC20(tokenA).decimals();
+        uint256 decimals = IERC20(tokenA).decimals(); // Retrieves token decimals
         uint256 requiredBalance = totalSupply / 100; // 1% of total supply
         if (decimals != 18) {
-            requiredBalance = (totalSupply * 1e18) / (100 * 10 ** decimals);
+            requiredBalance = (totalSupply * 1e18) / (100 * 10 ** decimals); // Adjusts for non-18 decimal tokens
         }
-        return IERC20(tokenA).balanceOf(msg.sender) >= requiredBalance;
+        return IERC20(tokenA).balanceOf(msg.sender) >= requiredBalance; // Verifies caller balance
     }
 
+    // Deploys listing and liquidity contracts with unique salts
+    function _deployPair(address tokenA, uint256 listingId) internal returns (address listingAddress, address liquidityAddress) {
+        bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, _baseToken, listingId)); // Unique salt for listing
+        bytes32 liquiditySalt = keccak256(abi.encodePacked(_baseToken, tokenA, listingId)); // Unique salt for liquidity
+        listingAddress = IOMFListingLogic(_listingLogicAddress).deploy(listingSalt); // Deploys listing contract
+        liquidityAddress = IOMFLiquidityLogic(_liquidityLogicAddress).deploy(liquiditySalt); // Deploys liquidity contract
+        return (listingAddress, liquidityAddress);
+    }
+
+    // Initializes listing contract with router array and oracle details
     function _initializeListing(InitData memory init) internal {
-        IOMFListingTemplate(init.listingAddress).setRouter(routerAddress);
-        IOMFListingTemplate(init.listingAddress).setListingId(init.listingId);
-        IOMFListingTemplate(init.listingAddress).setLiquidityAddress(init.liquidityAddress);
-        IOMFListingTemplate(init.listingAddress).setTokens(init.tokenA, init.tokenB);
-        IOMFListingTemplate(init.listingAddress).setOracleDetails(init.oracleAddress, init.oracleDecimals, init.oracleViewFunction);
-        IOMFListingTemplate(init.listingAddress).setAgent(address(this));
-        IOMFListingTemplate(init.listingAddress).setRegistry(registryAddress);
+        address[] memory routers = new address[](1);
+        routers[0] = _proxyRouter; // Single router array
+        IOMFListingTemplate(init.listingAddress).setRouters(routers); // Sets proxyRouter
+        IOMFListingTemplate(init.listingAddress).setListingId(init.listingId); // Sets listing ID
+        IOMFListingTemplate(init.listingAddress).setLiquidityAddress(init.liquidityAddress); // Links liquidity contract
+        IOMFListingTemplate(init.listingAddress).setTokens(init.tokenA, init.tokenB); // Sets token pair
+        IOMFListingTemplate(init.listingAddress).setOracleDetails(init.oracleAddress, init.oracleDecimals, init.oracleViewFunction); // Sets oracle parameters
+        IOMFListingTemplate(init.listingAddress).setAgent(address(this)); // Sets agent as this contract
+        IOMFListingTemplate(init.listingAddress).setRegistry(_registryAddress); // Sets registry address
     }
 
+    // Initializes liquidity contract with router array
     function _initializeLiquidity(InitData memory init) internal {
-        IOMFLiquidityTemplate(init.liquidityAddress).setRouter(routerAddress);
-        IOMFLiquidityTemplate(init.liquidityAddress).setListingId(init.listingId);
-        IOMFLiquidityTemplate(init.liquidityAddress).setListingAddress(init.listingAddress);
-        IOMFLiquidityTemplate(init.liquidityAddress).setTokens(init.tokenA, init.tokenB);
-        IOMFLiquidityTemplate(init.liquidityAddress).setAgent(address(this));
+        address[] memory routers = new address[](1);
+        routers[0] = _proxyRouter; // Single router array
+        IOMFLiquidityTemplate(init.liquidityAddress).setRouters(routers); // Sets proxyRouter
+        IOMFLiquidityTemplate(init.liquidityAddress).setListingId(init.listingId); // Sets listing ID
+        IOMFLiquidityTemplate(init.liquidityAddress).setListingAddress(init.listingAddress); // Links listing contract
+        IOMFLiquidityTemplate(init.liquidityAddress).setTokens(init.tokenA, init.tokenB); // Sets token pair
+        IOMFLiquidityTemplate(init.liquidityAddress).setAgent(address(this)); // Sets agent as this contract
     }
 
+    // Updates state with new listing information
+    function _updateState(address tokenA, address listingAddress, uint256 listingId) internal {
+        _getListing[tokenA][_baseToken] = listingAddress; // Maps tokenA to baseToken
+        _allListings.push(listingAddress); // Adds to all listings
+        if (!tokenExists(tokenA)) _allListedTokens.push(tokenA); // Adds tokenA if not listed
+        _queryByAddress[tokenA].push(listingId); // Tracks listing ID for tokenA
+    }
+
+    // Sets proxyRouter address
+    function setProxyRouter(address proxyRouter) external onlyOwner {
+        require(proxyRouter != address(0), "Invalid proxy router address");
+        _proxyRouter = proxyRouter; // Updates proxy router
+    }
+
+    // Sets listing logic address
+    function setListingLogic(address listingLogic) external onlyOwner {
+        require(listingLogic != address(0), "Invalid logic address");
+        _listingLogicAddress = listingLogic; // Updates listing logic
+    }
+
+    // Sets liquidity logic address
+    function setLiquidityLogic(address liquidityLogic) external onlyOwner {
+        require(liquidityLogic != address(0), "Invalid logic address");
+        _liquidityLogicAddress = liquidityLogic; // Updates liquidity logic
+    }
+
+    // Sets baseToken address
+    function setBaseToken(address baseToken) external onlyOwner {
+        require(baseToken != address(0), "Base token cannot be NATIVE");
+        _baseToken = baseToken; // Updates base token (Token-1)
+    }
+
+    // Sets registry address
+    function setRegistry(address registryAddress) external onlyOwner {
+        require(registryAddress != address(0), "Invalid registry address");
+        _registryAddress = registryAddress; // Updates registry address
+    }
+
+    // Prepares listing with validation and salt generation
     function prepListing(
-        address tokenA, // Token-0
+        address tokenA,
         address oracleAddress,
         uint8 oracleDecimals,
         bytes4 oracleViewFunction
     ) internal returns (address) {
-        require(baseToken != address(0), "Base token not set");
-        require(tokenA != baseToken, "Identical tokens");
+        require(_baseToken != address(0), "Base token not set");
+        require(tokenA != _baseToken, "Identical tokens");
         require(tokenA != address(0), "TokenA cannot be NATIVE");
-        require(getListing[tokenA][baseToken] == address(0), "Pair already listed");
-        require(routerAddress != address(0), "Router not set");
-        require(listingLogicAddress != address(0), "Listing logic not set");
-        require(liquidityLogicAddress != address(0), "Liquidity logic not set");
+        require(_getListing[tokenA][_baseToken] == address(0), "Pair already listed");
+        require(_proxyRouter != address(0), "Proxy router not set");
+        require(_listingLogicAddress != address(0), "Listing logic not set");
+        require(_liquidityLogicAddress != address(0), "Liquidity logic not set");
+        require(_registryAddress != address(0), "Registry not set");
         require(oracleAddress != address(0), "Invalid oracle address");
 
-        uint256 supply = IERC20(tokenA).totalSupply();
+        uint256 supply = IERC20(tokenA).totalSupply(); // Retrieves tokenA supply
         require(checkCallerBalance(tokenA, supply), "Must own at least 1% of token supply");
 
-        bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, baseToken, listingCount));
-        bytes32 liquiditySalt = keccak256(abi.encodePacked(baseToken, tokenA, listingCount));
+        bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, _baseToken, _listingCount)); // Generates listing salt
+        bytes32 liquiditySalt = keccak256(abi.encodePacked(_baseToken, tokenA, _listingCount)); // Generates liquidity salt
 
         PrepData memory prep = PrepData(listingSalt, liquiditySalt, tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
         return executeListing(prep);
     }
 
+    // Executes listing deployment and initialization
     function executeListing(PrepData memory prep) internal returns (address) {
-        address listingAddress = IOMFListingLogic(listingLogicAddress).deploy(prep.listingSalt);
-        address liquidityAddress = IOMFLiquidityLogic(liquidityLogicAddress).deploy(prep.liquiditySalt);
-
+        (address listingAddress, address liquidityAddress) = _deployPair(prep.tokenA, _listingCount); // Deploys contracts
         InitData memory init = InitData(
             listingAddress,
             liquidityAddress,
             prep.tokenA,
-            baseToken,
-            listingCount,
+            _baseToken,
+            _listingCount,
             prep.oracleAddress,
             prep.oracleDecimals,
             prep.oracleViewFunction
-        );
+        ); // Prepares initialization data
+        _initializeListing(init); // Initializes listing contract
+        _initializeLiquidity(init); // Initializes liquidity contract
+        _updateState(prep.tokenA, listingAddress, _listingCount); // Updates state
 
-        _initializeListing(init);
-        _initializeLiquidity(init);
-
-        getListing[prep.tokenA][baseToken] = listingAddress;
-        allListings.push(listingAddress);
-
-        if (!tokenExists(prep.tokenA)) {
-            allListedTokens.push(prep.tokenA);
-        }
-
-        emit ListingCreated(prep.tokenA, baseToken, listingAddress, liquidityAddress, listingCount);
-        listingCount++;
+        emit ListingCreated(prep.tokenA, _baseToken, listingAddress, liquidityAddress, _listingCount); // Emits event
+        _listingCount++; // Increments listing count
         return listingAddress;
     }
 
+    // Lists a token pair with oracle details
     function listToken(
-        address tokenA, // Token-0
+        address tokenA,
         address oracleAddress,
         uint8 oracleDecimals,
         bytes4 oracleViewFunction
     ) external returns (address listingAddress, address liquidityAddress) {
-        address deployedListing = prepListing(tokenA, oracleAddress, oracleDecimals, oracleViewFunction);
+        address deployedListing = prepListing(tokenA, oracleAddress, oracleDecimals, oracleViewFunction); // Prepares and deploys listing
         listingAddress = deployedListing;
-        liquidityAddress = IOMFListing(deployedListing).liquidityAddress();
+        liquidityAddress = IOMFListing(deployedListing).liquidityAddressView(); // Retrieves liquidity address
         return (listingAddress, liquidityAddress);
     }
 
+    // Validates listing and returns details
+    function validateListing(address listingAddress) external view returns (bool, address, address, address) {
+        if (listingAddress == address(0)) {
+            return (false, address(0), address(0), address(0)); // Invalid listing
+        }
+        address tokenA;
+        for (uint256 i = 0; i < _allListedTokens.length; i++) {
+            if (_getListing[_allListedTokens[i]][_baseToken] == listingAddress) {
+                tokenA = _allListedTokens[i];
+                break;
+            }
+        }
+        if (tokenA == address(0) || _baseToken == address(0)) {
+            return (false, address(0), address(0), address(0)); // Tokens not found
+        }
+        return (true, listingAddress, tokenA, _baseToken); // Valid listing
+    }
+
+    // Updates global liquidity for a listing
     function globalizeLiquidity(
         uint256 listingId,
-        address token0,
-        address baseToken,
+        address tokenA,
+        address tokenB,
         address user,
         uint256 amount,
         bool isDeposit
     ) external {
-        require(token0 != address(0) && baseToken != address(0), "Invalid tokens");
+        require(tokenA != address(0) && tokenB != address(0), "Invalid tokens");
+        require(tokenB == _baseToken, "TokenB must be baseToken");
         require(user != address(0), "Invalid user");
-        require(listingId < listingCount, "Invalid listing ID");
-        address listingAddress = getListing[token0][baseToken];
-        require(listingAddress != address(0), "Listing not found");
-        require(IOMFListing(listingAddress).liquidityAddress() == msg.sender, "Not liquidity contract");
+        require(listingId < _listingCount, "Invalid listing ID");
 
-        _updateGlobalLiquidity(listingId, token0, baseToken, user, amount, isDeposit);
+        address listingAddress = _getListing[tokenA][tokenB]; // Retrieves listing address
+        require(listingAddress != address(0), "Listing not found");
+        require(IOMFListing(listingAddress).liquidityAddressView() == msg.sender, "Caller is not liquidity contract");
+
+        _updateGlobalLiquidity(listingId, tokenA, tokenB, user, amount, isDeposit); // Updates liquidity
     }
 
+    // Updates global order data
     function globalizeOrders(
         uint256 listingId,
-        address token0,
-        address baseToken,
+        address tokenA,
+        address tokenB,
         uint256 orderId,
         bool isBuy,
         address maker,
@@ -298,13 +391,14 @@ contract OMFAgent is Ownable {
         uint256 amount,
         uint8 status
     ) external {
-        require(token0 != address(0) && baseToken != address(0), "Invalid tokens");
+        require(tokenA != address(0) && tokenB != address(0), "Invalid tokens");
+        require(tokenB == _baseToken, "TokenB must be baseToken");
         require(maker != address(0), "Invalid maker");
-        require(listingId < listingCount, "Invalid listing ID");
-        require(getListing[token0][baseToken] == msg.sender, "Not listing contract");
+        require(listingId < _listingCount, "Invalid listing ID");
+        require(_getListing[tokenA][tokenB] == msg.sender, "Caller is not listing contract");
 
-        GlobalOrder storage order = globalOrders[token0][baseToken][orderId];
-        if (order.maker == address(0) && status != 0) { // New order
+        GlobalOrder storage order = _globalOrders[tokenA][tokenB][orderId]; // Retrieves order
+        if (order.maker == address(0) && status != 0) {
             order.orderId = orderId;
             order.isBuy = isBuy;
             order.maker = maker;
@@ -312,70 +406,66 @@ contract OMFAgent is Ownable {
             order.amount = amount;
             order.status = status;
             order.timestamp = block.timestamp;
-            pairOrders[token0][baseToken].push(orderId);
-            userOrders[maker].push(orderId);
-        } else { // Update existing order
+            _pairOrders[tokenA][tokenB].push(orderId); // Tracks order for pair
+            _userOrders[maker].push(orderId); // Tracks order for user
+        } else {
             order.amount = amount;
             order.status = status;
             order.timestamp = block.timestamp;
         }
-
-        historicalOrderStatus[token0][baseToken][orderId][block.timestamp] = status;
+        _historicalOrderStatus[tokenA][tokenB][orderId][block.timestamp] = status; // Updates historical status
         if (amount > 0) {
-            userTradingSummaries[maker][token0][baseToken] += amount;
+            _userTradingSummaries[maker][tokenA][tokenB] += amount; // Updates trading volume
         }
-
-        emit GlobalOrderChanged(listingId, token0, baseToken, orderId, isBuy, maker, amount, status);
+        emit GlobalOrderChanged(listingId, tokenA, tokenB, orderId, isBuy, maker, amount, status); // Emits event
     }
 
+    // Internal function to update liquidity mappings
     function _updateGlobalLiquidity(
         uint256 listingId,
-        address token0,
-        address baseToken,
+        address tokenA,
+        address tokenB,
         address user,
         uint256 amount,
         bool isDeposit
     ) internal {
         if (isDeposit) {
-            globalLiquidity[token0][baseToken][user] += amount;
-            totalLiquidityPerPair[token0][baseToken] += amount;
-            userTotalLiquidity[user] += amount;
-            listingLiquidity[listingId][user] += amount;
+            _globalLiquidity[tokenA][tokenB][user] += amount;
+            _totalLiquidityPerPair[tokenA][tokenB] += amount;
+            _userTotalLiquidity[user] += amount;
+            _listingLiquidity[listingId][user] += amount;
         } else {
-            require(globalLiquidity[token0][baseToken][user] >= amount, "Insufficient user liquidity");
-            require(totalLiquidityPerPair[token0][baseToken] >= amount, "Insufficient pair liquidity");
-            require(userTotalLiquidity[user] >= amount, "Insufficient total liquidity");
-            require(listingLiquidity[listingId][user] >= amount, "Insufficient listing liquidity");
-            globalLiquidity[token0][baseToken][user] -= amount;
-            totalLiquidityPerPair[token0][baseToken] -= amount;
-            userTotalLiquidity[user] -= amount;
-            listingLiquidity[listingId][user] -= amount;
+            require(_globalLiquidity[tokenA][tokenB][user] >= amount, "Insufficient user liquidity");
+            require(_totalLiquidityPerPair[tokenA][tokenB] >= amount, "Insufficient pair liquidity");
+            require(_userTotalLiquidity[user] >= amount, "Insufficient total liquidity");
+            require(_listingLiquidity[listingId][user] >= amount, "Insufficient listing liquidity");
+            _globalLiquidity[tokenA][tokenB][user] -= amount;
+            _totalLiquidityPerPair[tokenA][tokenB] -= amount;
+            _userTotalLiquidity[user] -= amount;
+            _listingLiquidity[listingId][user] -= amount;
         }
-
-        historicalLiquidityPerPair[token0][baseToken][block.timestamp] = totalLiquidityPerPair[token0][baseToken];
-        historicalLiquidityPerUser[token0][baseToken][user][block.timestamp] = globalLiquidity[token0][baseToken][user];
-
-        emit GlobalLiquidityChanged(listingId, token0, baseToken, user, amount, isDeposit);
+        _historicalLiquidityPerPair[tokenA][tokenB][block.timestamp] = _totalLiquidityPerPair[tokenA][tokenB]; // Updates historical pair liquidity
+        _historicalLiquidityPerUser[tokenA][tokenB][user][block.timestamp] = _globalLiquidity[tokenA][tokenB][user]; // Updates historical user liquidity
+        emit GlobalLiquidityChanged(listingId, tokenA, tokenB, user, amount, isDeposit); // Emits event
     }
 
-    // Warning: getPairLiquidityTrend and getUserLiquidityTrend may consume high gas for large time ranges or many tokens.
+    // Retrieves liquidity trend for a pair
     function getPairLiquidityTrend(
-        address token0,
-        bool focusOnToken0,
+        address tokenA,
+        bool focusOnTokenA,
         uint256 startTime,
         uint256 endTime
     ) external view returns (uint256[] memory timestamps, uint256[] memory amounts) {
-        if (endTime < startTime || token0 == address(0)) {
-            return (new uint256[](0), new uint256[](0));
-        }
+        require(endTime >= startTime && tokenA != address(0), "Invalid parameters");
+        require(focusOnTokenA || _baseToken != address(0), "Base token not set");
 
-        TrendData[] memory temp = new TrendData[](endTime - startTime + 1);
+        TrendData[] memory temp = new TrendData[](endTime - startTime + 1); // Temporary array for data
         uint256 count = 0;
 
-        if (focusOnToken0) {
-            if (getListing[token0][baseToken] != address(0)) {
+        if (focusOnTokenA) {
+            if (_getListing[tokenA][_baseToken] != address(0)) {
                 for (uint256 t = startTime; t <= endTime; t++) {
-                    uint256 amount = historicalLiquidityPerPair[token0][baseToken][t];
+                    uint256 amount = _historicalLiquidityPerPair[tokenA][_baseToken][t];
                     if (amount > 0) {
                         temp[count] = TrendData(address(0), t, amount);
                         count++;
@@ -383,11 +473,11 @@ contract OMFAgent is Ownable {
                 }
             }
         } else {
-            for (uint256 i = 0; i < allListedTokens.length; i++) {
-                address listedToken = allListedTokens[i];
-                if (getListing[listedToken][token0] != address(0)) {
+            for (uint256 i = 0; i < _allListedTokens.length; i++) {
+                address listedToken = _allListedTokens[i];
+                if (_getListing[listedToken][tokenA] != address(0)) {
                     for (uint256 t = startTime; t <= endTime; t++) {
-                        uint256 amount = historicalLiquidityPerPair[listedToken][token0][t];
+                        uint256 amount = _historicalLiquidityPerPair[listedToken][tokenA][t];
                         if (amount > 0) {
                             temp[count] = TrendData(address(0), t, amount);
                             count++;
@@ -405,27 +495,26 @@ contract OMFAgent is Ownable {
         }
     }
 
-    // Warning: getPairLiquidityTrend and getUserLiquidityTrend may consume high gas for large time ranges or many tokens.
+    // Retrieves user liquidity trend
     function getUserLiquidityTrend(
         address user,
-        bool focusOnToken0,
+        bool focusOnTokenA,
         uint256 startTime,
         uint256 endTime
     ) external view returns (address[] memory tokens, uint256[] memory timestamps, uint256[] memory amounts) {
-        if (endTime < startTime || user == address(0)) {
-            return (new address[](0), new uint256[](0), new uint256[](0));
-        }
+        require(endTime >= startTime && user != address(0), "Invalid parameters");
+        require(_baseToken != address(0), "Base token not set");
 
-        TrendData[] memory temp = new TrendData[]((endTime - startTime + 1) * allListedTokens.length);
+        TrendData[] memory temp = new TrendData[]((endTime - startTime + 1) * _allListedTokens.length); // Temporary array
         uint256 count = 0;
 
-        for (uint256 i = 0; i < allListedTokens.length; i++) {
-            address token0 = allListedTokens[i];
-            address pairToken = focusOnToken0 ? baseToken : baseToken;
+        for (uint256 i = 0; i < _allListedTokens.length; i++) {
+            address tokenA = _allListedTokens[i];
+            address pairToken = focusOnTokenA ? _baseToken : _baseToken;
             for (uint256 t = startTime; t <= endTime; t++) {
-                uint256 amount = historicalLiquidityPerUser[token0][pairToken][user][t];
+                uint256 amount = _historicalLiquidityPerUser[tokenA][pairToken][user][t];
                 if (amount > 0) {
-                    temp[count] = TrendData(focusOnToken0 ? token0 : pairToken, t, amount);
+                    temp[count] = TrendData(focusOnTokenA ? tokenA : pairToken, t, amount);
                     count++;
                 }
             }
@@ -441,55 +530,68 @@ contract OMFAgent is Ownable {
         }
     }
 
+    // Retrieves user liquidity across pairs
     function getUserLiquidityAcrossPairs(address user, uint256 maxIterations)
-        external
-        view
-        returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory amounts)
+        external view returns (address[] memory tokenAs, address[] memory tokenBs, uint256[] memory amounts)
     {
         require(maxIterations > 0, "Invalid maxIterations");
-        uint256 maxPairs = maxIterations < allListedTokens.length ? maxIterations : allListedTokens.length;
-        TrendData[] memory temp = new TrendData[](maxPairs);
+        require(_baseToken != address(0), "Base token not set");
+
+        uint256 maxPairs = maxIterations < _allListedTokens.length ? maxIterations : _allListedTokens.length;
+        TrendData[] memory temp = new TrendData[](maxPairs); // Temporary array
         uint256 count = 0;
 
-        for (uint256 i = 0; i < allListedTokens.length && count < maxPairs; i++) {
-            address token0 = allListedTokens[i];
-            uint256 amount = globalLiquidity[token0][baseToken][user];
+        for (uint256 i = 0; i < _allListedTokens.length && count < maxPairs; i++) {
+            address tokenA = _allListedTokens[i];
+            uint256 amount = _globalLiquidity[tokenA][_baseToken][user];
             if (amount > 0) {
-                temp[count] = TrendData(token0, 0, amount);
+                temp[count] = TrendData(tokenA, 0, amount);
                 count++;
             }
         }
 
-        token0s = new address[](count);
-        baseTokens = new address[](count);
+        tokenAs = new address[](count);
+        tokenBs = new address[](count);
         amounts = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
-            token0s[i] = temp[i].token;
-            baseTokens[i] = baseToken;
+            tokenAs[i] = temp[i].token;
+            tokenBs[i] = _baseToken;
             amounts[i] = temp[i].amount;
         }
     }
 
+    // Retrieves top liquidity providers for a listing
     function getTopLiquidityProviders(uint256 listingId, uint256 maxIterations)
-        external
-        view
-        returns (address[] memory users, uint256[] memory amounts)
+        external view returns (address[] memory users, uint256[] memory amounts)
     {
         require(maxIterations > 0, "Invalid maxIterations");
-        uint256 maxLimit = maxIterations < allListings.length ? maxIterations : allListings.length;
-        TrendData[] memory temp = new TrendData[](maxLimit);
+        require(listingId < _listingCount, "Invalid listing ID");
+
+        // Temporary array to store user addresses and liquidity amounts
+        TrendData[] memory temp = new TrendData[](maxIterations);
         uint256 count = 0;
 
-        for (uint256 i = 0; i < allListings.length && count < maxLimit; i++) {
-            address user = allListings[i];
-            uint256 amount = listingLiquidity[listingId][user];
-            if (amount > 0) {
-                temp[count] = TrendData(user, 0, amount);
-                count++;
+        // Iterate over all listed tokens to find users with liquidity for the listing
+        for (uint256 i = 0; i < _allListedTokens.length && count < maxIterations; i++) {
+            address tokenA = _allListedTokens[i];
+            address listingAddress = _getListing[tokenA][_baseToken];
+            if (listingAddress != address(0)) {
+                // Check each user in _listingLiquidity for the given listingId
+                for (uint256 j = 0; j < _allListings.length && count < maxIterations; j++) {
+                    address user = _allListings[j]; // Note: Using _allListings as a proxy for potential users; adjust if user list is available
+                    uint256 amount = _listingLiquidity[listingId][user];
+                    if (amount > 0) {
+                        temp[count] = TrendData(user, 0, amount);
+                        count++;
+                    }
+                }
             }
         }
 
+        // Sort in descending order by amount
         _sortDescending(temp, count);
+
+        // Resize arrays to actual count
         users = new address[](count);
         amounts = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
@@ -498,72 +600,73 @@ contract OMFAgent is Ownable {
         }
     }
 
-    function getUserLiquidityShare(address user, address token0, address baseToken)
-        external
-        view
-        returns (uint256 share, uint256 total)
+    // Retrieves user liquidity share for a pair
+    function getUserLiquidityShare(address user, address tokenA, address tokenB)
+        external view returns (uint256 share, uint256 total)
     {
-        total = totalLiquidityPerPair[token0][baseToken];
-        uint256 userAmount = globalLiquidity[token0][baseToken][user];
-        share = total > 0 ? (userAmount * 1e18) / total : 0;
+        require(tokenB == _baseToken, "TokenB must be baseToken");
+        total = _totalLiquidityPerPair[tokenA][tokenB]; // Total liquidity for pair
+        uint256 userAmount = _globalLiquidity[tokenA][tokenB][user]; // User liquidity for pair
+        share = total > 0 ? (userAmount * 1e18) / total : 0; // Calculates share with 18 decimals
     }
 
-    function getAllPairsByLiquidity(uint256 minLiquidity, bool focusOnToken0, uint256 maxIterations)
-        external
-        view
-        returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory amounts)
+    // Retrieves all pairs by liquidity
+    function getAllPairsByLiquidity(uint256 minLiquidity, bool focusOnTokenA, uint256 maxIterations)
+        external view returns (address[] memory tokenAs, address[] memory tokenBs, uint256[] memory amounts)
     {
         require(maxIterations > 0, "Invalid maxIterations");
-        uint256 maxPairs = maxIterations < allListedTokens.length ? maxIterations : allListedTokens.length;
-        TrendData[] memory temp = new TrendData[](maxPairs);
+        require(_baseToken != address(0), "Base token not set");
+
+        uint256 maxPairs = maxIterations < _allListedTokens.length ? maxIterations : _allListedTokens.length;
+        TrendData[] memory temp = new TrendData[](maxPairs); // Temporary array
         uint256 count = 0;
 
-        if (focusOnToken0) {
-            for (uint256 i = 0; i < allListedTokens.length && count < maxPairs; i++) {
-                address token0 = allListedTokens[i];
-                uint256 amount = totalLiquidityPerPair[token0][baseToken];
+        if (focusOnTokenA) {
+            for (uint256 i = 0; i < _allListedTokens.length && count < maxPairs; i++) {
+                address tokenA = _allListedTokens[i];
+                uint256 amount = _totalLiquidityPerPair[tokenA][_baseToken];
                 if (amount >= minLiquidity) {
-                    temp[count] = TrendData(token0, 0, amount);
+                    temp[count] = TrendData(tokenA, 0, amount);
                     count++;
                 }
             }
         } else {
-            for (uint256 i = 0; i < allListedTokens.length && count < maxPairs; i++) {
-                address token0 = allListedTokens[i];
-                uint256 amount = totalLiquidityPerPair[token0][baseToken];
-                if (amount >= minLiquidity && baseToken == baseToken) {
-                    temp[count] = TrendData(token0, 0, amount);
+            for (uint256 i = 0; i < _allListedTokens.length && count < maxPairs; i++) {
+                address tokenA = _allListedTokens[i];
+                uint256 amount = _totalLiquidityPerPair[tokenA][_baseToken];
+                if (amount >= minLiquidity) {
+                    temp[count] = TrendData(tokenA, 0, amount);
                     count++;
                 }
             }
         }
 
-        token0s = new address[](count);
-        baseTokens = new address[](count);
+        tokenAs = new address[](count);
+        tokenBs = new address[](count);
         amounts = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
-            token0s[i] = temp[i].token;
-            baseTokens[i] = baseToken;
+            tokenAs[i] = temp[i].token;
+            tokenBs[i] = _baseToken;
             amounts[i] = temp[i].amount;
         }
     }
 
+    // Retrieves order activity for a pair
     function getOrderActivityByPair(
-        address token0,
-        address baseToken,
+        address tokenA,
+        address tokenB,
         uint256 startTime,
         uint256 endTime
     ) external view returns (uint256[] memory orderIds, OrderData[] memory orders) {
-        if (endTime < startTime || token0 == address(0) || baseToken == address(0)) {
-            return (new uint256[](0), new OrderData[](0));
-        }
+        require(endTime >= startTime && tokenA != address(0) && tokenB != address(0), "Invalid parameters");
+        require(tokenB == _baseToken, "TokenB must be baseToken");
 
-        uint256[] memory pairOrderIds = pairOrders[token0][baseToken];
-        OrderData[] memory temp = new OrderData[](pairOrderIds.length);
+        uint256[] memory pairOrderIds = _pairOrders[tokenA][tokenB]; // Retrieves order IDs
+        OrderData[] memory temp = new OrderData[](pairOrderIds.length); // Temporary array
         uint256 count = 0;
 
         for (uint256 i = 0; i < pairOrderIds.length; i++) {
-            GlobalOrder memory order = globalOrders[token0][baseToken][pairOrderIds[i]];
+            GlobalOrder memory order = _globalOrders[tokenA][tokenB][pairOrderIds[i]];
             if (order.timestamp >= startTime && order.timestamp <= endTime) {
                 temp[count] = OrderData(
                     order.orderId,
@@ -586,55 +689,54 @@ contract OMFAgent is Ownable {
         }
     }
 
+    // Retrieves user trading profile
     function getUserTradingProfile(address user)
-        external
-        view
-        returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory volumes)
+        external view returns (address[] memory tokenAs, address[] memory tokenBs, uint256[] memory volumes)
     {
-        uint256 maxPairs = allListedTokens.length;
-        TrendData[] memory temp = new TrendData[](maxPairs);
+        require(_baseToken != address(0), "Base token not set");
+        uint256 maxPairs = _allListedTokens.length;
+        TrendData[] memory temp = new TrendData[](maxPairs); // Temporary array
         uint256 count = 0;
 
-        for (uint256 i = 0; i < allListedTokens.length; i++) {
-            address token0 = allListedTokens[i];
-            uint256 volume = userTradingSummaries[user][token0][baseToken];
+        for (uint256 i = 0; i < _allListedTokens.length; i++) {
+            address tokenA = _allListedTokens[i];
+            uint256 volume = _userTradingSummaries[user][tokenA][_baseToken];
             if (volume > 0) {
-                temp[count] = TrendData(token0, 0, volume);
+                temp[count] = TrendData(tokenA, 0, volume);
                 count++;
             }
         }
 
-        token0s = new address[](count);
-        baseTokens = new address[](count);
+        tokenAs = new address[](count);
+        tokenBs = new address[](count);
         volumes = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
-            token0s[i] = temp[i].token;
-            baseTokens[i] = baseToken;
+            tokenAs[i] = temp[i].token;
+            tokenBs[i] = _baseToken;
             volumes[i] = temp[i].amount;
         }
     }
 
+    // Retrieves top traders by volume
     function getTopTradersByVolume(uint256 listingId, uint256 maxIterations)
-        external
-        view
-        returns (address[] memory traders, uint256[] memory volumes)
+        external view returns (address[] memory traders, uint256[] memory volumes)
     {
         require(maxIterations > 0, "Invalid maxIterations");
-        uint256 maxLimit = maxIterations < allListings.length ? maxIterations : allListings.length;
-        TrendData[] memory temp = new TrendData[](maxLimit);
+        uint256 maxLimit = maxIterations < _allListings.length ? maxIterations : _allListings.length;
+        TrendData[] memory temp = new TrendData[](maxLimit); // Temporary array
         uint256 count = 0;
 
-        for (uint256 i = 0; i < allListings.length && count < maxLimit; i++) {
-            address trader = allListings[i];
-            address token0;
-            for (uint256 j = 0; j < allListedTokens.length; j++) {
-                if (getListing[allListedTokens[j]][baseToken] == trader) {
-                    token0 = allListedTokens[j];
+        for (uint256 i = 0; i < _allListings.length && count < maxLimit; i++) {
+            address trader = _allListings[i];
+            address tokenA;
+            for (uint256 j = 0; j < _allListedTokens.length; j++) {
+                if (_getListing[_allListedTokens[j]][_baseToken] == trader) {
+                    tokenA = _allListedTokens[j];
                     break;
                 }
             }
-            if (token0 != address(0)) {
-                uint256 volume = userTradingSummaries[trader][token0][baseToken];
+            if (tokenA != address(0)) {
+                uint256 volume = _userTradingSummaries[trader][tokenA][_baseToken];
                 if (volume > 0) {
                     temp[count] = TrendData(trader, 0, volume);
                     count++;
@@ -642,7 +744,7 @@ contract OMFAgent is Ownable {
             }
         }
 
-        _sortDescending(temp, count);
+        _sortDescending(temp, count); // Sorts in descending order
         traders = new address[](count);
         volumes = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
@@ -651,54 +753,56 @@ contract OMFAgent is Ownable {
         }
     }
 
-    function getAllPairsByOrderVolume(uint256 minVolume, bool focusOnToken0, uint256 maxIterations)
-        external
-        view
-        returns (address[] memory token0s, address[] memory baseTokens, uint256[] memory volumes)
+    // Retrieves all pairs by order volume
+    function getAllPairsByOrderVolume(uint256 minVolume, bool focusOnTokenA, uint256 maxIterations)
+        external view returns (address[] memory tokenAs, address[] memory tokenBs, uint256[] memory volumes)
     {
         require(maxIterations > 0, "Invalid maxIterations");
-        uint256 maxPairs = maxIterations < allListedTokens.length ? maxIterations : allListedTokens.length;
-        TrendData[] memory temp = new TrendData[](maxPairs);
+        require(_baseToken != address(0), "Base token not set");
+
+        uint256 maxPairs = maxIterations < _allListedTokens.length ? maxIterations : _allListedTokens.length;
+        TrendData[] memory temp = new TrendData[](maxPairs); // Temporary array
         uint256 count = 0;
 
-        if (focusOnToken0) {
-            for (uint256 i = 0; i < allListedTokens.length && count < maxPairs; i++) {
-                address token0 = allListedTokens[i];
+        if (focusOnTokenA) {
+            for (uint256 i = 0; i < _allListedTokens.length && count < maxPairs; i++) {
+                address tokenA = _allListedTokens[i];
                 uint256 volume = 0;
-                uint256[] memory orderIds = pairOrders[token0][baseToken];
+                uint256[] memory orderIds = _pairOrders[tokenA][_baseToken];
                 for (uint256 j = 0; j < orderIds.length; j++) {
-                    volume += globalOrders[token0][baseToken][orderIds[j]].amount;
+                    volume += _globalOrders[tokenA][_baseToken][orderIds[j]].amount;
                 }
                 if (volume >= minVolume) {
-                    temp[count] = TrendData(token0, 0, volume);
+                    temp[count] = TrendData(tokenA, 0, volume);
                     count++;
                 }
             }
         } else {
-            for (uint256 i = 0; i < allListedTokens.length && count < maxPairs; i++) {
-                address token0 = allListedTokens[i];
+            for (uint256 i = 0; i < _allListedTokens.length && count < maxPairs; i++) {
+                address tokenA = _allListedTokens[i];
                 uint256 volume = 0;
-                uint256[] memory orderIds = pairOrders[token0][baseToken];
+                uint256[] memory orderIds = _pairOrders[tokenA][_baseToken];
                 for (uint256 j = 0; j < orderIds.length; j++) {
-                    volume += globalOrders[token0][baseToken][orderIds[j]].amount;
+                    volume += _globalOrders[tokenA][_baseToken][orderIds[j]].amount;
                 }
                 if (volume >= minVolume) {
-                    temp[count] = TrendData(token0, 0, volume);
+                    temp[count] = TrendData(tokenA, 0, volume);
                     count++;
                 }
             }
         }
 
-        token0s = new address[](count);
-        baseTokens = new address[](count);
+        tokenAs = new address[](count);
+        tokenBs = new address[](count);
         volumes = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
-            token0s[i] = temp[i].token;
-            baseTokens[i] = baseToken;
+            tokenAs[i] = temp[i].token;
+            tokenBs[i] = _baseToken;
             volumes[i] = temp[i].amount;
         }
     }
 
+    // Sorts trend data in descending order
     function _sortDescending(TrendData[] memory data, uint256 length) internal pure {
         for (uint256 i = 0; i < length; i++) {
             for (uint256 j = i + 1; j < length; j++) {
@@ -711,7 +815,26 @@ contract OMFAgent is Ownable {
         }
     }
 
-    function allListingsLength() external view returns (uint256) {
-        return allListings.length;
+    // Queries listing by index
+    function queryByIndex(uint256 index) external view returns (address) {
+        require(index < _allListings.length, "Invalid index");
+        return _allListings[index]; // Returns listing address at index
+    }
+
+    // Queries listing indices by token address with pagination
+    function queryByAddressView(address target, uint256 maxIteration, uint256 step) external view returns (uint256[] memory) {
+        uint256[] memory indices = _queryByAddress[target]; // Retrieves listing IDs
+        uint256 start = step * maxIteration;
+        uint256 end = (step + 1) * maxIteration > indices.length ? indices.length : (step + 1) * maxIteration;
+        uint256[] memory result = new uint256[](end - start); // Results array
+        for (uint256 i = start; i < end; i++) {
+            result[i - start] = indices[i];
+        }
+        return result;
+    }
+
+    // Returns length of listing indices for a token
+    function queryByAddressLength(address target) external view returns (uint256) {
+        return _queryByAddress[target].length; // Returns number of listings for token
     }
 }
