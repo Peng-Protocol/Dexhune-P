@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.2;
 
-// Version: 0.0.1
+// Version: 0.0.2
 // Changes:
+// - v0.0.2: Added liquidityProviders mapping, updated _updateGlobalLiquidity to append users to liquidityProviders on first deposit, updated getTopLiquidityProviders to iterate over liquidityProviders and validate listingId.
 // - v0.0.1: Created MFPAgent from SSAgent, removed crossDriver and isolatedDriver, updated _initializeListing and _initializeLiquidity to set only proxyRouter.
 
 // Note: taxCollector functionality has been removed from SSListingTemplate.sol and SSLiquidityTemplate.sol.
@@ -54,6 +55,7 @@ contract MFPAgent is Ownable {
     address[] public allListings; // Array of all listing addresses
     address[] public allListedTokens; // Array of all listed tokens
     mapping(address => uint256[]) public queryByAddress; // token => listingId[]
+    mapping(uint256 => address[]) public liquidityProviders; // listingId => user[]
 
     mapping(address => mapping(address => mapping(address => uint256))) public globalLiquidity; // tokenA => tokenB => user => amount
     mapping(address => mapping(address => uint256)) public totalLiquidityPerPair; // tokenA => tokenB => amount
@@ -110,6 +112,17 @@ contract MFPAgent is Ownable {
     function tokenExists(address token) internal view returns (bool) {
         for (uint256 i = 0; i < allListedTokens.length; i++) {
             if (allListedTokens[i] == token) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Checks if a user exists in liquidityProviders for a listing
+    function userExistsInProviders(uint256 listingId, address user) internal view returns (bool) {
+        address[] memory providers = liquidityProviders[listingId];
+        for (uint256 i = 0; i < providers.length; i++) {
+            if (providers[i] == user) {
                 return true;
             }
         }
@@ -288,6 +301,10 @@ contract MFPAgent is Ownable {
         bool isDeposit
     ) internal {
         if (isDeposit) {
+            // Only add user to liquidityProviders if they had no prior liquidity
+            if (listingLiquidity[listingId][user] == 0 && !userExistsInProviders(listingId, user)) {
+                liquidityProviders[listingId].push(user);
+            }
             globalLiquidity[tokenA][tokenB][user] += amount;
             totalLiquidityPerPair[tokenA][tokenB] += amount;
             userTotalLiquidity[user] += amount;
@@ -450,11 +467,12 @@ contract MFPAgent is Ownable {
         external view returns (address[] memory users, uint256[] memory amounts)
     {
         require(maxIterations > 0, "Invalid maxIterations");
-        uint256 maxLimit = maxIterations < allListings.length ? maxIterations : allListings.length;
+        require(listingId < listingCount, "Invalid listing ID");
+        uint256 maxLimit = maxIterations < liquidityProviders[listingId].length ? maxIterations : liquidityProviders[listingId].length;
         TrendData[] memory temp = new TrendData[](maxLimit);
         uint256 count = 0;
-        for (uint256 i = 0; i < allListings.length && count < maxLimit; i++) {
-            address user = allListings[i];
+        for (uint256 i = 0; i < liquidityProviders[listingId].length && count < maxLimit; i++) {
+            address user = liquidityProviders[listingId][i];
             uint256 amount = listingLiquidity[listingId][user];
             if (amount > 0) {
                 temp[count] = TrendData(user, 0, amount);
