@@ -5,8 +5,11 @@ SPDX-License-Identifier: BSD-3-Clause
 // Specifying Solidity version for compatibility
 pragma solidity ^0.8.2;
 
-// Version: 0.0.29
+// Version: 0.0.32
 // Changes:
+// - v0.0.32: Modified getPrice to remove PriceFetchFailed event emission to ensure view function compliance; function now silently falls back to historical price or 0 if oracle call fails.
+// - v0.0.31: Removed try-catch from getPrice() call in update function (historical data, line 509) as getPrice() is a public function; cached oraclePrice to avoid redundant calls; added graceful degradation in getPrice() using last historical price; added inline comments for clarity.
+// - v0.0.30: Fixed set oracle issue by replacing setOracle with setOracleDetails(address oracle, uint8 oracleDecimals, bytes4 viewFunction) to align with OMFAgent.sol’s IOMFListingTemplate interface. Added _oracleViewFunction state variable and updated getPrice to use dynamic viewFunction selector. Removed redundant ‘this.’ from getPrice call in update function.
 // - v0.0.29: Fixed TypeError in getPrice at line 478 by removing invalid try-catch block for decodePrice, as try-catch is only allowed for external calls or contract creation; decodePrice is now called directly.
 // - v0.0.28: Fixed TypeError in getPrice at line 477 by removing 'this.' from decodePrice call, as decodePrice is a private function within the same contract.
 // - v0.0.27: Fixed DeclarationError by moving UpdateType struct from contract (line 194) to IOMFListing interface to resolve undefined identifier in update function (line 40).
@@ -98,6 +101,7 @@ contract OMFListingTemplate is ReentrancyGuard {
     uint256 private _listingId; // Listing identifier
     address private _oracle; // Oracle contract address
     uint8 private _oracleDecimals; // Oracle price decimals
+    bytes4 private _oracleViewFunction; // Oracle view function selector
     address private _agent; // OMFAgent address
     address private _registryAddress; // TokenRegistry address
     address private _liquidityAddress; // Liquidity contract address
@@ -179,6 +183,7 @@ contract OMFListingTemplate is ReentrancyGuard {
     event OrderUpdated(uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 xBalance, uint256 yBalance);
     event RegistryUpdateFailed(string reason);
+    event PriceFetchFailed(address oracle, bytes4 viewFunction);
 
     // Constructor (empty, initialized via setters)
     constructor() {}
@@ -232,6 +237,11 @@ contract OMFListingTemplate is ReentrancyGuard {
     // View function for oracleDecimals
     function oracleDecimalsView() external view returns (uint8) {
         return _oracleDecimals;
+    }
+
+    // View function for oracleViewFunction
+    function oracleViewFunctionView() external view returns (bytes4) {
+        return _oracleViewFunction;
     }
 
     // View function for agent
@@ -302,11 +312,13 @@ contract OMFListingTemplate is ReentrancyGuard {
     }
 
     // Sets oracle details
-    function setOracle(address oracle, uint8 oracleDecimals) external {
+    function setOracleDetails(address oracle, uint8 oracleDecimals, bytes4 viewFunction) external {
         require(_oracle == address(0), "Oracle already set");
         require(oracle != address(0), "Invalid oracle");
+        require(viewFunction != bytes4(0), "Invalid view function");
         _oracle = oracle;
         _oracleDecimals = oracleDecimals;
+        _oracleViewFunction = viewFunction;
     }
 
     // Sets agent address
@@ -463,7 +475,7 @@ contract OMFListingTemplate is ReentrancyGuard {
         try IOMFLiquidityTemplate(_liquidityAddress).liquidityAmounts() returns (uint256 xLiquid, uint256 yLiquid) {
             liquidity = isX ? xLiquid : yLiquid;
         } catch {
-            return 0; // Graceful degradation
+            return 0; // Graceful degradation if liquidity fetch fails
         }
         if (liquidity == 0) return 0;
         uint256 dailyFees = (feeDifference * 5) / 10000; // 0.05% fee
@@ -471,18 +483,34 @@ contract OMFListingTemplate is ReentrancyGuard {
         return dailyYield * 365; // Annualized yield
     }
 
-    // Retrieves price from oracle
+    // Retrieves price from oracle with fallback to historical data
     function getPrice() public view returns (uint256) {
-        (bool success, bytes memory returnData) = _oracle.staticcall(abi.encodeWithSignature("latestPrice()"));
-        require(success, "Price fetch failed");
-        int256 priceValue = decodePrice(returnData); // Direct call to decodePrice
+        // Returns last historical price if oracle call fails or is not set
+        if (_oracle == address(0) || _oracleViewFunction == bytes4(0)) {
+            if (_historicalData.length > 0) {
+                return _historicalData[_historicalData.length - 1].price; // Fallback to last known price
+            }
+            return 0; // No price available
+        }
+        // Attempts to fetch price from oracle
+        (bool success, bytes memory returnData) = _oracle.staticcall(abi.encodeWithSelector(_oracleViewFunction));
+        if (!success) {
+            if (_historicalData.length > 0) {
+                return _historicalData[_historicalData.length - 1].price; // Fallback to last known price
+            }
+            return 0; // No price available
+        }
+        // Decodes and validates oracle price
+        int256 priceValue = decodePrice(returnData);
         require(priceValue >= 0, "Negative price not allowed");
         uint256 normalizedPrice = uint256(priceValue);
-        return _oracleDecimals == 8 ? normalizedPrice * 1e10 : normalizedPrice; // Scale to 18 decimals
+        // Scales price to 18 decimals based on oracle decimals
+        return _oracleDecimals == 8 ? normalizedPrice * 1e10 : normalizedPrice;
     }
 
     // Helper function to decode oracle price as int256
     function decodePrice(bytes memory data) private pure returns (int256) {
+        // Reverts if data cannot be decoded to int256
         return abi.decode(data, (int256));
     }
 
@@ -495,14 +523,11 @@ contract OMFListingTemplate is ReentrancyGuard {
     function update(address caller, IOMFListing.UpdateType[] memory updates) external nonReentrant onlyRouter {
         VolumeBalance storage balances = _volumeBalance;
         bool volumeUpdated = false;
-        // Fetch oracle price for order validation
-        uint256 oraclePrice;
-        try this.getPrice() returns (uint256 price) {
-            oraclePrice = price;
-        } catch {
-            revert("Oracle price fetch failed");
-        }
+        // Fetch oracle price once for order validation and historical data
+        uint256 oraclePrice = getPrice(); // Direct call, uses fallback if oracle fails
+        require(oraclePrice > 0, "Oracle price fetch failed");
 
+        // Check if volume update requires resetting lastDayFee
         for (uint256 i = 0; i < updates.length; i++) {
             IOMFListing.UpdateType memory u = updates[i];
             if (u.updateType == 0 && (u.index == 2 || u.index == 3)) {
@@ -521,6 +546,7 @@ contract OMFListingTemplate is ReentrancyGuard {
             _lastDayFee.yFees = balances.yVolume;
             _lastDayFee.timestamp = _floorToMidnight(block.timestamp);
         }
+        // Process updates
         for (uint256 i = 0; i < updates.length; i++) {
             IOMFListing.UpdateType memory u = updates[i];
             if (u.updateType == 0) { // Balance update
@@ -633,16 +659,13 @@ contract OMFListingTemplate is ReentrancyGuard {
                     _isSellOrderComplete[u.index] = true;
                 }
             } else if (u.updateType == 3) { // Historical data
-                try this.getPrice() returns (uint256 currentPrice) {
-                    _historicalData.push(HistoricalData(
-                        currentPrice, // Use oracle price
-                        u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1), // xBalance, yBalance
-                        u.minPrice >> 128, u.minPrice & ((1 << 128) - 1), // xVolume, yVolume
-                        block.timestamp
-                    ));
-                } catch {
-                    revert("Oracle price fetch failed for historical data");
-                }
+                // Uses cached oraclePrice for consistency
+                _historicalData.push(HistoricalData(
+                    oraclePrice, // Cached oracle price
+                    u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1), // xBalance, yBalance
+                    u.minPrice >> 128, u.minPrice & ((1 << 128) - 1), // xVolume, yVolume
+                    block.timestamp
+                ));
             }
         }
         emit BalancesUpdated(balances.xBalance, balances.yBalance);
