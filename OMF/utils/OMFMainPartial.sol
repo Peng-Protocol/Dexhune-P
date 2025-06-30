@@ -41,6 +41,9 @@ interface IOMFListingTemplate {
     function ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates) external;
     function pendingBuyOrdersView() external view returns (uint256[] memory);
     function pendingSellOrdersView() external view returns (uint256[] memory);
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory); // Returns maker's pending orders 
+    function buyOrderCoreView(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status); // Returns buy order core
+    function sellOrderCoreView(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status); // Returns sell order core
     function longPayoutByIndexView() external view returns (uint256[] memory);
     function shortPayoutByIndexView() external view returns (uint256[] memory);
     function longPayoutDetailsView(uint256 orderId) external view returns (address recipient, uint256 amount);

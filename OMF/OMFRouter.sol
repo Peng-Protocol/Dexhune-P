@@ -585,22 +585,38 @@ contract OMFRouter is OMFSettlementPartial {
     }
 
     function clearSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder) external onlyValidListing(listingAddress) nonReentrant {
-        // Clears a single order
+        // Clears a single order, restricted to order maker
+        IOMFListingTemplate listingContract = IOMFListingTemplate(listingAddress);
+        address makerAddress;
+        if (isBuyOrder) {
+            (makerAddress, , ) = listingContract.buyOrderCoreView(orderIdentifier);
+        } else {
+            (makerAddress, , ) = listingContract.sellOrderCoreView(orderIdentifier);
+        }
+        require(makerAddress == msg.sender, "Only order maker can clear");
+        require(makerAddress != address(0), "Invalid order");
         _clearOrderData(listingAddress, orderIdentifier, isBuyOrder);
     }
 
     function clearOrders(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
-        // Clears multiple orders up to maxIterations
+        // Clears multiple orders for msg.sender up to maxIterations
         IOMFListingTemplate listingContract = IOMFListingTemplate(listingAddress);
-        uint256[] memory buyOrderIds = listingContract.pendingBuyOrdersView();
-        uint256 buyIterationCount = maxIterations < buyOrderIds.length ? maxIterations : buyOrderIds.length;
-        for (uint256 i = 0; i < buyIterationCount; i++) {
-            _clearOrderData(listingAddress, buyOrderIds[i], true);
-        }
-        uint256[] memory sellOrderIds = listingContract.pendingSellOrdersView();
-        uint256 sellIterationCount = maxIterations < sellOrderIds.length ? maxIterations : sellOrderIds.length;
-        for (uint256 k = 0; k < sellIterationCount; k++) {
-            _clearOrderData(listingAddress, sellOrderIds[k], false);
+        uint256[] memory orderIds = listingContract.makerPendingOrdersView(msg.sender);
+        uint256 iterationCount = maxIterations < orderIds.length ? maxIterations : orderIds.length;
+        for (uint256 i = 0; i < iterationCount; i++) {
+            uint256 orderId = orderIds[i];
+            bool isBuyOrder;
+            {
+                (address makerBuy, , uint8 buyStatus) = listingContract.buyOrderCoreView(orderId);
+                if (makerBuy == msg.sender && buyStatus != 0) {
+                    isBuyOrder = true;
+                } else {
+                    (address makerSell, , uint8 sellStatus) = listingContract.sellOrderCoreView(orderId);
+                    require(makerSell == msg.sender && sellStatus != 0, "Invalid order for sender");
+                    isBuyOrder = false;
+                }
+            }
+            _clearOrderData(listingAddress, orderId, isBuyOrder);
         }
     }
 
