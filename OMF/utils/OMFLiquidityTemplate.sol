@@ -5,18 +5,20 @@ SPDX-License-Identifier: BSD-3-Clause
 // Specifying Solidity version for compatibility
 pragma solidity ^0.8.2;
 
-// Version: 0.0.13
+// Version: 0.0.15
 // Changes:
-// - v0.0.13: Fixed volumeBalances interface mismatch by updating IOMFListing.volumeBalances to return (uint256 xBalance, uint256 yBalance) to match OMFListingTemplate.sol. Updated claimFees to use volumeBalanceView for xVolume, yVolume retrieval with try-catch for robustness.
-// - v0.0.12: Fixed ParserError in setRouters function at line 213 by correcting syntax from '_routers[routers[i] = true;' to '_routers[routers[i]] = true;'.
-// - v0.0.11: Added 'override' specifier to liquidityAmounts function at line 607 to fix TypeError for implementing IOMFLiquidityTemplate interface.
-// - v0.0.10: Updated IOMFListing interface to include getPrice() for consistency with OMFListingTemplate.sol. Ensured compatibility with OMFListingTemplate.sol by verifying token handling and volume interactions. No changes to price handling as it already uses getPrice() from OMFListingTemplate.sol.
-// - v0.0.9: Updated claimFees and _processFeeClaim to convert fees to the provider's token value (xSlots claim yFees in token A value, ySlots claim xFees in token B value) using IOMFListing.getPrice(). Added price field to FeeClaimContext. Adjusted FeesClaimed event to reflect converted amounts. Ensured stack depth optimization and try-catch for external calls.
-// - v0.0.8: Converted SSLiquidityTemplate.sol to OMFLiquidityTemplate.sol. Restricted to ERC-20 tokens only (no ETH support). Aligned with OMF suite: updated ISSListing to IOMFListing, ISSAgent to IOMFAgent. Replaced listingAddress with _listingAddress (private). Added view functions for state variables (routersView, tokenAView, etc.). Updated setTokens to fetch ERC-20 decimals. Ensured compatibility with OMFAgent.sol and OMFListingTemplate.sol. Retained ReentrancyGuard, FeeClaimContext, and core liquidity functions. Added liquidityAmounts for IOMFLiquidityTemplate. Updated globalizeUpdate to match IOMFAgent.globalizeLiquidity.
-// - v0.0.7: Refactored claimFees to use FeeClaimContext struct to reduce stack usage. Modified _processFeeClaim to accept FeeClaimContext.
-// - v0.0.6: Removed transferLiquidity function. Updated caller handling in changeSlotDepositor, deposit, xPrepOut, xExecuteOut, yPrepOut, yExecuteOut, claimFees to represent the user. Ensured router checks.
+// - v0.0.15: Updated _processFeeClaim to reset Slot.dFeesAcc to latest yFeesAcc (xSlot) or xFeesAcc (ySlot) after fee claim to align with expected behavior. Ensured no changes to deposit function as it correctly sets dFeesAcc via update function.
+// - v0.0.14: Aligned with SSLiquidityTemplate.sol v0.0.12. Added xFeesAcc and yFeesAcc to LiquidityDetails to track cumulative fee volume. Replaced Slot.dVolume with dFeesAcc to store yFeesAcc (xSlot) or xFeesAcc (ySlot) at deposit. Updated claimFees and _processFeeClaim to use contributedFees (fees - dFeesAcc), removing volume, dVolume, price from FeeClaimContext. Updated addFees to increment xFeesAcc or yFeesAcc. Modified update to set dFeesAcc instead of dVolume. Preserved ERC-20-only support, private state variables, view functions, and try-catch in claimFees.
+// - v0.0.13: Fixed volumeBalances interface mismatch by updating IOMFListing.volumeBalances to return (uint256 xBalance, uint256 yBalance). Updated claimFees to use volumeBalanceView with try-catch for robustness.
+// - v0.0.12: Fixed ParserError in setRouters by correcting syntax from '_routers[routers[i] = true;' to '_routers[routers[i]] = true;'.
+// - v0.0.11: Added 'override' specifier to liquidityAmounts to fix TypeError for IOMFLiquidityTemplate interface.
+// - v0.0.10: Updated IOMFListing interface to include getPrice() for consistency with OMFListingTemplate.sol.
+// - v0.0.9: Updated claimFees and _processFeeClaim to convert fees using IOMFListing.getPrice(). Added price field to FeeClaimContext.
+// - v0.0.8: Converted from SSLiquidityTemplate.sol. Restricted to ERC-20 tokens only. Aligned with OMF suite: updated ISSListing to IOMFListing, ISSAgent to IOMFAgent. Added private state variables with view functions. Updated setTokens to fetch ERC-20 decimals.
+// - v0.0.7: Refactored claimFees to use FeeClaimContext struct to reduce stack usage.
+// - v0.0.6: Removed transferLiquidity function. Updated caller handling in changeSlotDepositor, deposit, xPrepOut, xExecuteOut, yPrepOut, yExecuteOut, claimFees.
 // - v0.0.5: Replaced safeTransferFrom with transferFrom in deposit. Added GlobalizeUpdateFailed and UpdateRegistryFailed events.
-// - v0.0.4: Added changeSlotDepositor, liquidityAmounts, agent, globalizeUpdate, updateRegistry. Simplified mappings to remove listingId key.
+// - v0.0.4: Added changeSlotDepositor, liquidityAmounts, agent, globalizeUpdate, updateRegistry. Simplified mappings.
 // - v0.0.3: Modified claimFees for fee-swapping (xSlots claim yFees, ySlots claim xFees).
 
 import "../imports/SafeERC20.sol";
@@ -78,13 +80,15 @@ contract OMFLiquidityTemplate is ReentrancyGuard, IOMFLiquidityTemplate {
         uint256 yLiquid; // Token-B liquidity
         uint256 xFees; // Token-A fees
         uint256 yFees; // Token-B fees
+        uint256 xFeesAcc; // Cumulative fee volume for x-token
+        uint256 yFeesAcc; // Cumulative fee volume for y-token
     }
 
     struct Slot {
         address depositor; // Slot owner
         address recipient; // Not used
         uint256 allocation; // Allocated liquidity
-        uint256 dVolume; // Volume at deposit
+        uint256 dFeesAcc; // Cumulative fees at deposit (yFeesAcc for xSlot, xFeesAcc for ySlot)
         uint256 timestamp; // Deposit timestamp
     }
 
@@ -105,13 +109,11 @@ contract OMFLiquidityTemplate is ReentrancyGuard, IOMFLiquidityTemplate {
     struct FeeClaimContext {
         address caller; // User claiming fees
         bool isX; // Whether claiming xSlot fees
-        uint256 volume; // Current volume from listing
-        uint256 dVolume; // Volume at slot deposit
         uint256 liquid; // Total liquidity (x or y)
         uint256 allocation; // Slot allocation
         uint256 fees; // Available fees
+        uint256 dFeesAcc; // Cumulative fees at deposit
         uint256 liquidityIndex; // Slot index
-        uint256 price; // Current price from getPrice()
     }
 
     // Events for tracking actions
@@ -177,9 +179,9 @@ contract OMFLiquidityTemplate is ReentrancyGuard, IOMFLiquidityTemplate {
     }
 
     // View function for liquidityDetail
-    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees) {
+    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc) {
         LiquidityDetails memory details = _liquidityDetail;
-        return (details.xLiquid, details.yLiquid, details.xFees, details.yFees);
+        return (details.xLiquid, details.yLiquid, details.xFees, details.yFees, details.xFeesAcc, details.yFeesAcc);
     }
 
     // View function for activeXLiquiditySlots
@@ -265,54 +267,39 @@ contract OMFLiquidityTemplate is ReentrancyGuard, IOMFLiquidityTemplate {
 
     // Calculates fee share for a slot
     function _claimFeeShare(
-        uint256 volume,
-        uint256 dVolume,
+        uint256 fees,
+        uint256 dFeesAcc,
         uint256 liquid,
-        uint256 allocation,
-        uint256 fees
+        uint256 allocation
     ) private pure returns (uint256 feeShare, UpdateType[] memory updates) {
         updates = new UpdateType[](2);
-        uint256 contributedVolume = volume > dVolume ? volume - dVolume : 0;
-        uint256 feesAccrued = (contributedVolume * 5) / 10000; // 0.05% fee
+        uint256 contributedFees = fees > dFeesAcc ? fees - dFeesAcc : 0;
         uint256 liquidityContribution = liquid > 0 ? (allocation * 1e18) / liquid : 0;
-        feeShare = (feesAccrued * liquidityContribution) / 1e18;
-        feeShare = feeShare > fees ? fees : feeShare;
+        feeShare = (contributedFees * liquidityContribution) / 1e18;
+        feeShare = feeShare > fees ? fees : feeShare; // Caps at available fees
         return (feeShare, updates);
     }
 
     // Processes fee claims using context to reduce stack depth
     function _processFeeClaim(FeeClaimContext memory context) internal {
         (uint256 feeShare, UpdateType[] memory updates) = _claimFeeShare(
-            context.volume,
-            context.dVolume,
+            context.fees,
+            context.dFeesAcc,
             context.liquid,
-            context.allocation,
-            context.fees
+            context.allocation
         );
         if (feeShare > 0) {
-            // Convert fees to the provider's token value
-            uint256 convertedFeeShare;
-            uint8 transferDecimals;
-            address transferToken;
-            if (context.isX) {
-                // xSlot: Convert yFees to token A value
-                convertedFeeShare = (feeShare * context.price) / 1e18;
-                transferToken = _tokenA;
-                transferDecimals = _decimalA;
-                updates[0] = UpdateType(1, 1, context.fees - feeShare, address(0), address(0)); // Update yFees
-                updates[1] = UpdateType(2, context.liquidityIndex, context.allocation, context.caller, address(0)); // Update xSlot
-            } else {
-                // ySlot: Convert xFees to token B value
-                convertedFeeShare = (feeShare * 1e18) / context.price;
-                transferToken = _tokenB;
-                transferDecimals = _decimalB;
-                updates[0] = UpdateType(1, 0, context.fees - feeShare, address(0), address(0)); // Update xFees
-                updates[1] = UpdateType(3, context.liquidityIndex, context.allocation, context.caller, address(0)); // Update ySlot
-            }
+            address transferToken = context.isX ? _tokenA : _tokenB;
+            uint8 transferDecimals = context.isX ? _decimalA : _decimalB;
+            updates[0] = UpdateType(1, context.isX ? 1 : 0, context.fees - feeShare, address(0), address(0)); // Update yFees or xFees
+            updates[1] = UpdateType(context.isX ? 2 : 3, context.liquidityIndex, context.allocation, context.caller, address(0)); // Update xSlot or ySlot
             this.update(context.caller, updates);
-            uint256 transferAmount = denormalize(convertedFeeShare, transferDecimals);
+            // Reset dFeesAcc to latest feesAcc value
+            Slot storage slot = context.isX ? _xLiquiditySlots[context.liquidityIndex] : _yLiquiditySlots[context.liquidityIndex];
+            slot.dFeesAcc = context.isX ? _liquidityDetail.yFeesAcc : _liquidityDetail.xFeesAcc;
+            uint256 transferAmount = denormalize(feeShare, transferDecimals);
             IERC20(transferToken).safeTransfer(context.caller, transferAmount);
-            emit FeesClaimed(_listingId, context.liquidityIndex, context.isX ? convertedFeeShare : 0, context.isX ? 0 : convertedFeeShare);
+            emit FeesClaimed(_listingId, context.liquidityIndex, context.isX ? feeShare : 0, context.isX ? 0 : feeShare);
         }
     }
 
@@ -337,36 +324,34 @@ contract OMFLiquidityTemplate is ReentrancyGuard, IOMFLiquidityTemplate {
                 if (slot.depositor == address(0) && u.addr != address(0)) {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
+                    slot.dFeesAcc = details.yFeesAcc; // Store yFeesAcc for xSlot
                     _activeXLiquiditySlots.push(u.index);
                     _userIndex[u.addr].push(u.index);
                 } else if (u.addr == address(0)) {
                     slot.depositor = address(0);
                     slot.allocation = 0;
-                    slot.dVolume = 0;
+                    slot.dFeesAcc = 0;
                     removeUserIndex(u.index, slot.depositor);
                     removeActiveSlot(_activeXLiquiditySlots, u.index);
                 }
                 slot.allocation = u.value;
-                (, , uint256 xVolume, ) = IOMFListing(_listingAddress).volumeBalanceView();
-                slot.dVolume = xVolume;
                 details.xLiquid += u.value;
             } else if (u.updateType == 3) { // ySlot update
                 Slot storage slot = _yLiquiditySlots[u.index];
                 if (slot.depositor == address(0) && u.addr != address(0)) {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
+                    slot.dFeesAcc = details.xFeesAcc; // Store xFeesAcc for ySlot
                     _activeYLiquiditySlots.push(u.index);
                     _userIndex[u.addr].push(u.index);
                 } else if (u.addr == address(0)) {
                     slot.depositor = address(0);
                     slot.allocation = 0;
-                    slot.dVolume = 0;
+                    slot.dFeesAcc = 0;
                     removeUserIndex(u.index, slot.depositor);
                     removeActiveSlot(_activeYLiquiditySlots, u.index);
                 }
                 slot.allocation = u.value;
-                (, , , uint256 yVolume) = IOMFListing(_listingAddress).volumeBalanceView();
-                slot.dVolume = yVolume;
                 details.yLiquid += u.value;
             }
         }
@@ -540,39 +525,22 @@ contract OMFLiquidityTemplate is ReentrancyGuard, IOMFLiquidityTemplate {
     }
 
     // Claims fees for a liquidity slot
-    function claimFees(address caller, address listingAddress, uint256 liquidityIndex, bool isX, uint256 volume) external nonReentrant onlyRouter {
+    function claimFees(address caller, address listingAddress, uint256 liquidityIndex, bool isX, uint256 /* volume */) external nonReentrant onlyRouter {
         require(listingAddress == _listingAddress, "Invalid listing address");
         require(caller != address(0), "Invalid caller");
-        uint256 xVolume;
-        uint256 yVolume;
-        try IOMFListing(_listingAddress).volumeBalanceView() returns (uint256, uint256, uint256 xVol, uint256 yVol) {
-            xVolume = xVol;
-            yVolume = yVol;
-        } catch {
-            revert("Volume fetch failed");
-        }
         (, uint256 yBalance, , ) = IOMFListing(_listingAddress).volumeBalanceView();
         require(yBalance > 0, "Invalid listing");
-        uint256 currentPrice;
-        try IOMFListing(_listingAddress).getPrice() returns (uint256 price) {
-            currentPrice = price;
-        } catch {
-            revert("Failed to fetch price");
-        }
-        require(currentPrice > 0, "Price cannot be zero");
         FeeClaimContext memory context;
         context.caller = caller;
         context.isX = isX;
-        context.volume = isX ? xVolume : yVolume;
         context.liquidityIndex = liquidityIndex;
-        context.price = currentPrice;
         LiquidityDetails storage details = _liquidityDetail;
         Slot storage slot = isX ? _xLiquiditySlots[liquidityIndex] : _yLiquiditySlots[liquidityIndex];
         require(slot.depositor == caller, "Caller not depositor");
         context.liquid = isX ? details.xLiquid : details.yLiquid;
         context.fees = isX ? details.yFees : details.xFees;
         context.allocation = slot.allocation;
-        context.dVolume = slot.dVolume;
+        context.dFeesAcc = slot.dFeesAcc;
         _processFeeClaim(context);
     }
 
@@ -597,8 +565,14 @@ contract OMFLiquidityTemplate is ReentrancyGuard, IOMFLiquidityTemplate {
 
     // Adds fees to liquidity
     function addFees(address caller, bool isX, uint256 fee) external nonReentrant onlyRouter {
+        LiquidityDetails storage details = _liquidityDetail;
         UpdateType[] memory feeUpdates = new UpdateType[](1);
         feeUpdates[0] = UpdateType(1, isX ? 0 : 1, fee, address(0), address(0));
+        if (isX) {
+            details.xFeesAcc += fee; // Increment cumulative xFeesAcc
+        } else {
+            details.yFeesAcc += fee; // Increment cumulative yFeesAcc
+        }
         this.update(caller, feeUpdates);
     }
 
