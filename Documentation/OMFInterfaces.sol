@@ -2,10 +2,12 @@
 SPDX-License-Identifier: BSD-3-Clause
 */
 
+// For documentation, can be used as import but better to inline methods used. 
+
 // Specifying Solidity version for compatibility
 pragma solidity ^0.8.2;
 
-// Version: 0.0.2
+// Version: 0.0.3
 
 // Interface for OMFListingTemplate
 interface IOMFListingTemplate {
@@ -239,13 +241,14 @@ interface IOMFAgent {
         bool isBuy; // True if buy order
         address maker; // Order creator
         address recipient; // Order recipient
-        uint256 amount; // Order amount.FL
+        uint256 amount; // Order amount
         uint8 status; // 0 = cancelled, 1 = pending, 2 = partially filled, 3 = filled
         uint256 timestamp; // Order creation/update time
     }
 
     // External functions
-    function setProxyRouter(address proxyRouter) external; // Sets proxy router address
+    function addRouter(address router) external; // Adds a router to the array
+    function removeRouter(address router) external; // Removes a router from the array
     function setListingLogic(address listingLogic) external; // Sets listing logic address
     function setLiquidityLogic(address liquidityLogic) external; // Sets liquidity logic address
     function setBaseToken(address baseToken) external; // Sets base token address
@@ -277,7 +280,7 @@ interface IOMFAgent {
     ) external; // Updates global orders
 
     // View functions for state variables and mappings
-    function proxyRouterView() external view returns (address); // Returns proxy router address
+    function getRouters() external view returns (address[] memory); // Returns array of router addresses
     function listingLogicAddressView() external view returns (address); // Returns listing logic address
     function liquidityLogicAddressView() external view returns (address); // Returns liquidity logic address
     function baseTokenView() external view returns (address); // Returns base token address

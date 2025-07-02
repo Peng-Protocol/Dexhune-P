@@ -41,7 +41,6 @@ It comprises of OMFAgent -  OMFListingLogic - OMFLiquidityLogic - OMFLiquidityTe
 - **Returns:**
   - `address`: Address of the newly deployed OMFListingTemplate contract.
 
-
 # OMFAgent Contract Documentation
 
 ## Overview
@@ -51,10 +50,10 @@ The `OMFAgent` contract, implemented in Solidity (^0.8.2), serves as a central c
 
 **SPDX License**: BSD-3-Clause
 
-**Version**: 0.0.6 (last updated 2025-06-30)
+**Version**: 0.0.7 (last updated 2025-07-02)
 
 ## State Variables
-- **_proxyRouter** (address, private): Single router for operations.
+- **routers** (address[], private): Array of router addresses for operations.
 - **_listingLogicAddress** (address, private): `OMFListingLogic` contract address.
 - **_liquidityLogicAddress** (address, private): `OMFLiquidityLogic` contract address.
 - **_baseToken** (address, private): Reference token (Token-1) for pairs.
@@ -85,14 +84,23 @@ The `OMFAgent` contract, implemented in Solidity (^0.8.2), serves as a central c
 
 ## External Functions
 
-### setProxyRouter(address proxyRouter)
-- **Parameters**: `proxyRouter` (address): Router address.
-- **Behavior**: Sets `_proxyRouter`.
-- **Internal Call Flow**: Validates non-zero address, updates `_proxyRouter`.
+### addRouter(address router)
+- **Parameters**: `router` (address): Router address to add.
+- **Behavior**: Adds a router to the `routers` array, emits `RouterAdded`.
+- **Internal Call Flow**: Validates non-zero address, checks `routerExists`, appends to `routers`.
 - **Balance Checks**: None.
-- **Mappings/Structs Used**: `_proxyRouter`.
-- **Restrictions**: `onlyOwner`, reverts if `proxyRouter` is zero (`"Invalid proxy router address"`).
-- **Gas Usage Controls**: Single state write.
+- **Mappings/Structs Used**: `routers`.
+- **Restrictions**: `onlyOwner`, reverts if `router` is zero (`"Invalid router address"`) or already exists (`"Router already exists"`).
+- **Gas Usage Controls**: Single array append, single loop in `routerExists`.
+
+### removeRouter(address router)
+- **Parameters**: `router` (address): Router address to remove.
+- **Behavior**: Removes a router from the `routers` array, emits `RouterRemoved`.
+- **Internal Call Flow**: Validates non-zero address, finds and removes router by swapping with last element and popping.
+- **Balance Checks**: None.
+- **Mappings/Structs Used**: `routers`.
+- **Restrictions**: `onlyOwner`, reverts if `router` is zero (`"Invalid router address"`) or not found (`"Router not found"`).
+- **Gas Usage Controls**: Single loop, array modification.
 
 ### setListingLogic(address listingLogic)
 - **Parameters**: `listingLogic` (address): `OMFListingLogic` address.
@@ -139,7 +147,7 @@ The `OMFAgent` contract, implemented in Solidity (^0.8.2), serves as a central c
   - Increments `_listingCount`.
 - **Balance Checks**: Caller must own 1% of `tokenA` supply.
 - **Mappings/Structs Used**: `_getListing`, `_allListings`, `_allListedTokens`, `_queryByAddress`, `_listingCount`.
-- **Restrictions**: Reverts if `_baseToken`, `_proxyRouter`, `_listingLogicAddress`, `_liquidityLogicAddress`, or `_registryAddress` is unset, `tokenA` is zero (`"TokenA cannot be NATIVE"`), `tokenA` equals `_baseToken` (`"Identical tokens"`), pair exists (`"Pair already listed"`), or `oracleAddress` is zero (`"Invalid oracle address"`).
+- **Restrictions**: Reverts if `_baseToken`, `routers` is empty, `_listingLogicAddress`, `_liquidityLogicAddress`, or `_registryAddress` is unset, `tokenA` is zero (`"TokenA cannot be NATIVE"`), `tokenA` equals `_baseToken` (`"Identical tokens"`), pair exists (`"Pair already listed"`), or `oracleAddress` is zero (`"Invalid oracle address"`).
 - **Gas Usage Controls**: Two deployments, multiple external calls, single loop in `tokenExists`.
 
 ### globalizeLiquidity(uint256 listingId, address tokenA, address tokenB, address user, uint256 amount, bool isDeposit)
@@ -166,12 +174,12 @@ The `OMFAgent` contract, implemented in Solidity (^0.8.2), serves as a central c
 
 ## View Functions
 
-### proxyRouterView()
+### getRouters()
 - **Parameters**: None.
-- **Behavior**: Returns `_proxyRouter`.
-- **Internal Call Flow**: Reads `_proxyRouter`.
+- **Behavior**: Returns `routers` array.
+- **Internal Call Flow**: Reads `routers`.
 - **Balance Checks**: None.
-- **Mappings/Structs Used**: `_proxyRouter`.
+- **Mappings/Structs Used**: `routers`.
 - **Restrictions**: View function.
 - **Gas Usage Controls**: Minimal read.
 
@@ -294,7 +302,7 @@ The `OMFAgent` contract, implemented in Solidity (^0.8.2), serves as a central c
 
 ### getUserLiquidityShare(address user, address tokenA, address tokenB)
 - **Parameters**: `user` (address): Liquidity provider. `tokenA` (address): Token-0. `tokenB` (address): BaseToken.
-- **Behavior**: Returns user’s liquidity share and total pair liquidity.
+- **Behavior**: Returns user's liquidity share and total pair liquidity.
 - **Internal Call Flow**: Reads `_globalLiquidity` and `_totalLiquidityPerPair`, calculates share with 18 decimals.
 - **Balance Checks**: None.
 - **Mappings/Structs Used**: `_globalLiquidity`, `_totalLiquidityPerPair`.
@@ -337,15 +345,6 @@ The `OMFAgent` contract, implemented in Solidity (^0.8.2), serves as a central c
 - **Restrictions**: Reverts if `maxIterations` is zero (`"Invalid maxIterations"`).
 - **Gas Usage Controls**: Nested loops, bubble sort, dynamic array resizing.
 
-### getAllPairsByOrderVolume(uint256 minVolume, bool focusOnTokenA, uint256 maxIterations)
-- **Parameters**: `minVolume` (uint256): Minimum volume threshold. `focusOnTokenA` (bool): True to focus on tokenA. `maxIterations` (uint256): Maximum pairs to return.
-- **Behavior**: Returns token pairs with order volume above `minVolume`, capped at `maxIterations`.
-- **Internal Call Flow**: Iterates `_pairOrders` and `_globalOrders` to sum volumes, filters by `minVolume`.
-- **Balance Checks**: None.
-- **Mappings/Structs Used**: `_pairOrders`, `_globalOrders`, `_allListedTokens`, `_baseToken`.
-- **Restrictions**: Reverts if `maxIterations` is zero (`"Invalid maxIterations"`) or `_baseToken` is unset (`"Base token not set"`).
-- **Gas Usage Controls**: Nested loops, dynamic array resizing.
-
 ### queryByIndex(uint256 index)
 - **Parameters**: `index` (uint256): Listing index.
 - **Behavior**: Returns listing address at `_allListings[index]`.
@@ -377,7 +376,7 @@ The `OMFAgent` contract, implemented in Solidity (^0.8.2), serves as a central c
 - **Decimal Handling**: Adjusts for non-18 decimal tokens in `checkCallerBalance`.
 - **Access Control**: `onlyOwner` for setter functions, specific caller restrictions for `globalizeLiquidity` and `globalizeOrders`.
 - **Gas Optimization**: Dynamic array resizing, bubble sort in `_sortDescending`, pagination in `queryByAddressView`.
-- **Events**: `ListingCreated`, `GlobalLiquidityChanged`, `GlobalOrderChanged`.
+- **Events**: `ListingCreated`, `GlobalLiquidityChanged`, `GlobalOrderChanged`, `RouterAdded`, `RouterRemoved`.
 - **Safety**: Explicit casting, no inline assembly, validation for non-zero addresses.
 - **Interface Compliance**: Integrates with `IOMFListingTemplate`, `IOMFLiquidityTemplate`, `IOMFListingLogic`, `IOMFListing`, `IERC20`.
 
