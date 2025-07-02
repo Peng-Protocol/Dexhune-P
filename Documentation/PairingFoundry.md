@@ -62,7 +62,7 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
 - `userTradingSummaries` (mapping - address, address, address, uint256): Trading volume per user for each tokenA-tokenB pair.
 
 ### State Variables
-- `proxyRouter` (address): Address of the proxy router contract, set post-deployment.
+- `routers` (address[]): Array of router addresses for operations, set post-deployment via addRouter.
 - `listingLogicAddress` (address): Address of the SSListingLogic contract, set post-deployment.
 - `liquidityLogicAddress` (address): Address of the SSLiquidityLogic contract, set post-deployment.
 - `registryAddress` (address): Address of the registry contract, set post-deployment.
@@ -71,13 +71,27 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
 ### Functions
 
 #### Setter Functions
-- **setProxyRouter**
+- **addRouter**
   - **Parameters:**
-    - `_proxyRouter` (address): Address to set as the proxy router.
+    - `router` (address): Address to add to the routers array.
   - **Actions:**
-    - Requires non-zero address.
-    - Updates proxyRouter state variable.
+    - Requires non-zero address and that the router does not already exist.
+    - Appends the router to the routers array.
+    - Emits RouterAdded event.
     - Restricted to owner via onlyOwner modifier.
+- **removeRouter**
+  - **Parameters:**
+    - `router` (address): Address to remove from the routers array.
+  - **Actions:**
+    - Requires non-zero address and that the router exists.
+    - Removes the router by swapping with the last element and popping the array.
+    - Emits RouterRemoved event.
+    - Restricted to owner via onlyOwner modifier.
+- **getRouters**
+  - **Actions:**
+    - Returns the current array of router addresses.
+  - **Returns:**
+    - `address[]`: Array of router addresses.
 - **setListingLogic**
   - **Parameters:**
     - `_listingLogic` (address): Address to set as the listing logic contract.
@@ -107,10 +121,10 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
     - `tokenB` (address): Second token in the pair.
   - **Actions:**
     - Checks tokens are not identical and pair isn’t already listed.
-    - Verifies proxyRouter, listingLogicAddress, liquidityLogicAddress, and registryAddress are set.
+    - Verifies routers array is non-empty, listingLogicAddress, liquidityLogicAddress, and registryAddress are set.
     - Calls _deployPair to create listing and liquidity contracts.
-    - Calls _initializeListing to set up listing contract with proxy router, listing ID, liquidity address, tokens, agent, and registry.
-    - Calls _initializeLiquidity to set up liquidity contract with proxy router, listing ID, listing address, tokens, and agent.
+    - Calls _initializeListing to set up listing contract with routers array, listing ID, liquidity address, tokens, agent, and registry.
+    - Calls _initializeLiquidity to set up liquidity contract with routers array, listing ID, listing address, tokens, and agent.
     - Calls _updateState to update mappings and arrays.
     - Emits ListingCreated event.
     - Increments listingCount.
@@ -125,7 +139,7 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
     - Sets nativeAddress to address(0) for native currency.
     - Determines tokenA and tokenB based on isA.
     - Checks tokens are not identical and pair isn’t already listed.
-    - Verifies proxyRouter, listingLogicAddress, liquidityLogicAddress, and registryAddress are set.
+    - Verifies routers array is non-empty, listingLogicAddress, liquidityLogicAddress, and registryAddress are set.
     - Calls _deployPair to create listing and liquidity contracts.
     - Calls _initializeListing to set up listing contract.
     - Calls _initializeLiquidity to set up liquidity contract.
@@ -173,6 +187,13 @@ It comprises of MFPAgent -  SSListingLogic - SSLiquidityLogic - SSLiquidityTempl
     - Checks if the user exists in the liquidityProviders array for the given listingId.
   - **Returns:**
     - `bool`: True if the user exists in liquidityProviders, false otherwise.
+- **routerExists** (Internal)
+  - **Parameters:**
+    - `router` (address): Router address to check.
+  - **Actions:**
+    - Checks if the router exists in the routers array.
+  - **Returns:**
+    - `bool`: True if the router exists, false otherwise.
 
 #### Order Management Functions
 - **globalizeOrders**
