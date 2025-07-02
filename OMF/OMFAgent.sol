@@ -5,8 +5,9 @@ SPDX-License-Identifier: BSD-3-Clause
 // Specifying Solidity version for compatibility
 pragma solidity ^0.8.2;
 
-// Version: 0.0.6
+// Version: 0.0.7
 // Changes:
+// - v0.0.7: Replaced _proxyRouter with routers array, updated setProxyRouter to addRouter/removeRouter/getRouters, modified _initializeListing and _initializeLiquidity to use routers array, ensuring compatibility with IOMFListingTemplate and IOMFLiquidityTemplate.
 // - v0.0.6: Updated IOMFListing and IOMFLiquidityTemplate interfaces to align with OMFInterfaces.sol (v0.0.2) and OMFLiquidityTemplate.sol (v0.0.13). Replaced IOMFListing with full interface including volumeBalances, volumeBalanceView, getPrice, and getRegistryAddress. Updated IOMFLiquidityTemplate to include all external and view functions from OMFInterfaces.sol.
 // - v0.0.5: Fixed DeclarationError in setLiquidityLogic function at line 264 by replacing incorrect 'listingLogic' with 'liquidityLogic' in require statement.
 // - v0.0.4: Fixed getTopLiquidityProviders function to correctly iterate over _listingLiquidity mapping for a given listingId to retrieve users and their liquidity amounts, replacing incorrect use of _allListings as user addresses.
@@ -122,7 +123,7 @@ contract OMFAgent is Ownable {
     using SafeERC20 for IERC20;
 
     // State variables (hidden, accessed via view functions)
-    address private _proxyRouter; // Single router for all operations
+    address[] private routers; // Array of router addresses for operations
     address private _listingLogicAddress; // Address of listing logic contract
     address private _liquidityLogicAddress; // Address of liquidity logic contract
     address private _baseToken; // Reference token (Token-1) for all pairs
@@ -202,13 +203,35 @@ contract OMFAgent is Ownable {
     event ListingCreated(address indexed tokenA, address indexed tokenB, address listingAddress, address liquidityAddress, uint256 listingId);
     event GlobalLiquidityChanged(uint256 listingId, address tokenA, address tokenB, address user, uint256 amount, bool isDeposit);
     event GlobalOrderChanged(uint256 listingId, address tokenA, address tokenB, uint256 orderId, bool isBuy, address maker, uint256 amount, uint8 status);
+    event RouterAdded(address indexed router); // Emitted when a router is added
+    event RouterRemoved(address indexed router); // Emitted when a router is removed
 
     // Constructor (empty, addresses set via setters)
     constructor() {}
 
-    // View function for proxyRouter
-    function proxyRouterView() external view returns (address) {
-        return _proxyRouter;
+    // Checks if a token exists in allListedTokens
+    function tokenExists(address token) internal view returns (bool) {
+        for (uint256 i = 0; i < _allListedTokens.length; i++) {
+            if (_allListedTokens[i] == token) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Checks if a router exists in the routers array
+    function routerExists(address router) internal view returns (bool) {
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i] == router) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // View function for routers
+    function getRouters() external view returns (address[] memory) {
+        return routers; // Returns the entire routers array
     }
 
     // View function for listingLogicAddress
@@ -251,16 +274,6 @@ contract OMFAgent is Ownable {
         return _allListedTokens.length;
     }
 
-    // Checks if a token exists in allListedTokens
-    function tokenExists(address token) internal view returns (bool) {
-        for (uint256 i = 0; i < _allListedTokens.length; i++) {
-            if (_allListedTokens[i] == token) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // Checks caller balance for 1% of token supply
     function checkCallerBalance(address tokenA, uint256 totalSupply) internal view returns (bool) {
         uint256 decimals = IERC20(tokenA).decimals(); // Retrieves token decimals
@@ -282,9 +295,7 @@ contract OMFAgent is Ownable {
 
     // Initializes listing contract with router array and oracle details
     function _initializeListing(InitData memory init) internal {
-        address[] memory routers = new address[](1);
-        routers[0] = _proxyRouter; // Single router array
-        IOMFListingTemplate(init.listingAddress).setRouters(routers); // Sets proxyRouter
+        IOMFListingTemplate(init.listingAddress).setRouters(routers); // Sets routers array
         IOMFListingTemplate(init.listingAddress).setListingId(init.listingId); // Sets listing ID
         IOMFListingTemplate(init.listingAddress).setLiquidityAddress(init.liquidityAddress); // Links liquidity contract
         IOMFListingTemplate(init.listingAddress).setTokens(init.tokenA, init.tokenB); // Sets token pair
@@ -295,9 +306,7 @@ contract OMFAgent is Ownable {
 
     // Initializes liquidity contract with router array
     function _initializeLiquidity(InitData memory init) internal {
-        address[] memory routers = new address[](1);
-        routers[0] = _proxyRouter; // Single router array
-        IOMFLiquidityTemplate(init.liquidityAddress).setRouters(routers); // Sets proxyRouter
+        IOMFLiquidityTemplate(init.liquidityAddress).setRouters(routers); // Sets routers array
         IOMFLiquidityTemplate(init.liquidityAddress).setListingId(init.listingId); // Sets listing ID
         IOMFLiquidityTemplate(init.liquidityAddress).setListingAddress(init.listingAddress); // Links listing contract
         IOMFLiquidityTemplate(init.liquidityAddress).setTokens(init.tokenA, init.tokenB); // Sets token pair
@@ -312,10 +321,26 @@ contract OMFAgent is Ownable {
         _queryByAddress[tokenA].push(listingId); // Tracks listing ID for tokenA
     }
 
-    // Sets proxyRouter address
-    function setProxyRouter(address proxyRouter) external onlyOwner {
-        require(proxyRouter != address(0), "Invalid proxy router address");
-        _proxyRouter = proxyRouter; // Updates proxy router
+    // Adds a router to the routers array
+    function addRouter(address router) external onlyOwner {
+        require(router != address(0), "Invalid router address");
+        require(!routerExists(router), "Router already exists");
+        routers.push(router); // Appends new router to array
+        emit RouterAdded(router);
+    }
+
+    // Removes a router from the routers array
+    function removeRouter(address router) external onlyOwner {
+        require(router != address(0), "Invalid router address");
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i] == router) {
+                routers[i] = routers[routers.length - 1]; // Move last router to current position
+                routers.pop(); // Remove last element
+                emit RouterRemoved(router);
+                return;
+            }
+        }
+        revert("Router not found");
     }
 
     // Sets listing logic address
@@ -353,7 +378,7 @@ contract OMFAgent is Ownable {
         require(tokenA != _baseToken, "Identical tokens");
         require(tokenA != address(0), "TokenA cannot be NATIVE");
         require(_getListing[tokenA][_baseToken] == address(0), "Pair already listed");
-        require(_proxyRouter != address(0), "Proxy router not set");
+        require(routers.length > 0, "No routers set");
         require(_listingLogicAddress != address(0), "Listing logic not set");
         require(_liquidityLogicAddress != address(0), "Liquidity logic not set");
         require(_registryAddress != address(0), "Registry not set");
