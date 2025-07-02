@@ -1,12 +1,11 @@
-// SPDX-License-Identifier: BSD-3-Clause
+/* SPDX-License-Identifier: BSD-3-Clause */
 pragma solidity ^0.8.2;
 
-// Version: 0.0.2
+// Version: 0.0.3
 // Changes:
+// - v0.0.3: Replaced proxyRouter with routers array, updated setProxyRouter to addRouter/removeRouter/getRouters, modified _initializeListing and _initializeLiquidity to use routers array, ensuring compatibility with IMFListingTemplate and IMFLiquidityTemplate.
 // - v0.0.2: Added liquidityProviders mapping, updated _updateGlobalLiquidity to append users to liquidityProviders on first deposit, updated getTopLiquidityProviders to iterate over liquidityProviders and validate listingId.
 // - v0.0.1: Created MFPAgent from SSAgent, removed crossDriver and isolatedDriver, updated _initializeListing and _initializeLiquidity to set only proxyRouter.
-
-// Note: taxCollector functionality has been removed from SSListingTemplate.sol and SSLiquidityTemplate.sol.
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
@@ -45,7 +44,7 @@ interface IMFListing {
 contract MFPAgent is Ownable {
     using SafeERC20 for IERC20;
 
-    address public proxyRouter; // Single router address for all operations
+    address[] public routers; // Array of router addresses for operations
     address public listingLogicAddress; // Address of listing logic contract
     address public liquidityLogicAddress; // Address of liquidity logic contract
     address public registryAddress; // Address of registry contract
@@ -107,6 +106,8 @@ contract MFPAgent is Ownable {
     event ListingCreated(address indexed tokenA, address indexed tokenB, address listingAddress, address liquidityAddress, uint256 listingId);
     event GlobalLiquidityChanged(uint256 listingId, address tokenA, address tokenB, address user, uint256 amount, bool isDeposit);
     event GlobalOrderChanged(uint256 listingId, address tokenA, address tokenB, uint256 orderId, bool isBuy, address maker, uint256 amount, uint8 status);
+    event RouterAdded(address indexed router); // Emitted when a router is added
+    event RouterRemoved(address indexed router); // Emitted when a router is removed
 
     // Checks if a token exists in allListedTokens
     function tokenExists(address token) internal view returns (bool) {
@@ -129,6 +130,16 @@ contract MFPAgent is Ownable {
         return false;
     }
 
+    // Checks if a router exists in the routers array
+    function routerExists(address router) internal view returns (bool) {
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i] == router) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Deploys listing and liquidity contracts with unique salts
     function _deployPair(address tokenA, address tokenB, uint256 listingId) internal returns (address listingAddress, address liquidityAddress) {
         bytes32 listingSalt = keccak256(abi.encodePacked(tokenA, tokenB, listingId));
@@ -138,11 +149,9 @@ contract MFPAgent is Ownable {
         return (listingAddress, liquidityAddress);
     }
 
-    // Initializes listing contract with single router
+    // Initializes listing contract with router array
     function _initializeListing(address listingAddress, address liquidityAddress, address tokenA, address tokenB, uint256 listingId) internal {
-        address[] memory routers = new address[](1);
-        routers[0] = proxyRouter;
-        IMFListingTemplate(listingAddress).setRouters(routers); // Sets single proxyRouter
+        IMFListingTemplate(listingAddress).setRouters(routers); // Sets router array
         IMFListingTemplate(listingAddress).setListingId(listingId); // Sets listing ID
         IMFListingTemplate(listingAddress).setLiquidityAddress(liquidityAddress); // Links liquidity contract
         IMFListingTemplate(listingAddress).setTokens(tokenA, tokenB); // Sets token pair
@@ -150,11 +159,9 @@ contract MFPAgent is Ownable {
         IMFListingTemplate(listingAddress).setRegistry(registryAddress); // Sets registry address
     }
 
-    // Initializes liquidity contract with single router
+    // Initializes liquidity contract with router array
     function _initializeLiquidity(address listingAddress, address liquidityAddress, address tokenA, address tokenB, uint256 listingId) internal {
-        address[] memory routers = new address[](1);
-        routers[0] = proxyRouter;
-        IMFLiquidityTemplate(liquidityAddress).setRouters(routers); // Sets single proxyRouter
+        IMFLiquidityTemplate(liquidityAddress).setRouters(routers); // Sets router array
         IMFLiquidityTemplate(liquidityAddress).setListingId(listingId); // Sets listing ID
         IMFLiquidityTemplate(liquidityAddress).setListingAddress(listingAddress); // Links listing contract
         IMFLiquidityTemplate(liquidityAddress).setTokens(tokenA, tokenB); // Sets token pair
@@ -171,35 +178,56 @@ contract MFPAgent is Ownable {
         queryByAddress[tokenB].push(listingId); // Tracks listing ID for tokenB
     }
 
-    // Sets proxyRouter address
-    function setProxyRouter(address _proxyRouter) external onlyOwner {
-        require(_proxyRouter != address(0), "Invalid proxy router address");
-        proxyRouter = _proxyRouter;
+    // Adds a router to the routers array
+    function addRouter(address router) external onlyOwner {
+        require(router != address(0), "Invalid router address");
+        require(!routerExists(router), "Router already exists");
+        routers.push(router); // Appends new router to array
+        emit RouterAdded(router);
+    }
+
+    // Removes a router from the routers array
+    function removeRouter(address router) external onlyOwner {
+        require(router != address(0), "Invalid router address");
+        for (uint256 i = 0; i < routers.length; i++) {
+            if (routers[i] == router) {
+                routers[i] = routers[routers.length - 1]; // Move last router to current position
+                routers.pop(); // Remove last element
+                emit RouterRemoved(router);
+                return;
+            }
+        }
+        revert("Router not found");
+    }
+
+    // Returns the current list of routers
+    function getRouters() external view returns (address[] memory) {
+        return routers; // Returns the entire routers array
     }
 
     // Sets listing logic address
     function setListingLogic(address _listingLogic) external onlyOwner {
         require(_listingLogic != address(0), "Invalid logic address");
-        listingLogicAddress = _listingLogic;
+        listingLogicAddress = _listingLogic; // Updates listing logic address
     }
 
     // Sets liquidity logic address
     function setLiquidityLogic(address _liquidityLogic) external onlyOwner {
         require(_liquidityLogic != address(0), "Invalid logic address");
-        liquidityLogicAddress = _liquidityLogic;
+        liquidityLogicAddress = _liquidityLogic; // Updates liquidity logic address
     }
 
     // Sets registry address
     function setRegistry(address _registryAddress) external onlyOwner {
         require(_registryAddress != address(0), "Invalid registry address");
-        registryAddress = _registryAddress;
+        registryAddress = _registryAddress; // Updates registry address
     }
 
     // Lists a token pair
     function listToken(address tokenA, address tokenB) external returns (address listingAddress, address liquidityAddress) {
         require(tokenA != tokenB, "Identical tokens");
         require(getListing[tokenA][tokenB] == address(0), "Pair already listed");
-        require(proxyRouter != address(0), "Proxy router not set");
+        require(routers.length > 0, "No routers set");
         require(listingLogicAddress != address(0), "Listing logic not set");
         require(liquidityLogicAddress != address(0), "Liquidity logic not set");
         require(registryAddress != address(0), "Registry not set");
@@ -222,7 +250,7 @@ contract MFPAgent is Ownable {
 
         require(tokenA != tokenB, "Identical tokens");
         require(getListing[tokenA][tokenB] == address(0), "Pair already listed");
-        require(proxyRouter != address(0), "Proxy router not set");
+        require(routers.length > 0, "No routers set");
         require(listingLogicAddress != address(0), "Listing logic not set");
         require(liquidityLogicAddress != address(0), "Liquidity logic not set");
         require(registryAddress != address(0), "Registry not set");
