@@ -18,6 +18,8 @@ import "./imports/Ownable.sol";
 import "./imports/ReentrancyGuard.sol";
 import "./imports/SafeERC20.sol";
 
+// Note; this is an older version of multihopper which is not fully compatible with shockspace. ShockEntry requires tax-on-transfer accounting in refunds for pending amount. 
+
 interface ISSListing {
     struct UpdateType {
         string field;
