@@ -698,7 +698,7 @@ The `OMFListingTemplate` contract, implemented in Solidity (^0.8.2), manages a d
 - **Safety**: Explicit casting, no inline assembly, and graceful degradation in `getPrice` and `queryYield`.
 - **Interface Compliance**: Fully implements `IOMFListing`, interacts with `IOMFAgent`, `ITokenRegistry`, and `IOMFLiquidityTemplate`.
 
-# OMFLiquidityTemplate Contract Specifications
+# OMFLiquidityTemplate Contract Documentation
 
 ## Overview
 The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages liquidity pools for ERC-20 token pairs, handling deposits, withdrawals, and fee claims for a decentralized trading system. It integrates with `OMFListingTemplate`, `OMFAgent`, and `TokenRegistry` contracts, using `SafeERC20` for secure token operations and `ReentrancyGuard` for protection against reentrancy attacks. The contract tracks liquidity slots, cumulative fee volumes, and balances, ensuring decimal precision and gas efficiency. State variables are private, accessed via dedicated view functions, and comply with the `IOMFLiquidityTemplate` interface.
@@ -965,19 +965,19 @@ The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages l
 - **Safety**: Try-catch for external calls, explicit casting, no inline assembly, graceful degradation in `globalizeUpdate` and `updateRegistry`.
 - **Interface Compliance**: Implements `IOMFLiquidityTemplate`, integrates with `IOMFListing`, `IOMFAgent`, `ITokenRegistry`.
 
-# OMFRouter Contract Specifications
+# OMFRouter Contract Documentation
 
 ## Overview
-The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order creation, settlement, and liquidity management for a decentralized trading platform, incorporating a 0.05% fee and oracle-based pricing. It inherits functionality from `OMFSettlementPartial`, which extends `OMFOrderPartial` and `OMFMainPartial`, integrating with external interfaces (`IOMFListingTemplate`, `IOMFLiquidityTemplate`, `IOMFAgent`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles buy/sell order creation with fees, settlement, liquidity deposits, withdrawals, fee claims, and depositor changes, with rigorous gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
+The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order creation, settlement, and liquidity management for a decentralized trading platform, incorporating a 0.05% fee and oracle-based pricing. It inherits functionality from `OMFSettlementPartial`, which extends `OMFOrderPartial` and `OMFMainPartial`, integrating with external interfaces (`IOMFListingTemplate`, `IOMFLiquidityTemplate`, `IOMFAgent`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles buy/sell order creation with fees, settlement, liquidity deposits, withdrawals, fee claims, depositor changes, and order cancellations, with rigorous gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
 
-**SPDX License:** BSD-3-Clause
+**SPDX License:** BSL-1.1
 
-**Version:** 0.0.80 (updated 2025-06-30)
+**Version:** 0.0.81 (updated 2025-07-16)
 
 **Inheritance Tree:** `OMFRouter` → `OMFSettlementPartial` → `OMFOrderPartial` → `OMFMainPartial`
 
 ## Mappings
-- None explicitly defined in `OMFRouter`; relies on inherited functionality and external contract state.
+- None explicitly defined in `OMFRouter`; relies on inherited functionality and external contract state (e.g., `listingContract` and `liquidityContract` mappings).
 
 ## Structs
 - **OrderDetails**: Contains `recipientAddress` (address), `amount` (uint256, denormalized), `maxPrice` (uint256, normalized), `minPrice` (uint256, normalized).
@@ -1109,7 +1109,7 @@ The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order 
   - **Structs**: `OrderContext`, `BuyOrderUpdateContext`, `UpdateType`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
-  - Requires router registration in `liquidityContract`.
+  - Requires router registration in `liquidityContract.routersView(address(this))`.
   - Reverts if transfer or liquidity update fails.
 - **Gas Usage Controls**: `maxIterations`, dynamic arrays, try-catch error handling.
 
@@ -1143,7 +1143,7 @@ The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order 
   - **Structs**: `PayoutUpdate`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
-  - Requires router registration in `liquidityContract`.
+  - Requires router registration in `liquidityContract.routersView(address(this))`.
 - **Gas Usage Controls**: `maxIterations`, dynamic arrays.
 
 ### settleShortPayouts(address listingAddress, uint256 maxIterations)
@@ -1162,7 +1162,7 @@ The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order 
   - `isTokenA` (bool): True for tokenA (e.g., LINK), false for tokenB (e.g., USD).
   - `inputAmount` (uint256): Deposit amount (denormalized).
   - `user` (address): User depositing liquidity; must be non-zero (`require(caller != address(0), "Invalid caller")` in `liquidityContract.deposit`).
-- **Behavior**: Deposits ERC-20 tokens to the liquidity pool on behalf of `user`, transferring tokens from `msg.sender` (router) to `OMFRouter`, then to `liquidityAddr`, updating `_xLiquiditySlots` or `_yLiquiditySlots` and `_liquidityDetail`.
+- **Behavior**: Deposits ERC-20 tokens to the liquidity pool on behalf of `user`, transferring tokens from `msg.sender` to `this`, then to `liquidityAddr`, updating `_xLiquiditySlots` or `_yLiquiditySlots` and `_liquidityDetail`.
 - **Internal Call Flow**:
   - Validates `isTokenA` to select tokenA or tokenB via `token0View` or `baseTokenView`.
   - Transfers tokens via `IERC20.transferFrom` from `msg.sender` to `this`, with pre/post balance checks.
@@ -1181,61 +1181,64 @@ The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order 
 - **Gas Usage Controls**: Single transfer and call, minimal state writes, try-catch for `globalizeUpdate` and `updateRegistry`.
 - **External Dependencies**: `liquidityContract.deposit` calls `IOMFAgent.globalizeLiquidity` and `ITokenRegistry.initializeBalances`, handled with try-catch.
 
-### claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount, address user)
-- **Parameters**:
-  - `listingAddress` (address): Listing contract address; must match `_listingAddress` in `liquidityContract` (`require(listingAddress == _listingAddress, "Invalid listing address")`).
-  - `liquidityIndex` (uint256): Slot index in `_xLiquiditySlots` or `_yLiquiditySlots`.
-  - `isX` (bool): True for tokenA slot (e.g., LINK), false for tokenB slot (e.g., USD).
-  - `volumeAmount` (uint256): Unused (legacy parameter, volume fetched from `volumeBalanceView`).
-  - `user` (address): User claiming fees; must be non-zero and the slot depositor (`require(slot.depositor == caller, "Caller not depositor")`).
-- **Behavior**: Claims fees for the slot on behalf of `user`, converting fees to the provider’s token value (xSlots claim yFees in tokenA, ySlots claim xFees in tokenB) using `IOMFListing.getPrice`, transferring the converted amount to `user`.
-- **Internal Call Flow**:
-  - Validates `listingAddress` and `user`.
-  - Fetches volume via `IOMFListing.volumeBalanceView` and price via `IOMFListing.getPrice`.
-  - Calls `_processFeeClaim` with `FeeClaimContext`, which:
-    - Computes fee share based on slot allocation and volume.
-    - Updates fees and slot via `update` (2 `UpdateType`).
-    - Transfers converted fees via `IERC20.safeTransfer`.
-  - Transfer destination: `user` (converted fee amount).
-- **Balance Checks**: None in `OMFRouter`; `liquidityContract` uses try-catch for volume and price fetches.
-- **Mappings/Structs Used**: `UpdateType`, `FeeClaimContext` in `liquidityContract`.
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing` in `OMFRouter`, and `nonReentrant` and `onlyRouter` in `liquidityContract`.
-  - Reverts if `user` is zero, not the depositor, `listingAddress` is invalid, volume fetch fails, or price is zero (`require(currentPrice > 0, "Price cannot be zero")`).
-- **Gas Usage Controls**: Two external calls (volume, price), minimal updates (2 `UpdateType`), try-catch for robustness.
-- **External Dependencies**: `liquidityContract` calls `IOMFListing.volumeBalanceView` and `IOMFListing.getPrice`, handled with try-catch.
-
-### withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX, address user)
+### withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX)
 - **Parameters**:
   - `listingAddress` (address): Listing contract address; must match `_listingAddress` in `liquidityContract`.
   - `inputAmount` (uint256): Withdrawal amount (denormalized).
   - `index` (uint256): Slot index in `_xLiquiditySlots` or `_yLiquiditySlots`.
   - `isX` (bool): True for tokenA (e.g., LINK), false for tokenB (e.g., USD).
-  - `user` (address): User withdrawing liquidity; must be non-zero and the slot depositor (`require(slot.depositor == caller, "Caller not depositor")` in `x/yPrepOut`).
-- **Behavior**: Withdraws liquidity from the pool on behalf of `user`, preparing withdrawal with `xPrepOut` or `yPrepOut` (compensating with the opposite token if needed using `IOMFListing.getPrice`), then executing via `xExecuteOut` or `yExecuteOut`.
+- **Behavior**: Withdraws liquidity from the pool for `msg.sender`, restricted to the slot’s depositor, preparing withdrawal with `xPrepOut` or `yPrepOut` (compensating with the opposite token if needed using `IOMFListing.getPrice`), then executing via `xExecuteOut` or `yExecuteOut`.
 - **Internal Call Flow**:
-  - Calls `xPrepOut` or `yPrepOut` with `user` to prepare `PreparedWithdrawal`:
-    - Validates `user` as slot depositor and `inputAmount` against slot allocation.
+  - Validates `msg.sender` as non-zero.
+  - Calls `xPrepOut` or `yPrepOut` with `msg.sender` to prepare `PreparedWithdrawal`:
+    - Validates `msg.sender` as slot depositor and `inputAmount` against slot allocation.
     - Fetches price via `IOMFListing.getPrice` for compensation.
-  - Calls `xExecuteOut` or `yExecuteOut` with `user`:
+  - Calls `xExecuteOut` or `yExecuteOut` with `msg.sender`:
     - Updates slot allocation via `update` (1 `UpdateType`).
     - Transfers tokens via `IERC20.safeTransfer`.
     - Calls `globalizeUpdate` (to `IOMFAgent.globalizeLiquidity`) and `updateRegistry` (to `ITokenRegistry.initializeBalances`).
-  - Transfer destinations: `user` (withdrawn tokens).
+  - Transfer destination: `msg.sender` (withdrawn tokens).
 - **Balance Checks**: None in `OMFRouter`; `liquidityContract` checks liquidity availability and uses try-catch for price and external calls.
 - **Mappings/Structs Used**: `PreparedWithdrawal`, `UpdateType` in `liquidityContract`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing` in `OMFRouter`, and `nonReentrant` and `onlyRouter` in `liquidityContract`.
-  - Reverts if `user` is zero, not the depositor, `listingAddress` is invalid, `inputAmount` exceeds allocation, price fetch fails, or transfers fail.
+  - Requires router registration in `liquidityContract.routersView(address(this))`.
+  - Reverts if `msg.sender` is zero, not the slot depositor, `listingAddress` is invalid, `inputAmount` exceeds allocation, price fetch fails, or transfers fail.
 - **Gas Usage Controls**: Two external calls (prep, execute), minimal updates (1 `UpdateType`), try-catch for external calls.
 - **External Dependencies**: `liquidityContract` calls `IOMFListing.getPrice`, `IOMFAgent.globalizeLiquidity`, and `ITokenRegistry.initializeBalances`, handled with try-catch.
+
+### claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount)
+- **Parameters**:
+  - `listingAddress` (address): Listing contract address; must match `_listingAddress` in `liquidityContract`.
+  - `liquidityIndex` (uint256): Slot index in `_xLiquiditySlots` or `_yLiquiditySlots`.
+  - `isX` (bool): True for tokenA slot (e.g., LINK, claims yFees in tokenB), false for tokenB slot (e.g., USD, claims xFees in tokenA).
+  - `volumeAmount` (uint256): Unused (legacy parameter, volume fetched from `volumeBalanceView`).
+- **Behavior**: Claims fees for the slot for `msg.sender`, restricted to the slot’s depositor, converting fees to the provider’s token value (xSlots claim yFees in tokenB, ySlots claim xFees in tokenA) using `IOMFListing.getPrice`, transferring the converted amount to `msg.sender`.
+- **Internal Call Flow**:
+  - Validates `msg.sender` as non-zero and `listingAddress`.
+  - Calls `liquidityContract.claimFees(msg.sender, listingAddress, liquidityIndex, isX, volumeAmount)`, which:
+    - Validates `msg.sender` as the slot depositor.
+    - Fetches volume via `IOMFListing.volumeBalanceView` and price via `IOMFListing.getPrice`.
+    - Calls `_processFeeClaim` with `FeeClaimContext`:
+      - Computes fee share based on slot allocation and volume.
+      - Updates fees and slot via `update` (2 `UpdateType`).
+      - Transfers converted fees via `IERC20.safeTransfer`.
+  - Transfer destination: `msg.sender` (converted fee amount).
+- **Balance Checks**: None in `OMFRouter`; `liquidityContract` uses try-catch for volume and price fetches.
+- **Mappings/Structs Used**: `UpdateType`, `FeeClaimContext` in `liquidityContract`.
+- **Restrictions**:
+  - Protected by `nonReentrant` and `onlyValidListing` in `OMFRouter`, and `nonReentrant` and `onlyRouter` in `liquidityContract`.
+  - Requires router registration in `liquidityContract.routersView(address(this))`.
+  - Reverts if `msg.sender` is zero, not the slot depositor, `listingAddress` is invalid, volume fetch fails, or price is zero (`require(currentPrice > 0, "Price cannot be zero")`).
+- **Gas Usage Controls**: Two external calls (volume, price), minimal updates (2 `UpdateType`), try-catch for robustness.
+- **External Dependencies**: `liquidityContract` calls `IOMFListing.volumeBalanceView` and `IOMFListing.getPrice`, handled with try-catch.
 
 ### clearSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder)
 - **Parameters**:
   - `listingAddress` (address): Listing contract address.
   - `orderIdentifier` (uint256): Order ID.
   - `isBuyOrder` (bool): True for buy (USD→LINK), false for sell (LINK→USD).
-- **Behavior**: Cancels a single order, setting status to 0, restricted to the order maker.
+- **Behavior**: Cancels a single order, setting status to 0, restricted to the order maker (`msg.sender`).
 - **Internal Call Flow**:
   - Validates `msg.sender` as the order maker via `buyOrderCoreView` or `sellOrderCoreView`.
   - Calls `_clearOrderData`:
@@ -1246,14 +1249,14 @@ The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order 
   - **Structs**: `UpdateType`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if `msg.sender` is not the order maker or order is invalid.
+  - Reverts if `msg.sender` is not the order maker or order is invalid (`makerAddress == address(0)`).
 - **Gas Usage Controls**: Single update, minimal array (1 `UpdateType`).
 
 ### clearOrders(address listingAddress, uint256 maxIterations)
 - **Parameters**:
   - `listingAddress` (address): Listing contract address.
   - `maxIterations` (uint256): Maximum orders to process.
-- **Behavior**: Cancels pending buy and sell orders for `msg.sender` up to `maxIterations`.
+- **Behavior**: Cancels pending buy and sell orders for `msg.sender` up to `maxIterations`, using `makerPendingOrdersView` to fetch orders.
 - **Internal Call Flow**:
   - Iterates `makerPendingOrdersView[]` up to `maxIterations`.
   - Validates order maker and status via `buyOrderCoreView` or `sellOrderCoreView`.
@@ -1262,36 +1265,41 @@ The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order 
 - **Mappings/Structs Used**: Same as `clearSingleOrder`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if orders are invalid or not owned by `msg.sender`.
-- **Gas Usage Controls**: `maxIterations` limits iteration.
+  - Reverts if orders are invalid or not owned by `msg.sender` (`makerBuy != msg.sender` or `sellStatus == 0`).
+- **Gas Usage Controls**: `maxIterations` limits iteration, minimal updates per order (1 `UpdateType`).
 
-### changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor, address user)
+### changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor)
 - **Parameters**:
   - `listingAddress` (address): Listing contract address; must match `_listingAddress` in `liquidityContract`.
   - `isX` (bool): True for tokenA slot (e.g., LINK), false for tokenB slot (e.g., USD).
   - `slotIndex` (uint256): Slot index in `_xLiquiditySlots` or `_yLiquiditySlots`.
-  - `newDepositor` (address): New slot owner; must be non-zero (`require(newDepositor != address(0), "Invalid new depositor")`).
-  - `user` (address): Current slot owner; must be non-zero and the slot depositor (`require(slot.depositor == caller, "Caller not depositor")`).
-- **Behavior**: Changes the depositor for a liquidity slot on behalf of `user`, updating `_userIndex` in `liquidityContract`.
+  - `newDepositor` (address): New slot owner; must be non-zero.
+- **Behavior**: Changes the depositor for a liquidity slot for `msg.sender`, restricted to the slot’s depositor, updating `_userIndex` in `liquidityContract`.
 - **Internal Call Flow**:
-  - Calls `liquidityContract.changeSlotDepositor(user, isX, slotIndex, newDepositor)`, which:
-    - Validates `user` as the slot depositor and `newDepositor` as non-zero.
+  - Validates `msg.sender` and `newDepositor` as non-zero.
+  - Calls `liquidityContract.changeSlotDepositor(msg.sender, isX, slotIndex, newDepositor)`, which:
+    - Validates `msg.sender` as the slot depositor and `newDepositor` as non-zero.
     - Updates slot depositor and `_userIndex`.
 - **Balance Checks**: None, handled by `liquidityContract`.
 - **Mappings/Structs Used**: None in `OMFRouter`; `liquidityContract` uses `_userIndex`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing` in `OMFRouter`, and `nonReentrant` and `onlyRouter` in `liquidityContract`.
-  - Reverts if `user` or `newDepositor` is zero, `user` is not the depositor, `listingAddress` is invalid, or slot allocation is zero (`require(slot.allocation > 0, "Invalid slot")`).
+  - Requires router registration in `liquidityContract.routersView(address(this))`.
+  - Reverts if `msg.sender` or `newDepositor` is zero, `msg.sender` is not the slot depositor, `listingAddress` is invalid, or slot allocation is zero (`require(slot.allocation > 0, "Invalid slot")`).
 - **Gas Usage Controls**: Minimal, single external call and array operations.
 - **External Dependencies**: None beyond `liquidityContract.changeSlotDepositor`.
 
 ## Additional Details
 - **Fee Structure**: Applies a 0.05% fee on `inputAmount` for buy/sell orders, transferred to `liquidityAddr` via `_handleFeeAndTransfer`.
-- **Oracle Pricing**: Uses `listingContract.getPrice` for buy/sell order output calculations (e.g., LINK/USD: buy USD→LINK, sell LINK→USD), replacing constant product formula.
+- **Oracle Pricing**: Uses `listingContract.getPrice` for buy/sell order output calculations (e.g., LINK/USD: buy USD→LINK, sell LINK→USD), replacing constant product formula used in `SSRouter`.
 - **Decimal Handling**: Uses `normalize` and `denormalize` from `OMFMainPartial.sol` (1e18) for token amounts, fetched via `IERC20.decimals`, `listingContract.decimals0View`, or `baseTokenDecimalsView`. Ensures consistent precision across tokens.
 - **Reentrancy Protection**: All state-changing functions use `nonReentrant` modifier.
 - **Gas Optimization**: Uses `maxIterations` to limit loops, dynamic arrays for updates, `_checkAndTransferPrincipal` for efficient transfers, call tree in `prepAndTransfer` to reduce stack depth (~6 variables in `createBuyOrder`/`createSellOrder`), and `_processBuy/SellOrder` (~12 variables).
 - **Listing Validation**: Uses `onlyValidListing` modifier with `IOMFAgent.validateListing` checks to ensure listing integrity.
+- **Router Restrictions**: Functions interacting with `liquidityContract` (e.g., `deposit`, `withdraw`, `claimFees`, `changeDepositor`, `settleBuy/SellLiquid`, `settleLong/ShortPayouts`) require `msg.sender` to be a registered router in `liquidityContract.routersView(address(this))`, ensuring only authorized routers can call these functions.
+- **Order Cancellation**:
+  - `clearSingleOrder`: Restricted to the order maker (`msg.sender`) via `buyOrderCoreView` or `sellOrderCoreView`.
+  - `clearOrders`: Cancels only `msg.sender`’s orders, fetched via `makerPendingOrdersView`, ensuring no unauthorized cancellations.
 - **Token Usage**:
   - Buy orders: Input tokenB (e.g., USD), output tokenA (e.g., LINK), `amountSent` tracks tokenA.
   - Sell orders: Input tokenA (e.g., LINK), output tokenB (e.g., USD), `amountSent` tracks tokenB.
@@ -1302,7 +1310,8 @@ The `OMFRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order 
   - Explicit casting used for all interface and address conversions (e.g., `IOMFListingTemplate(listingAddress)`).
   - No inline assembly, adhering to high-level Solidity for safety.
   - Try-catch blocks handle external call failures (e.g., transfers, liquidity updates, price fetches).
-  - Hidden state variables accessed via unique view functions (e.g., `agentView`, `liquidityAddressView`).
+  - Hidden state variables accessed via unique view functions (e.g., `agentView`, `liquidityAddressView`, `makerPendingOrdersView`).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
   - Ensures graceful degradation with zero-length array returns on failure (e.g., `_prepBuyLiquidUpdates`).
+  - Maker-only cancellation enforced in `clearSingleOrder` and `clearOrders` to prevent unauthorized order cancellations.
   - Call tree in `prepAndTransfer` minimizes stack usage, resolving prior stack-too-deep errors.
