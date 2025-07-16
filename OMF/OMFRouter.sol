@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-License-Identifier: BSL-1.1
 pragma solidity ^0.8.2;
 
-// Version: 0.0.77 (Updated)
+// Version: 0.0.78 (Updated)
 // Changes:
+// - v0.0.78: Modified withdraw, claimFees, and changeDepositor to use msg.sender instead of user parameter for enhanced security and interface simplicity, aligning with SSRouter.sol v0.0.62.
 // - v0.0.77: Refactored createBuyOrder/createSellOrder to use prepAndTransfer call tree in OMFOrderPartial.sol, reducing local variables to fix stack too deep at line 131.
 // - v0.0.76: Refactored createBuyOrder/createSellOrder using OrderDetails, prepOrderCore, prepOrderAmounts, applyOrderUpdate.
 // - v0.0.75: Fixed stack too deep by adding _handleFeeAndAdd; corrected inheritance to OMFSettlementPartial.
@@ -543,43 +544,43 @@ contract OMFRouter is OMFSettlementPartial {
         }
     }
 
-    function withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX, address user) external onlyValidListing(listingAddress) nonReentrant {
-        // Withdraws tokens from liquidity pool
+    function withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX) external onlyValidListing(listingAddress) nonReentrant {
+        // Withdraws tokens from liquidity pool for msg.sender
         IOMFListingTemplate listingContract = IOMFListingTemplate(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView(listingContract.listingIdView());
         IOMFLiquidityTemplate liquidityContract = IOMFLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routersView(address(this)), "Router not registered");
-        require(user != address(0), "Invalid user address");
+        require(msg.sender != address(0), "Invalid caller address");
         IOMFLiquidityTemplate.PreparedWithdrawal memory withdrawal;
         if (isX) {
-            try liquidityContract.xPrepOut(user, inputAmount, index) returns (IOMFLiquidityTemplate.PreparedWithdrawal memory w) {
+            try liquidityContract.xPrepOut(msg.sender, inputAmount, index) returns (IOMFLiquidityTemplate.PreparedWithdrawal memory w) {
                 withdrawal = w;
             } catch {
                 revert("Withdrawal preparation failed");
             }
-            try liquidityContract.xExecuteOut(user, index, withdrawal) {} catch {
+            try liquidityContract.xExecuteOut(msg.sender, index, withdrawal) {} catch {
                 revert("Withdrawal execution failed");
             }
         } else {
-            try liquidityContract.yPrepOut(user, inputAmount, index) returns (IOMFLiquidityTemplate.PreparedWithdrawal memory w) {
+            try liquidityContract.yPrepOut(msg.sender, inputAmount, index) returns (IOMFLiquidityTemplate.PreparedWithdrawal memory w) {
                 withdrawal = w;
             } catch {
                 revert("Withdrawal preparation failed");
             }
-            try liquidityContract.yExecuteOut(user, index, withdrawal) {} catch {
+            try liquidityContract.yExecuteOut(msg.sender, index, withdrawal) {} catch {
                 revert("Withdrawal execution failed");
             }
         }
     }
 
-    function claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount, address user) external onlyValidListing(listingAddress) nonReentrant {
-        // Claims fees from liquidity pool
+    function claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount) external onlyValidListing(listingAddress) nonReentrant {
+        // Claims fees from liquidity pool for msg.sender
         IOMFListingTemplate listingContract = IOMFListingTemplate(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView(listingContract.listingIdView());
         IOMFLiquidityTemplate liquidityContract = IOMFLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routersView(address(this)), "Router not registered");
-        require(user != address(0), "Invalid user address");
-        try liquidityContract.claimFees(user, listingAddress, liquidityIndex, isX, volumeAmount) {} catch {
+        require(msg.sender != address(0), "Invalid caller address");
+        try liquidityContract.claimFees(msg.sender, listingAddress, liquidityIndex, isX, volumeAmount) {} catch {
             revert("Claim fees failed");
         }
     }
@@ -624,17 +625,16 @@ contract OMFRouter is OMFSettlementPartial {
         address listingAddress,
         bool isX,
         uint256 slotIndex,
-        address newDepositor,
-        address user
+        address newDepositor
     ) external onlyValidListing(listingAddress) nonReentrant {
-        // Changes depositor for a liquidity slot
+        // Changes depositor for a liquidity slot for msg.sender
         IOMFListingTemplate listingContract = IOMFListingTemplate(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView(listingContract.listingIdView());
         IOMFLiquidityTemplate liquidityContract = IOMFLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routersView(address(this)), "Router not registered");
-        require(user != address(0), "Invalid user address");
+        require(msg.sender != address(0), "Invalid caller address");
         require(newDepositor != address(0), "Invalid new depositor");
-        try liquidityContract.changeSlotDepositor(user, isX, slotIndex, newDepositor) {} catch {
+        try liquidityContract.changeSlotDepositor(msg.sender, isX, slotIndex, newDepositor) {} catch {
             revert("Failed to change depositor");
         }
     }
