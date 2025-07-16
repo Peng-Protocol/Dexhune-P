@@ -1133,11 +1133,11 @@ The `SSLiquidityTemplate`, implemented in Solidity (^0.8.2), forms part of a dec
 # SSRouter Contract Documentation
 
 ## Overview
-The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order creation, settlement, liquidity management, and order cancellation for a decentralized trading platform. It inherits functionality from `SSSettlementPartial`, which extends `SSOrderPartial` and `SSMainPartial`, integrating with external interfaces (`ISSListingTemplate`, `ISSLiquidityTemplate`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles buy/sell order creation, settlement, liquidity deposits, withdrawals, fee claims, depositor changes, and order cancellations, with rigorous gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
+The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order creation, settlement, liquidity management, and order cancellation for a decentralized trading platform. It inherits functionality from `SSSettlementPartial`, which extends `SSOrderPartial` and `SSMainPartial`, integrating with external interfaces (`ISSListingTemplate`, `ISSLiquidityTemplate`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles buy/sell order creation, settlement, liquidity deposits, withdrawals, fee claims, depositor changes, and order cancellations, with rigorous gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation. Zero-amount payouts are explicitly handled to prevent indefinite pending states, ensuring system efficiency.
 
-**SPDX License:** BSD-3-Clause
+**SPDX License:** BSL-1.1
 
-**Version:** 0.0.61 (updated 2025-06-30)
+**Version:** 0.0.62 (updated 2025-07-16)
 
 **Inheritance Tree:** `SSRouter` → `SSSettlementPartial` → `SSOrderPartial` → `SSMainPartial`
 
@@ -1214,8 +1214,11 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
 - **Mappings/Structs Used**:
   - **Structs**: `OrderPrep`, `UpdateType`.
 - **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if `maker`, `recipient`, or `amount` is invalid, or transfer fails.
+  - Protected琢
+
+System: **Balance Checks**: Same as `createBuyOrder`.
+- **Mappings/Structs Used**: Same as `createBuyOrder`.
+- **Restrictions**: Same as `createBuyOrder`.
 - **Gas Usage Controls**: Single transfer, minimal array updates (3 `UpdateType` elements).
 
 ### createSellOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
@@ -1304,11 +1307,12 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
 - **Parameters**:
   - `listingAddress` (address): Listing contract address.
   - `maxIterations` (uint256): Maximum orders to process.
-- **Behavior**: Settles long position payouts, transferring tokenB to holders.
+- **Behavior**: Settles long position payouts, transferring tokenB to holders. Zero-amount payouts (`required=0`) are skipped, returning an empty `PayoutUpdate[]`.
 - **Internal Call Flow**:
   - Iterates `longPayoutByIndexView[]` up to `maxIterations`.
   - Calls `executeLongPayout` (inherited):
     - Uses `_prepPayoutContext` (tokenB, decimalsB).
+    - Checks `payout.required > 0`, returns empty array if zero.
     - Transfers `amountOut` via `listingContract.transact`.
     - Updates `payoutPendingAmounts` and creates `PayoutUpdate[]` via `_createPayoutUpdate`.
   - Applies `finalPayoutUpdates[]` via `listingContract.ssUpdate`.
@@ -1325,7 +1329,7 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
 
 ### settleShortPayouts(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleLongPayouts`.
-- **Behavior**: Settles short position payouts, transferring tokenA to holders.
+- **Behavior**: Settles short position payouts, transferring tokenA to holders. Zero-amount payouts (`amount=0`) are skipped, returning an empty `PayoutUpdate[]`.
 - **Internal Call Flow**:
   - Similar to `settleLongPayouts`, using `shortPayoutByIndexView[]` and `executeShortPayout`.
   - Uses `_prepPayoutContext` with tokenA and `decimalsA`.
@@ -1335,22 +1339,26 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
 - **Gas Usage Controls**: Same as `settleLongPayouts`.
 
 ### settleLongLiquid(address listingAddress, uint256 maxIterations)
-- **Parameters**: Same as `settleLongPayouts`.
-- **Behavior**: Settles long position payouts from liquidity pool, transferring tokenB to holders.
+- **Parameters**:
+  - `listingAddress` (address): Listing contract address.
+  - `maxIterations` (uint256): Maximum orders to process.
+- **Behavior**: Settles long position payouts from liquidity pool, transferring tokenB to holders. Zero-amount payouts (`required=0`) are marked as completed (status 3) via `listingContract.update` to prevent indefinite pending states.
 - **Internal Call Flow**:
   - Iterates `longPayoutByIndexView[]` up to `maxIterations`.
   - Calls `settleSingleLongLiquid` (inherited):
     - Uses `_prepPayoutContext` (tokenB, decimalsB).
-    - Checks liquidity via `_checkLiquidityBalance`.
-    - Transfers `amountOut` via `liquidityContract.transact`.
-    - Updates `payoutPendingAmounts` and creates `PayoutUpdate[]` via `_createPayoutUpdate`.
+    - Checks `payout.required > 0`:
+      - If zero, creates `PayoutUpdate[]` with `required=0` and `UpdateType[]` to set status to 3 (completed), calls `listingContract.update`, and returns the `PayoutUpdate[]`.
+      - If non-zero, checks liquidity via `_checkLiquidityBalance`.
+      - Transfers `amountOut` via `liquidityContract.transact`.
+      - Updates `payoutPendingAmounts` and creates `PayoutUpdate[]` via `_createPayoutUpdate`.
   - Applies `finalPayoutUpdates[]` via `listingContract.ssUpdate`.
   - Transfer destination: `recipientAddress` (tokenB).
 - **Balance Checks**:
   - `_transferPayoutAmount` (inherited) checks liquidity pre/post balances.
 - **Mappings/Structs Used**:
   - **Mappings**: `payoutPendingAmounts`.
-  - **Structs**: `PayoutContext`, `PayoutUpdate`, `LongPayoutStruct`.
+  - **Structs**: `PayoutContext`, `PayoutUpdate`, `LongPayoutStruct`, `UpdateType`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
   - Requires router registration in `liquidityContract.routers(address(this))`.
@@ -1358,9 +1366,12 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
 
 ### settleShortLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleLongPayouts`.
-- **Behavior**: Settles short position payouts from liquidity pool, transferring tokenA to holders.
+- **Behavior**: Settles short position payouts from liquidity pool, transferring tokenA to holders. Zero-amount payouts (`amount=0`) are marked as completed (status 3) via `listingContract.update` to prevent indefinite pending states.
 - **Internal Call Flow**:
   - Similar to `settleLongLiquid`, using `settleSingleShortLiquid` and `_prepPayoutContext` with tokenA and `decimalsA`.
+  - Checks `payout.amount > 0`:
+    - If zero, creates `PayoutUpdate[]` with `required=0` and `UpdateType[]` to set status to 3 (completed), calls `listingContract.update`, and returns the `PayoutUpdate[]`.
+    - If non-zero, proceeds with liquidity transfer and updates.
 - **Balance Checks**: Same as `settleLongLiquid`.
 - **Mappings/Structs Used**: Same as `settleLongLiquid`, with `ShortPayoutStruct`.
 - **Restrictions**: Same as `settleLongLiquid`.
@@ -1388,37 +1399,16 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
   - Reverts if `user` is zero or deposit fails.
 - **Gas Usage Controls**: Single transfer and call, minimal state writes.
 
-### claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount, address user)
-- **Parameters**:
-  - `listingAddress` (address): Listing contract address.
-  - `liquidityIndex` (uint256): Liquidity slot index.
-  - `isX` (bool): True for tokenA (claims yFees), false for tokenB (claims xFees).
-  - `volumeAmount` (uint256): Unused parameter (maintained for interface compatibility, internally set to 7777).
-  - `user` (address): User claiming fees, must be the slot depositor.
-- **Behavior**: Claims fees from the liquidity pool for `user`, restricted to the slot’s depositor.
-- **Internal Call Flow**:
-  - Calls `liquidityContract.claimFees(user, listingAddress, liquidityIndex, isX, 7777)`, where `volumeAmount` is ignored and internally set to 7777.
-  - `liquidityContract` verifies `user` is the slot depositor.
-  - No direct transfers or balance checks in `SSRouter`.
-- **Balance Checks**: None, handled by `liquidityContract` via `_processFeeClaim` with pre/post balance checks.
-- **Mappings/Structs Used**: None.
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Requires router registration in `liquidityContract.routers(address(this))`.
-  - Reverts if `user` is zero, `user` is not the slot depositor, or claim fails.
-- **Gas Usage Controls**: Minimal, single external call.
-
-### withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX, address user)
+### withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX)
 - **Parameters**:
   - `listingAddress` (address): Listing contract address.
   - `inputAmount` (uint256): Withdrawal amount (denormalized).
   - `index` (uint256): Liquidity slot index.
   - `isX` (bool): True for tokenA, false for tokenB.
-  - `user` (address): User withdrawing liquidity, must be the slot depositor.
-- **Behavior**: Withdraws liquidity from the pool for `user`, restricted to the slot’s depositor.
+- **Behavior**: Withdraws liquidity from the pool for `msg.sender`, restricted to the slot’s depositor.
 - **Internal Call Flow**:
-  - Calls `xPrepOut` or `yPrepOut` with `user` to prepare withdrawal, verifying `user` is the slot depositor in `liquidityContract`.
-  - Executes via `xExecuteOut` or `yExecuteOut` with `user`, transferring tokens to `user`.
+  - Calls `xPrepOut` or `yPrepOut` with `msg.sender` to prepare withdrawal, verifying `msg.sender` is the slot depositor in `liquidityContract`.
+  - Executes via `xExecuteOut` or `yExecuteOut` with `msg.sender`, transferring tokens to `msg.sender`.
   - No direct transfers in `SSRouter`, handled by `liquidityContract`.
 - **Balance Checks**: None in `SSRouter`, handled by `liquidityContract` with pre/post balance checks in `xExecuteOut` or `yExecuteOut`.
 - **Mappings/Structs Used**:
@@ -1426,8 +1416,27 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
   - Requires router registration in `liquidityContract.routers(address(this))`.
-  - Reverts if `user` is zero, `user` is not the slot depositor, or preparation/execution fails.
+  - Reverts if `msg.sender` is zero, `msg.sender` is not the slot depositor, or preparation/execution fails.
 - **Gas Usage Controls**: Minimal, two external calls.
+
+### claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount)
+- **Parameters**:
+  - `listingAddress` (address): Listing contract address.
+  - `liquidityIndex` (uint256): Liquidity slot index.
+  - `isX` (bool): True for tokenA (claims yFees), false for tokenB (claims xFees).
+  - `volumeAmount` (uint256): Unused parameter (maintained for interface compatibility).
+- **Behavior**: Claims fees from the liquidity pool for `msg.sender`, restricted to the slot’s depositor.
+- **Internal Call Flow**:
+  - Calls `liquidityContract.claimFees(msg.sender, listingAddress, liquidityIndex, isX, volumeAmount)`.
+  - `liquidityContract` verifies `msg.sender` is the slot depositor.
+  - No direct transfers or balance checks in `SSRouter`.
+- **Balance Checks**: None, handled by `liquidityContract` via `_processFeeClaim` with pre/post balance checks.
+- **Mappings/Structs Used**: None.
+- **Restrictions**:
+  - Protected by `nonReentrant` and `onlyValidListing`.
+  - Requires router registration in `liquidityContract.routers(address(this))`.
+  - Reverts if `msg.sender` is zero, `msg.sender` is not the slot depositor, or claim fails.
+- **Gas Usage Controls**: Minimal, single external call.
 
 ### clearSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder)
 - **Parameters**:
@@ -1472,27 +1481,27 @@ The `SSRouter` contract, implemented in Solidity (`^0.8.2`), facilitates order c
   - Reverts if refund fails in `_clearOrderData`.
 - **Gas Usage Controls**: `maxIterations` limits iteration, minimal updates per order (1 `UpdateType`).
 
-### changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor, address user)
+### changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor)
 - **Parameters**:
   - `listingAddress` (address): Listing contract address.
   - `isX` (bool): True for tokenA, false for tokenB.
   - `slotIndex` (uint256): Liquidity slot index.
   - `newDepositor` (address): New depositor address.
-  - `user` (address): Current slot owner, must be the slot depositor.
-- **Behavior**: Changes the depositor for a liquidity slot on behalf of `user`, restricted to the slot’s depositor.
+- **Behavior**: Changes the depositor for a liquidity slot for `msg.sender`, restricted to the slot’s depositor.
 - **Internal Call Flow**:
-  - Calls `liquidityContract.changeSlotDepositor(user, isX, slotIndex, newDepositor)`, which verifies `user` is the slot depositor.
+  - Calls `liquidityContract.changeSlotDepositor(msg.sender, isX, slotIndex, newDepositor)`, which verifies `msg.sender` is the slot depositor.
   - No direct transfers or balance checks in `SSRouter`.
 - **Balance Checks**: None, handled by `liquidityContract`.
 - **Mappings/Structs Used**: None.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
   - Requires router registration in `liquidityContract.routers(address(this))`.
-  - Reverts if `user` or `newDepositor` is zero, `user` is not the slot depositor, or change fails.
+  - Reverts if `msg.sender` or `newDepositor` is zero, `msg.sender` is not the slot depositor, or change fails.
 - **Gas Usage Controls**: Minimal, single external call.
 
 ## Additional Details
 - **Decimal Handling**: Uses `normalize` and `denormalize` from `SSMainPartial.sol` (1e18) for token amounts, fetched via `IERC20.decimals` or `listingContract.decimalsA/B`. Ensures consistent precision across tokens.
+- **Zero-Amount Payout Handling**: In `settleSingleLongLiquid` and `settleSingleShortLiquid`, zero-amount payouts (`required=0` for long, `amount=0` for short) are marked as completed (status 3) by creating an `UpdateType[]` to update the payout status via `listingContract.update`. This ensures zero-amount payouts are removed from `longPayoutByIndexView` or `shortPayoutByIndexView`, preventing indefinite pending states and array clogging in `SSListingTemplate.sol`. Non-zero payouts proceed with liquidity checks and transfers as usual.
 - **Reentrancy Protection**: All state-changing functions use `nonReentrant` modifier.
 - **Gas Optimization**: Uses `maxIterations` to limit loops, dynamic arrays for updates, `_checkAndTransferPrincipal` for efficient transfers, and `_processBuy/SellOrder` to reduce stack depth in `settleBuy/SellOrders` (~12 variables).
 - **Listing Validation**: Uses `onlyValidListing` modifier with `ISSAgent.getListing` checks to ensure listing integrity.
