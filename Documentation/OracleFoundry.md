@@ -746,6 +746,21 @@ The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages l
    - **Formula**: `feeShare = (contributedFees * allocation * 1e18 / liquid) > fees ? fees : computedValue`, where `contributedFees = fees > dFeesAcc ? fees - dFeesAcc : 0`
    - **Used in**: `_claimFeeShare`.
    - **Description**: Calculates fees based on cumulative fee contribution and liquidity share.
+4. **Deficit and Compensation**:
+   - **Formula for xPrepOut**:
+     ```
+     withdrawAmountA = min(amount, xLiquid)
+     deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0
+     withdrawAmountB = deficit > 0 ? min((deficit * 1e18) / getPrice(), yLiquid) : 0
+     ```
+   - **Formula for yPrepOut**:
+     ```
+     withdrawAmountB = min(amount, yLiquid)
+     deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0
+     withdrawAmountA = deficit > 0 ? min((deficit * getPrice()) / 1e18, xLiquid) : 0
+     ```
+   - **Used in**: `xPrepOut`, `yPrepOut`
+   - **Description**: Calculates withdrawal amounts for token A (`xPrepOut`) or token B (`yPrepOut`), compensating any shortfall (`deficit`) in requested liquidity (`amount`) against available liquidity (`xLiquid` or `yLiquid`) by converting the deficit to the opposite token using the current price from `IOMFListing.getPrice`, ensuring amounts are normalized and capped by available liquidity.
 
 ## External Functions
 
@@ -802,7 +817,7 @@ The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages l
     - **Balance Update** (`updateType=0`): Updates `_liquidityDetail.xLiquid` or `yLiquid`.
     - **Fee Update** (`updateType=1`): Updates `_liquidityDetail.xFees` or `yFees`, emits `FeesUpdated`.
     - **xSlot Update** (`updateType=2`): Updates `_xLiquiditySlots`, `_activeXLiquiditySlots`, `_userIndex`, `_liquidityDetail.xLiquid`, sets `dFeesAcc` to `yFeesAcc`.
-    - **ySlot Update** (`updateType=3`): Similar for `_yLiquiditySlots`, `_activeYLiquiditySlots`, sets `dFeesAcc` to `xFeesAcc`.
+    - **ySlot Update** (`updateType=3`): Updates `_yLiquiditySlots`, `_activeYLiquiditySlots`, sets `dFeesAcc` to `xFeesAcc`.
   - Emits `LiquidityUpdated`.
 - **Balance Checks**: None.
 - **Mappings/Structs Used**: `_liquidityDetail`, `_xLiquiditySlots`, `_yLiquiditySlots`, `_activeXLiquiditySlots`, `_activeYLiquiditySlots`, `_userIndex`.
@@ -824,14 +839,16 @@ The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages l
 
 ### xPrepOut(address caller, uint256 amount, uint256 index)
 - **Parameters**: `caller` (address): Depositor. `amount` (uint256): Withdrawal amount. `index` (uint256): xSlot index.
-- **Behavior**: Prepares tokenA withdrawal, compensating with tokenB if needed.
+- **Behavior**: Prepares tokenA withdrawal, compensating with tokenB if there is a shortfall in available tokenA liquidity.
 - **Internal Call Flow**:
   - Validates `caller`, `slot.depositor`, `slot.allocation >= amount`.
-  - Caps `withdrawAmountA` at `_liquidityDetail.xLiquid`.
-  - If deficit, fetches `currentPrice` from `IOMFListing.getPrice`, calculates `withdrawAmountB`.
+  - Calculates `withdrawAmountA` as the minimum of requested `amount` and available `_liquidityDetail.xLiquid`.
+  - Computes `deficit` as any shortfall (`amount - withdrawAmountA`).
+  - If `deficit` exists, fetches `currentPrice` from `IOMFListing.getPrice`, calculates `withdrawAmountB = (deficit * 1e18) / currentPrice`, capped by `_liquidityDetail.yLiquid`.
+  - Returns `PreparedWithdrawal` with `amountA` and `amountB`.
 - **Balance Checks**: `amount <= slot.allocation`, `withdrawAmountA <= xLiquid`, `withdrawAmountB <= yLiquid`.
 - **Mappings/Structs Used**: `_liquidityDetail`, `_xLiquiditySlots`.
-- **Restrictions**: Protected by `nonReentrant` and `onlyRouter`. Reverts on invalid caller (`"Invalid caller"`), depositor mismatch (`"Caller not depositor"`), insufficient allocation (`"Amount exceeds allocation"`), or zero price (`"Price cannot be zero"`).
+- **Restrictions**: Protected by `nonReentrant` and `onlyRouter`. Reverts on invalid caller (`"Invalid caller"`), depositor mismatch (`"Caller not depositor"`), insufficient allocation (`"Amount exceeds allocation"`), zero price (`"Price cannot be zero"`), or failed price fetch (`"Price fetch failed"`).
 - **Gas Usage Controls**: One external call, minimal computation.
 
 ### xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal)
@@ -848,8 +865,13 @@ The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages l
 
 ### yPrepOut(address caller, uint256 amount, uint256 index)
 - **Parameters**: Same as `xPrepOut` for tokenB.
-- **Behavior**: Prepares tokenB withdrawal, compensating with tokenA if needed.
-- **Internal Call Flow**: Similar to `xPrepOut`, reversing token roles.
+- **Behavior**: Prepares tokenB withdrawal, compensating with tokenA if there is a shortfall in available tokenB liquidity.
+- **Internal Call Flow**:
+  - Validates `caller`, `slot.depositor`, `slot.allocation >= amount`.
+  - Calculates `withdrawAmountB` as the minimum of requested `amount` and available `_liquidityDetail.yLiquid`.
+  - Computes `deficit` as any shortfall (`amount - withdrawAmountB`).
+  - If `deficit` exists, fetches `currentPrice` from `IOMFListing.getPrice`, calculates `withdrawAmountA = (deficit * currentPrice) / 1e18`, capped by `_liquidityDetail.xLiquid`.
+  - Returns `PreparedWithdrawal` with `amountA` and `amountB`.
 - **Balance Checks**: `amount <= slot.allocation`, `withdrawAmountB <= yLiquid`, `withdrawAmountA <= xLiquid`.
 - **Mappings/Structs Used**: `_liquidityDetail`, `_yLiquiditySlots`.
 - **Restrictions**: Same as `xPrepOut`.
@@ -866,7 +888,7 @@ The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages l
 
 ### claimFees(address caller, address listingAddress, uint256 liquidityIndex, bool isX, uint256 /* volume */)
 - **Parameters**: `caller` (address): Depositor. `listingAddress` (address): Listing contract. `liquidityIndex` (uint256): Slot index. `isX` (bool): True for xSlot. `volume` (uint256): Ignored.
-- **Behavior**: Claims fees based on `dFeesAcc`, updates state, and transfers tokens.
+- **Behavior**: Claims fees based on `dFeesAcc`, updates state, resets `dFeesAcc` to current `yFeesAcc` (xSlot) or `xFeesAcc` (ySlot), and transfers tokens.
 - **Internal Call Flow**:
   - Validates `listingAddress`, `caller`, `slot.depositor`, `yBalance > 0` via `IOMFListing.volumeBalanceView`.
   - Builds `FeeClaimContext`, calls `_processFeeClaim` to calculate `feeShare`, update state, reset `dFeesAcc`, and transfer tokens.
@@ -960,7 +982,7 @@ The `OMFLiquidityTemplate` contract, implemented in Solidity (^0.8.2), manages l
 - **Decimal Handling**: Uses `normalize` and `denormalize` for 18-decimal consistency.
 - **Reentrancy Protection**: `nonReentrant` on state-modifying functions.
 - **Gas Optimization**: Pop-and-swap for array removals, `FeeClaimContext` for stack efficiency.
-- **Fee Tracking**: Uses `xFeesAcc`, `yFeesAcc` for cumulative fees, `dFeesAcc` for slot-specific fee baselines.
+- **Fee Tracking**: Uses `xFeesAcc`, `yFeesAcc` for cumulative fees, `dFeesAcc` for slot-specific fee baselines, reset to `yFeesAcc` (xSlot) or `xFeesAcc` (ySlot) after fee claims.
 - **Events**: `LiquidityUpdated`, `FeesUpdated`, `FeesClaimed`, `SlotDepositorChanged`, `GlobalizeUpdateFailed`, `UpdateRegistryFailed`.
 - **Safety**: Try-catch for external calls, explicit casting, no inline assembly, graceful degradation in `globalizeUpdate` and `updateRegistry`.
 - **Interface Compliance**: Implements `IOMFLiquidityTemplate`, integrates with `IOMFListing`, `IOMFAgent`, `ITokenRegistry`.
