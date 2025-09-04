@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.7
+// Version: 0.3.8
 // Changes:
-// -v0.3.7: Derived "MFP" from "CC".Removed Uniswap functionality.  
+// -v0.3.8: Added minimum price "1", in prices. 
+// -v0.3.7: Derived "MFP" from "CC". 
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -294,7 +295,6 @@ contract MFPListingTemplate {
     function _processBuyOrderUpdate(
         uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount
     ) internal returns (uint256) {
-        // Handles buy order updates with direct assignments from router
         uint256 orderId = value; // value is used as orderId
         if (structId == 0) {
             BuyOrderCore memory core;
@@ -323,10 +323,18 @@ contract MFPListingTemplate {
             (amounts.pending, amounts.filled, amounts.amountSent) = abi.decode(
                 bytes(uint2str(value)), (uint256, uint256, uint256)
             );
-            buyOrderAmounts[orderId] = amounts;
-            if (amounts.pending > 0 || amounts.filled > 0) {
-                _historicalData[_historicalData.length - 1].yVolume += amounts.filled;
+            // Modified: Update historical volumes correctly: xVolume (tokenA) for amountSent, yVolume (tokenB) for filled
+            if (_historicalData.length > 0) {
+                uint256 oldFilled = buyOrderAmounts[orderId].filled;
+                uint256 oldAmountSent = buyOrderAmounts[orderId].amountSent;
+                if (amounts.filled > oldFilled) {
+                    _historicalData[_historicalData.length - 1].yVolume += amounts.filled - oldFilled; // tokenB volume
+                }
+                if (amounts.amountSent > oldAmountSent) {
+                    _historicalData[_historicalData.length - 1].xVolume += amounts.amountSent - oldAmountSent; // tokenA volume
+                }
             }
+            buyOrderAmounts[orderId] = amounts;
             orderStatus[orderId].hasAmounts = true;
         } else {
             emit UpdateFailed(listingId, "Invalid buy order structId");
@@ -339,11 +347,9 @@ contract MFPListingTemplate {
         return updatedCount;
     }
 
-    // Processes sell order updates
     function _processSellOrderUpdate(
         uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount
     ) internal returns (uint256) {
-        // Handles sell order updates with direct assignments from router
         uint256 orderId = value; // value is used as orderId
         if (structId == 0) {
             SellOrderCore memory core;
@@ -372,10 +378,18 @@ contract MFPListingTemplate {
             (amounts.pending, amounts.filled, amounts.amountSent) = abi.decode(
                 bytes(uint2str(value)), (uint256, uint256, uint256)
             );
-            sellOrderAmounts[orderId] = amounts;
-            if (amounts.pending > 0 || amounts.filled > 0) {
-                _historicalData[_historicalData.length - 1].xVolume += amounts.filled;
+            // Modified: Update historical volumes correctly: xVolume (tokenA) for filled, yVolume (tokenB) for amountSent
+            if (_historicalData.length > 0) {
+                uint256 oldFilled = sellOrderAmounts[orderId].filled;
+                uint256 oldAmountSent = sellOrderAmounts[orderId].amountSent;
+                if (amounts.filled > oldFilled) {
+                    _historicalData[_historicalData.length - 1].xVolume += amounts.filled - oldFilled; // tokenA volume
+                }
+                if (amounts.amountSent > oldAmountSent) {
+                    _historicalData[_historicalData.length - 1].yVolume += amounts.amountSent - oldAmountSent; // tokenB volume
+                }
             }
+            sellOrderAmounts[orderId] = amounts;
             orderStatus[orderId].hasAmounts = true;
         } else {
             emit UpdateFailed(listingId, "Invalid sell order structId");
@@ -597,8 +611,8 @@ function resetRouters() external {
     function prices(uint256 _listingId) external view returns (uint256 price) {
     uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
     uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
-    return balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
-}
+    return (balanceA == 0 || balanceB == 0) ? 1 : (balanceB * 1e18) / balanceA;
+    }
 
 // Rounds a timestamp to the start of its day (midnight UTC)
 function floorToMidnightView(uint256 inputTimestamp) external pure returns (uint256 midnight) {
