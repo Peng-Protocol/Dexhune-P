@@ -52,9 +52,22 @@ contract MFPListingTemplate {
     }
     DayStartFee public dayStartFee; // Returns DayStartFee memory fee
 
+    HistoricalData[] private _historicalData;
+    
+     // Maps midnight timestamps to historical data indices
+    mapping(uint256 timestamp => uint256 index) private _dayStartIndices;
+
     uint256[] private _pendingBuyOrders; // Returns uint256[] memory orderIds
     uint256[] private _pendingSellOrders; // Returns uint256[] memory orderIds
-    mapping(address maker => uint256[] orderIds) public makerPendingOrders; // Returns uint256[] memory orderIds
+    mapping(address maker => uint256[] orderIds) private makerPendingOrders; // Returns uint256[] memory orderIds
+
+    mapping(uint256 orderId => BuyOrderCore) private buyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => BuyOrderPricing) private buyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => BuyOrderAmounts) private buyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => SellOrderCore) private sellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => SellOrderPricing) private sellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => SellOrderAmounts) private sellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => OrderStatus) private orderStatus; // Tracks completeness of order structs
 
     struct HistoricalData {
         uint256 price;
@@ -64,10 +77,6 @@ contract MFPListingTemplate {
         uint256 yVolume;
         uint256 timestamp;
     }
-    HistoricalData[] private _historicalData;
-
-    // Maps midnight timestamps to historical data indices
-    mapping(uint256 timestamp => uint256 index) private _dayStartIndices;
 
     struct BuyOrderCore {
         address makerAddress;
@@ -114,14 +123,6 @@ contract MFPListingTemplate {
         bool hasPricing; // Tracks if Pricing struct is set
         bool hasAmounts; // Tracks if Amounts struct is set
     }
-
-    mapping(uint256 orderId => BuyOrderCore) public buyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 orderId => BuyOrderPricing) public buyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 orderId => BuyOrderAmounts) public buyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 orderId => SellOrderCore) public sellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 orderId => SellOrderPricing) public sellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 orderId => SellOrderAmounts) public sellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 orderId => OrderStatus) private orderStatus; // Tracks completeness of order structs
 
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 indexed listingId, uint256 xBalance, uint256 yBalance);
