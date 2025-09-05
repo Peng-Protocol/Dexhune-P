@@ -1,10 +1,10 @@
-### MFPAgent - Liquidity/ListingLogic Contracts Documentation
+### OMFAgent - Liquidity/ListingLogic Contracts Documentation
 
-The System comprises `MFPAgent`, `MFPListingLogic`, `CCLiquidityLogic`. Together they form the factory suite of an AMM Orderbook Hybrid on the EVM.
+The system comprises `OMFAgent`, `OMFListingLogic`, and `CCLiquidityLogic`. Together, they form the factory suite of an AMM Orderbook Hybrid on the EVM, with listings restricted to a fixed `baseToken` as `tokenB` and oracle parameters for price feeds.
 
 ## CCLiquidityLogic Contract
 
-The liquidity logic inherits `CCLiquidityTemplate` and is used by the `MFPAgent` to deploy new liquidity contracts tied to listing contracts for a unique `tokenA` and `tokenB` pair.
+The liquidity logic inherits `CCLiquidityTemplate` and is used by the `OMFAgent` to deploy new liquidity contracts tied to listing contracts for a unique `tokenA` and `baseToken` pair.
 
 ### Mappings and Arrays
 
@@ -28,7 +28,7 @@ The liquidity logic inherits `CCLiquidityTemplate` and is used by the `MFPAgent`
 
 ## MFPListingLogic Contract
 
-The listing logic inherits `MFPListingTemplate` and is used by the `MFPAgent` to deploy new listing contracts tied to liquidity contracts for a unique `tokenA` and `tokenB` pair.
+The listing logic inherits `OMFListingTemplate` and is used by the `OMFAgent` to deploy new listing contracts tied to liquidity contracts for a unique `tokenA` and `baseToken` pair.
 
 ### Mappings and Arrays
 
@@ -45,14 +45,14 @@ The listing logic inherits `MFPListingTemplate` and is used by the `MFPAgent` to
 - **Parameters**:
   - `salt` (bytes32): Unique salt for deterministic address generation.
 - **Actions**:
-  - Deploys a new `MFPListingTemplate` contract using the provided salt.
+  - Deploys a new `OMFListingTemplate` contract using the provided salt.
   - Uses create2 opcode via explicit casting to address for deployment.
 - **Returns**:
-  - `address`: Address of the newly deployed `MFPListingTemplate` contract.
+  - `address`: Address of the newly deployed `OMFListingTemplate` contract.
 
-## MFPAgent Contract
+## OMFAgent Contract
 
-The agent manages token listings, enables the creation of unique listings and liquidities for token pairs, verifies Uniswap V2 pair tokens (handling WETH for native ETH), and arbitrates valid listings, templates, and routers.
+The agent manages token listings, enables the creation of unique listings and liquidities for token pairs with `tokenA` and a fixed `baseToken` as `tokenB`, and arbitrates valid listings, templates, and routers. Native ETH is not supported as `tokenA`. Oracle parameters are set during listing/relisting.
 
 ### Structs
 
@@ -60,14 +60,20 @@ The agent manages token listings, enables the creation of unique listings and li
   - `listingAddress` (address): Listing contract address.
   - `liquidityAddress` (address): Associated liquidity contract address.
   - `tokenA` (address): First token in pair.
-  - `tokenB` (address): Second token in pair.
+  - `tokenB` (address): Fixed to `baseToken`.
   - `listingId` (uint256): Listing ID.
+- **OracleParams**: Parameters for oracle price feed configuration.
+  - `oracleAddress` (address): Oracle contract address.
+  - `oracleFunction` (bytes4): Oracle function selector (e.g., `0x50d25bcd` for `latestAnswer()`).
+  - `oracleBitSize` (uint16): Bit size of oracle return type (e.g., `256` for `int256`).
+  - `oracleIsSigned` (bool): True for signed types (e.g., `int256`), false for unsigned (e.g., `uint256`).
+  - `oracleDecimals` (uint8): Oracle decimals (e.g., `8` for Chainlink).
 
 ### Mappings and Arrays
 
-- `getListing` (mapping - address => address => address): Maps `tokenA` to `tokenB` to the listing address for a trading pair.
+- `getListing` (mapping - address => address): Maps `tokenA` to the listing address for a trading pair with `baseToken`.
 - `allListings` (address[]): Array of all listing addresses created.
-- `allListedTokens` (address[]): Array of all unique tokens listed.
+- `allListedTokens` (address[]): Array of all unique tokens listed, including `baseToken`.
 - `queryByAddress` (mapping - address => uint256[]): Maps a token to an array of listing IDs involving that token.
 - `getLister` (mapping - address => address): Maps listing address to the lister’s address.
 - `listingsByLister` (mapping - address => uint256[]): Maps a lister to an array of their listing IDs.
@@ -76,10 +82,10 @@ The agent manages token listings, enables the creation of unique listings and li
 
 - `routers` (address[]): Array of router contract addresses, set post-deployment via `addRouter`.
 - `listingLogicAddress` (address): Address of the `MFPListingLogic` contract, set post-deployment.
-- `liquidityLogicAddress` (address): Address of the `SSLiquidityLogic` contract, set post-deployment.
+- `liquidityLogicAddress` (address): Address of the `CCLiquidityLogic` contract, set post-deployment.
 - `registryAddress` (address): Address of the registry contract, set post-deployment.
+- `baseToken` (address): Fixed `tokenB` for all listings, set post-deployment via `setBaseToken`.
 - `listingCount` (uint256): Counter for the number of listings created, incremented per listing.
-- `wethAddress` (address): Address of the WETH contract, set post-deployment via `setWETHAddress`.
 - `globalizerAddress` (address): Address of the globalizer contract, set post-deployment via `setGlobalizerAddress`.
 
 ### Functions
@@ -128,13 +134,13 @@ The agent manages token listings, enables the creation of unique listings and li
     - Requires non-zero address.
     - Updates `registryAddress` state variable.
     - Restricted to owner via `onlyOwner` modifier.
-- **setWETHAddress**
+- **setBaseToken**
   - **Parameters**:
-    - `_wethAddress` (address): Address to set as the WETH contract.
+    - `_baseToken` (address): Address to set as the fixed `tokenB`.
   - **Actions**:
-    - Requires non-zero address.
-    - Updates `wethAddress` state variable.
-    - Emits `WETHAddressSet` event.
+    - Requires non-zero address and that `baseToken` is not already set.
+    - Updates `baseToken` state variable.
+    - Emits `BaseTokenSet` event.
     - Restricted to owner via `onlyOwner` modifier.
 - **setGlobalizerAddress**
   - **Parameters**:
@@ -146,76 +152,38 @@ The agent manages token listings, enables the creation of unique listings and li
     - Restricted to owner via `onlyOwner` modifier.
 
 #### Listing Functions
+
 - **listToken**
   - **Parameters**:
-    - `tokenA` (address): First token in the pair.
-    - `tokenB` (address): Second token in the pair.
-    - `uniswapV2Pair` (address): Uniswap V2 pair address for the token pair.
+    - `tokenA` (address): First token in the pair (must not be zero or `baseToken`).
+    - `oracleParams` (OracleParams): Struct with oracle configuration (`oracleAddress`, `oracleFunction`, `oracleBitSize`, `oracleIsSigned`, `oracleDecimals`).
   - **Actions**:
-    - Checks tokens are not identical and pair isn’t already listed.
+    - Verifies `baseToken` is set, `tokenA` is valid and not equal to `baseToken`, and pair isn’t already listed.
+    - Validates oracle parameters: non-zero `oracleAddress`, non-zero `oracleFunction`, `oracleBitSize` > 0 and ≤ 256, `oracleDecimals` ≤ 18.
     - Verifies at least one router, `listingLogicAddress`, `liquidityLogicAddress`, and `registryAddress` are set.
-    - Calls `_deployPair` to create listing and liquidity contracts.
-    - Calls `_initializeListing` to set up listing contract with `routers` array, listing ID, liquidity address, tokens, agent, registry, Uniswap V2 pair, and `globalizerAddress` if set.
-    - Calls `_initializeLiquidity` to set up liquidity contract with `routers` array, listing ID, listing address, tokens, and agent.
-    - Calls `_updateState` to update mappings and arrays, storing `msg.sender` as lister.
-    - Emits `ListingCreated` event with lister address.
-    - Increments `listingCount`.
-  - **Returns**:
-    - `listingAddress` (address): Address of the new listing contract.
-    - `liquidityAddress` (address): Address of the new liquidity contract.
-- **listNative**
-  - **Parameters**:
-    - `token` (address): Token to pair with native currency.
-    - `isA` (bool): If true, native currency is `tokenA`; else, `tokenB`.
-    - `uniswapV2Pair` (address): Uniswap V2 pair address for the token pair.
-  - **Actions**:
-    - Sets `nativeAddress` to `address(0)` for native currency.
-    - Determines `tokenA` and `tokenB` based on `isA`.
-    - Checks tokens are not identical and pair isn’t already listed.
-    - Verifies at least one router, `listingLogicAddress`, `liquidityLogicAddress`, and `registryAddress` are set.
-    - Calls `_deployPair` to create listing and liquidity contracts.
-    - Calls `_initializeListing` to set up listing contract with `routers` array, listing ID, liquidity address, tokens, agent, registry, Uniswap V2 pair, and `globalizerAddress` if set.
-    - Calls `_initializeLiquidity` to set up liquidity contract with `routers` array, listing ID, listing address, tokens, and agent.
-    - Calls `_updateState` to update mappings and arrays, storing `msg.sender` as lister.
-    - Emits `ListingCreated` event with lister address.
+    - Calls `_deployPair` to create listing and liquidity contracts with salt based on `tokenA`, `baseToken`, and `listingCount`.
+    - Calls `_initializeListing` to set up listing contract with `routers` array, listing ID, liquidity address, `tokenA`, `baseToken`, agent, registry, `globalizerAddress` (if set), and `oracleParams`.
+    - Calls `_initializeLiquidity` to set up liquidity contract with `routers` array, listing ID, listing address, `tokenA`, `baseToken`, and agent.
+    - Calls `_updateState` to update `getListing`, `allListings`, `allListedTokens`, `queryByAddress`, `getLister`, and `listingsByLister`, storing `msg.sender` as lister.
+    - Emits `ListingCreated` event with `tokenA`, `baseToken`, listing address, liquidity address, listing ID, and lister.
     - Increments `listingCount`.
   - **Returns**:
     - `listingAddress` (address): Address of the new listing contract.
     - `liquidityAddress` (address): Address of the new liquidity contract.
 - **relistToken**
   - **Parameters**:
-    - `tokenA` (address): First token in the pair.
-    - `tokenB` (address): Second token in the pair.
-    - `uniswapV2Pair` (address): Uniswap V2 pair address for the token pair.
+    - `tokenA` (address): First token in the pair (must not be zero or `baseToken`).
+    - `oracleParams` (OracleParams): Struct with oracle configuration.
   - **Actions**:
-    - Checks tokens are not identical and pair is already listed.
+    - Verifies `baseToken` is set, `tokenA` is valid and not equal to `baseToken`, and pair is already listed.
     - Verifies `msg.sender` is the original lister via `getLister`.
+    - Validates oracle parameters: non-zero `oracleAddress`, non-zero `oracleFunction`, `oracleBitSize` > 0 and ≤ 256, `oracleDecimals` ≤ 18.
     - Verifies at least one router, `listingLogicAddress`, `liquidityLogicAddress`, and `registryAddress` are set.
-    - Calls `_deployPair` to create new listing and liquidity contracts.
-    - Calls `_initializeListing` to set up new listing contract with `routers` array, listing ID, liquidity address, tokens, agent, registry, Uniswap V2 pair, and `globalizerAddress` if set.
-    - Calls `_initializeLiquidity` to set up new liquidity contract with `routers` array, listing ID, listing address, tokens, and agent.
+    - Calls `_deployPair` to create new listing and liquidity contracts with salt based on `tokenA`, `baseToken`, and `listingCount`.
+    - Calls `_initializeListing` to set up new listing contract with `routers` array, listing ID, liquidity address, `tokenA`, `baseToken`, agent, registry, `globalizerAddress` (if set), and `oracleParams`.
+    - Calls `_initializeLiquidity` to set up new liquidity contract with `routers` array, listing ID, listing address, `tokenA`, `baseToken`, and agent.
     - Updates `getListing`, `allListings`, `queryByAddress`, `getLister`, and `listingsByLister` with new listing address and `msg.sender` as lister.
-    - Emits `ListingRelisted` event with lister address.
-    - Increments `listingCount`.
-  - **Returns**:
-    - `newListingAddress` (address): Address of the new listing contract.
-    - `newLiquidityAddress` (address): Address of the new liquidity contract.
-- **relistNative**
-  - **Parameters**:
-    - `token` (address): Token paired with native currency.
-    - `isA` (bool): If true, native currency is `tokenA`; else, `tokenB`.
-    - `uniswapV2Pair` (address): Uniswap V2 pair address for the token pair.
-  - **Actions**:
-    - Sets `nativeAddress` to `address(0)` for native currency.
-    - Determines `tokenA` and `tokenB` based on `isA`.
-    - Checks tokens are not identical and pair is already listed.
-    - Verifies `msg.sender` is the original lister via `getLister`.
-    - Verifies at least one router, `listingLogicAddress`, `liquidityLogicAddress`, and `registryAddress` are set.
-    - Calls `_deployPair` to create new listing and liquidity contracts.
-    - Calls `_initializeListing` to set up new listing contract with `routers` array, listing ID, liquidity address, tokens, agent, registry, Uniswap V2 pair, and `globalizerAddress` if set.
-    - Calls `_initializeLiquidity` to set up new liquidity contract with `routers` array, listing ID, listing address, tokens, and agent.
-    - Updates `getListing`, `allListings`, `queryByAddress`, `getLister`, and `listingsByLister` with new listing address and `msg.sender` as lister.
-    - Emits `ListingRelisted` event with lister address.
+    - Emits `ListingRelisted` event with `tokenA`, `baseToken`, old listing address, new listing address, listing ID, and lister.
     - Increments `listingCount`.
   - **Returns**:
     - `newListingAddress` (address): Address of the new listing contract.
@@ -243,6 +211,7 @@ The agent manages token listings, enables the creation of unique listings and li
     - `uint256[]`: Array of listing IDs for the lister.
 
 #### View Functions
+
 - **isValidListing**
   - **Parameters**:
     - `listingAddress` (address): Address to check.
@@ -294,19 +263,25 @@ The agent manages token listings, enables the creation of unique listings and li
 ## Additional Details
 
 - **Relisting Behavior**:
-  - **Purpose**: `relistToken` and `relistNative` allow the original lister to replace a token pair listing with a new one to update routers, Uniswap V2 pair, or other configurations.
+  - **Purpose**: `relistToken` allows the original lister to replace a token pair listing with a new one to update routers, oracle parameters, or other configurations.
   - **Replacement**:
     - Deploys new `MFPListingTemplate` and `SSLiquidityTemplate` contracts with a new `listingId`.
     - Updates `getListing`, `allListings`, `queryByAddress`, `getLister`, and `listingsByLister` with new listing address and lister.
-    - Old listing remains in `allListings` but is no longer referenced in `getListing` for the token pair.
+    - Old listing remains in `allListings` but is no longer referenced in `getListing` for the `tokenA`-`baseToken` pair.
   - **User Interaction with Old Listings**:
     - Old listings remain accessible via `CCOrderRouter` functions (e.g., `createTokenBuyOrder`, `createTokenSellOrder`, `clearSingleOrder`, `executeLongPayouts`, `executeShortPayouts`, `settleLongLiquid`, `settleShortLiquid`) because `isValidListing` validates against `allListings`.
     - Users can interact with old listings by explicitly providing their addresses, allowing order creation, cancellation, or payout execution, provided sufficient liquidity and valid order states.
-    - New orders for the token pair will use the new listing address via `getListing[tokenA][tokenB]`, potentially causing confusion if users interact with the old listing unintentionally.
-  - **Event**: Emits `ListingRelisted` with old and new listing addresses, token pair, new `listingId`, and lister.
+    - New orders for the `tokenA`-`baseToken` pair will use the new listing address via `getListing[tokenA]`, potentially causing confusion if users interact with the old listing unintentionally.
+  - **Event**: Emits `ListingRelisted` with `tokenA`, `baseToken`, old and new listing addresses, new `listingId`, and lister.
+- **Oracle Parameters**:
+  - **Purpose**: `OracleParams` struct allows users to configure oracle settings during `listToken` and `relistToken`, enabling price feeds for the listing contract (e.g., via Chainlink).
+  - **Validation**: Ensures `oracleAddress` is non-zero, `oracleFunction` is non-zero, `oracleBitSize` is > 0 and ≤ 256, and `oracleDecimals` is ≤ 18.
+  - **Integration**: Passed to `setOracleParams` in the listing contract during `_initializeListing`, ensuring price feed compatibility with `OMFListingTemplate`.
 - **Globalizer Integration**:
   - The `globalizerAddress` is set in new listing contracts via `setGlobalizerAddress` during `_initializeListing` if defined, enabling integration with a separate globalizer contract for order and liquidity management.
 - **Lister Tracking**:
-  - `msg.sender` is stored as the lister in `listToken` and `listNative` via `getLister` and `listingsByLister`.
+  - `msg.sender` is stored as the lister in `listToken` via `getLister` and `listingsByLister`.
   - `transferLister` allows the current lister to transfer control to a new address, updating `getLister` and `listingsByLister`.
   - `getListingsByLister` provides paginated access to a lister’s listing IDs.
+- **No Native ETH Support**:
+  - Unlike `MFPAgent`, `OMFAgent` does not support native ETH as `tokenA`. All listings use `tokenA` as an ERC20 token and `baseToken` as `tokenB`.
