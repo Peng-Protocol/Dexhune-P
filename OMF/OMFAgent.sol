@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.4
+// Version: 0.1.5
 // Changes:
+// - v0.1.5: Added base token oracle details, setter and compatibility with listing template. Rationale: Chainlink uses USD pegs for assets, to allow a gold pegged base token; price must be calculated as "baseTokenUSDPrice / tokenAUSDPrice". 
 // - v0.1.4: Created OMFAgent from MFPAgent. Added baseToken and setter, restricted tokenB to baseToken, removed listNative, added oracle params in listing/relisting.
 // - v0.1.3: Created MFPAgent from CCAgent.
 
@@ -18,6 +19,7 @@ interface ICCListingTemplate {
     function setGlobalizerAddress(address globalizerAddress_) external;
     function setOracleParams(address _oracleAddress, bytes4 _oracleFunction, uint16 _oracleBitSize, bool _oracleIsSigned, uint8 _oracleDecimals) external;
     function getTokens() external view returns (address tokenA, address tokenB);
+    function setBaseOracleParams(address _baseOracleAddress, bytes4 _baseOracleFunction, uint16 _baseOracleBitSize, bool _baseOracleIsSigned, uint8 _baseOracleDecimals) external; 
 }
 
 interface ISSLiquidityTemplate {
@@ -72,6 +74,9 @@ contract OMFAgent is Ownable {
         uint8 oracleDecimals; // Oracle decimals
     }
     
+        OracleParams public baseOracleParams; // Base token oracle parameters
+            bool private _baseOracleSet; // Tracks if base oracle params are set
+    
 // System expects a tuple for the oracleParams struct, entered as a single text field in the format: `(oracleAddress,oracleFunction,oracleBitSize,oracleIsSigned,oracleDecimals)`.
 // Example input:
 // (0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419,0x50d25bcd,256,true,8)
@@ -83,6 +88,7 @@ contract OMFAgent is Ownable {
     event GlobalizerAddressSet(address indexed globalizer); // Emitted when globalizer address is set
     event BaseTokenSet(address indexed baseToken); // Emitted when baseToken is set
     event ListerTransferred(address indexed listingAddress, address indexed oldLister, address indexed newLister);
+    event OracleParamsSet(address oracleAddress, bytes4 oracleFunction, uint16 oracleBitSize, bool oracleIsSigned, uint8 oracleDecimals);
 
     // Sets globalizer contract address, restricted to owner
     function setGlobalizerAddress(address _globalizerAddress) external onlyOwner {
@@ -146,6 +152,15 @@ contract OMFAgent is Ownable {
             oracleParams.oracleIsSigned,
             oracleParams.oracleDecimals
         );
+        if (_baseOracleSet) {
+            ICCListingTemplate(listingAddress).setBaseOracleParams(
+                baseOracleParams.oracleAddress,
+                baseOracleParams.oracleFunction,
+                baseOracleParams.oracleBitSize,
+                baseOracleParams.oracleIsSigned,
+                baseOracleParams.oracleDecimals
+            );
+        }
     }
 
     // Initializes liquidity contract with routers, listing ID, listing address, tokens, and agent
@@ -212,6 +227,28 @@ contract OMFAgent is Ownable {
     function setRegistry(address _registryAddress) external onlyOwner {
         require(_registryAddress != address(0), "Invalid registry address");
         registryAddress = _registryAddress;
+    }
+        // Sets base token oracle parameters, restricted to owner, 
+    function setBaseOracleParams(
+        address _baseOracleAddress,
+        bytes4 _baseOracleFunction,
+        uint16 _baseOracleBitSize,
+        bool _baseOracleIsSigned,
+        uint8 _baseOracleDecimals
+    ) external onlyOwner {
+        require(_baseOracleAddress != address(0), "Invalid base oracle address");
+        require(_baseOracleFunction != bytes4(0), "Invalid base oracle function");
+        require(_baseOracleBitSize > 0 && _baseOracleBitSize <= 256, "Invalid base bit size");
+        require(_baseOracleDecimals <= 18, "Invalid base oracle decimals");
+        baseOracleParams = OracleParams({
+            oracleAddress: _baseOracleAddress,
+            oracleFunction: _baseOracleFunction,
+            oracleBitSize: _baseOracleBitSize,
+            oracleIsSigned: _baseOracleIsSigned,
+            oracleDecimals: _baseOracleDecimals
+        });
+        _baseOracleSet = true;
+        emit OracleParamsSet(_baseOracleAddress, _baseOracleFunction, _baseOracleBitSize, _baseOracleIsSigned, _baseOracleDecimals);
     }
 
     // Lists a new token pair with baseToken, deploying listing and liquidity contracts, stores msg.sender as lister

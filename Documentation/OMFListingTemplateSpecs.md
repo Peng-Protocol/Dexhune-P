@@ -1,11 +1,12 @@
 # OMFListingTemplate Documentation
 
 ## Overview
-The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate` to support decentralized trading for a token pair, with price discovery via an external oracle (e.g., Chainlink) instead of `IERC20.balanceOf`. It manages buy and sell orders, normalized (1e18 precision) balances, and tracks volumes in `_historicalData` during order settlement or cancellation. Auto-generated historical data is used if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch for external calls.
+The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate` to support decentralized trading for a token pair, with price discovery via external oracles (e.g., Chainlink) for tokenA and a base token, instead of `IERC20.balanceOf`. It manages buy and sell orders, normalized (1e18 precision) balances, and tracks volumes in `_historicalData` during order settlement or cancellation. Auto-generated historical data is used if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch for external calls.
 
-**Version**: 0.3.9 (Updated 2025-09-05)
+**Version**: 0.3.10 (Updated 2025-09-07)
 
 **Changes**:
+- v0.3.10: Added base token oracle parameters (`baseOracleAddress`, `baseOracleFunction`, `baseOracleBitSize`, `baseOracleIsSigned`, `baseOracleDecimals`, `_baseOracleSet`) and `setBaseOracleParams`; updated `prices` to compute `baseTokenPrice / tokenAPrice`, normalized to 18 decimals.
 - v0.3.9: Added `oracleAddress`, `oracleFunction`, `oracleBitSize`, `oracleIsSigned`, `oracleDecimals`, and `setOracleParams`; updated `prices` to fetch and normalize oracle data to 18 decimals.
 - v0.3.8: Added minimum price "1" in `prices`.
 - v0.3.7: Derived "MFP" from "CC", removed Uniswap functionality.
@@ -57,6 +58,12 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **`buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`**: `mapping(uint256 => ...)` - Buy order data.
 - **`sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`**: `mapping(uint256 => ...)` - Sell order data.
 - **`orderStatus`**: `mapping(uint256 => OrderStatus) private` - Order completeness.
+- **`baseOracleAddress`**: `address public` - Base token oracle contract address.
+- **`baseOracleFunction`**: `bytes4 public` - Base token oracle function selector (e.g., `0x50d25bcd` for `latestAnswer`).
+- **`baseOracleBitSize`**: `uint16 public` - Bit size of base token oracle return type (e.g., 256 for `int256`/`uint appointee256`).
+- **`baseOracleIsSigned`**: `bool public` - True for signed (`int`), false for unsigned (`uint`) base token oracle.
+- **`baseOracleDecimals`**: `uint8 public` - Base token oracle decimals (e.g., 8 for Chainlink).
+- **`_baseOracleSet`**: `bool private` - Locks base oracle settings.
 
 ## Functions
 ### External Functions
@@ -122,6 +129,13 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **Restrictions**: Reverts if `_oracleSet`, `_oracleAddress` is zero, `_oracleFunction` is zero, `_oracleBitSize` is zero or >256, or `_oracleDecimals` >18.
 - **Internal Call Tree**: None.
 - **Parameters/Interactions**: Sets oracle parameters, emits `OracleParamsSet`.
+
+#### setBaseOracleParams(address _baseOracleAddress, bytes4 _baseOracleFunction, uint16 _baseOracleBitSize, bool _baseOracleIsSigned, uint8 _baseOracleDecimals)
+- **Purpose**: Sets base token oracle parameters for price fetching in `prices` (callable once).
+- **State Changes**: `baseOracleAddress`, `baseOracleFunction`, `baseOracleBitSize`, `baseOracleIsSigned`, `baseOracleDecimals`, `_baseOracleSet`.
+- **Restrictions**: Reverts if `_baseOracleSet`, `_baseOracleAddress` is zero, `_baseOracleFunction` is zero, `_baseOracleBitSize` is zero or >256, or `_baseOracleDecimals` >18.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Sets base oracle parameters, emits `OracleParamsSet`.
 
 #### transactToken(address token, uint256 amount, address recipient)
 - **Purpose**: Transfers ERC20 tokens via `IERC20.transfer`, checks pre/post balances.
@@ -260,11 +274,11 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **Parameters/Interactions**: None.
 
 #### prices(uint256 _listingId)
-- **Purpose**: Fetches price from oracle, normalizes to 1e18 precision.
+- **Purpose**: Fetches tokenA and base token prices from oracles, computes `baseTokenPrice / tokenAPrice`, normalizes to 1e18 precision.
 - **State Changes**: None.
-- **Restrictions**: Reverts if `oracleAddress` not set, oracle call fails, or price is non-positive.
+- **Restrictions**: Reverts if `oracleAddress` or `baseOracleAddress` not set, oracle calls fail, prices are non-positive, or `tokenAPrice` is zero.
 - **Internal Call Tree**: `normalize`.
-- **Parameters/Interactions**: Calls oracle via `oracleAddress` and `oracleFunction`, decodes response as `int256` (if `oracleIsSigned`) or `uint256`, normalizes using `oracleDecimals`.
+- **Parameters/Interactions**: Calls `oracleAddress` and `baseOracleAddress` with respective `oracleFunction` and `baseOracleFunction`, decodes responses as `int256` (if `oracleIsSigned` or `baseOracleIsSigned`) or `uint256`, normalizes using `oracleDecimals` and `baseOracleDecimals`, computes `baseTokenPrice / tokenAPrice`.
 
 #### floorToMidnightView(uint256 inputTimestamp)
 - **Purpose**: Rounds timestamp to midnight UTC.
@@ -402,3 +416,5 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **External Calls**: `IERC20.balanceOf` (`volumeBalances`, `_processHistoricalUpdate`), `IERC20.transfer` (`transactToken`), `IERC20.decimals` (`setTokens`), `ICCLiquidityTemplate.liquidityDetail` (`ccUpdate`), `ITokenRegistry.initializeTokens` (`_updateRegistry`), `ICCGlobalizer.globalizeOrders` (`globalizeUpdate`), `ICCAgent.getLister` (`resetRouters`), `ICCAgent.getRouters` (`resetRouters`), `IOracle` call (`prices`), low-level `call` (`transactNative`).
 - **Security**: Router checks, try-catch, explicit casting, emits `UpdateFailed`, `TransactionFailed`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`, `OracleParamsSet`.
 - **Optimization**: Normalized amounts, `maxIterations` in view functions, auto-generated historical data, helper functions in `ccUpdate`.
+- **Buy Conversions**: To get tokenA from tokenB, use `tokenBAmount * (baseTokenPrice / tokenAPrice)`, which simplifies to `tokenBAmount * price` if tokenB is the base token, matching the original formula.
+- **Sell Conversions**: To get tokenB from tokenA, use `tokenAAmount / (baseTokenPrice / tokenAPrice)`, which simplifies to `tokenAAmount / price`, matching the original formula.

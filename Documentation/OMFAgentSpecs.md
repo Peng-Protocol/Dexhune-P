@@ -52,17 +52,17 @@ The listing logic inherits `OMFListingTemplate` and is used by the `OMFAgent` to
 
 ## OMFAgent Contract
 
-The agent manages token listings, enables the creation of unique listings and liquidities for token pairs with `tokenA` and a fixed `baseToken` as `tokenB`, and arbitrates valid listings, templates, and routers. Native ETH is not supported as `tokenA`. Oracle parameters are set during listing/relisting.
+The agent manages token listings, creating unique listings and liquidity contracts for `tokenA` and a fixed `baseToken` as `tokenB`, arbitrating valid listings, templates, and routers. Native ETH is not supported as `tokenA`. Oracle parameters, including base token oracle parameters, are set during listing/relisting.
 
 ### Structs
 
-- **ListingDetails**: Details of a listing contract.
+- **ListingDetails**:
   - `listingAddress` (address): Listing contract address.
   - `liquidityAddress` (address): Associated liquidity contract address.
   - `tokenA` (address): First token in pair.
   - `tokenB` (address): Fixed to `baseToken`.
   - `listingId` (uint256): Listing ID.
-- **OracleParams**: Parameters for oracle price feed configuration.
+- **OracleParams**:
   - `oracleAddress` (address): Oracle contract address.
   - `oracleFunction` (bytes4): Oracle function selector (e.g., `0x50d25bcd` for `latestAnswer()`).
   - `oracleBitSize` (uint16): Bit size of oracle return type (e.g., `256` for `int256`).
@@ -87,6 +87,8 @@ The agent manages token listings, enables the creation of unique listings and li
 - `baseToken` (address): Fixed `tokenB` for all listings, set post-deployment via `setBaseToken`.
 - `listingCount` (uint256): Counter for the number of listings created, incremented per listing.
 - `globalizerAddress` (address): Address of the globalizer contract, set post-deployment via `setGlobalizerAddress`.
+- `baseOracleParams` (OracleParams): Base token oracle parameters, set via `setBaseOracleParams`.
+- `_baseOracleSet` (bool): Tracks if base oracle parameters are set.
 
 ### Functions
 
@@ -94,121 +96,148 @@ The agent manages token listings, enables the creation of unique listings and li
 
 - **addRouter**
   - **Parameters**:
-    - `router` (address): Address to add to the routers array.
+    - `router` (address): Router address to add.
   - **Actions**:
-    - Requires non-zero address and that the router does not already exist.
-    - Appends the router to the `routers` array.
-    - Emits `RouterAdded` event.
-    - Restricted to owner via `onlyOwner` modifier.
+    - Validates non-zero address and non-existing router.
+    - Appends to `routers` array.
+    - Emits `RouterAdded`.
+  - **Restricted**: `onlyOwner`.
+  - **Internal Call Tree**:
+    - Calls `routerExists`.
+  - **Emits**: `RouterAdded`.
 - **removeRouter**
   - **Parameters**:
-    - `router` (address): Address to remove from the routers array.
+    - `router` (address): Router address to remove.
   - **Actions**:
-    - Requires non-zero address and that the router exists.
-    - Removes the router by swapping with the last element and popping the array.
-    - Emits `RouterRemoved` event.
-    - Restricted to owner via `onlyOwner` modifier.
+    - Validates non-zero address and existing router.
+    - Removes router by swapping with the last element and popping.
+    - Emits `RouterRemoved`.
+  - **Restricted**: `onlyOwner`.
+  - **Internal Call Tree**:
+    - Calls `routerExists`.
+  - **Emits**: `RouterRemoved`.
 - **getRouters**
   - **Actions**:
-    - Returns the current `routers` array.
+    - Returns `routers` array.
   - **Returns**:
-    - `address[]`: Array of all router addresses.
+    - `address[]`: Router addresses.
 - **setListingLogic**
   - **Parameters**:
-    - `_listingLogic` (address): Address to set as the listing logic contract.
+    - `_listingLogic` (address): Listing logic contract address.
   - **Actions**:
-    - Requires non-zero address.
-    - Updates `listingLogicAddress` state variable.
-    - Restricted to owner via `onlyOwner` modifier.
+    - Validates non-zero address.
+    - Sets `listingLogicAddress`.
+  - **Restricted**: `onlyOwner`.
 - **setLiquidityLogic**
   - **Parameters**:
-    - `_liquidityLogic` (address): Address to set as the liquidity logic contract.
+    - `_liquidityLogic` (address): Liquidity logic contract address.
   - **Actions**:
-    - Requires non-zero address.
-    - Updates `liquidityLogicAddress` state variable.
-    - Restricted to owner via `onlyOwner` modifier.
+    - Validates non-zero address.
+    - Sets `liquidityLogicAddress`.
+  - **Restricted**: `onlyOwner`.
 - **setRegistry**
   - **Parameters**:
-    - `_registryAddress` (address): Address to set as the registry contract.
+    - `_registryAddress` (address): Registry contract address.
   - **Actions**:
-    - Requires non-zero address.
-    - Updates `registryAddress` state variable.
-    - Restricted to owner via `onlyOwner` modifier.
+    - Validates non-zero address.
+    - Sets `registryAddress`.
+  - **Restricted**: `onlyOwner`.
 - **setBaseToken**
   - **Parameters**:
-    - `_baseToken` (address): Address to set as the fixed `tokenB`.
+    - `_baseToken` (address): Fixed `tokenB` address.
   - **Actions**:
-    - Requires non-zero address and that `baseToken` is not already set.
-    - Updates `baseToken` state variable.
-    - Emits `BaseTokenSet` event.
-    - Restricted to owner via `onlyOwner` modifier.
+    - Validates non-zero address and unset `baseToken`.
+    - Sets `baseToken`.
+    - Emits `BaseTokenSet`.
+  - **Restricted**: `onlyOwner`.
+  - **Emits**: `BaseTokenSet`.
 - **setGlobalizerAddress**
   - **Parameters**:
-    - `_globalizerAddress` (address): Address to set as the globalizer contract.
+    - `_globalizerAddress` (address): Globalizer contract address.
   - **Actions**:
-    - Requires non-zero address.
-    - Updates `globalizerAddress` state variable.
-    - Emits `GlobalizerAddressSet` event.
-    - Restricted to owner via `onlyOwner` modifier.
+    - Validates non-zero address.
+    - Sets `globalizerAddress`.
+    - Emits `GlobalizerAddressSet`.
+  - **Restricted**: `onlyOwner`.
+  - **Emits**: `GlobalizerAddressSet`.
+- **setBaseOracleParams**
+  - **Parameters**:
+    - `_baseOracleAddress` (address): Base token oracle contract address.
+    - `_baseOracleFunction` (bytes4): Oracle function selector.
+    - `_baseOracleBitSize` (uint16): Bit size of oracle return type.
+    - `_baseOracleIsSigned` (bool): Signed/unsigned oracle return type.
+    - `_baseOracleDecimals` (uint8): Oracle decimals.
+  - **Actions**:
+    - Validates non-zero `_baseOracleAddress`, non-zero `_baseOracleFunction`, `_baseOracleBitSize` > 0 and ≤ 256, `_baseOracleDecimals` ≤ 18.
+    - Sets `baseOracleParams` with provided values.
+    - Sets `_baseOracleSet` to true.
+    - Emits `OracleParamsSet`.
+  - **Restricted**: `onlyOwner`.
+  - **Emits**: `OracleParamsSet`.
 
 #### Listing Functions
 
 - **listToken**
   - **Parameters**:
-    - `tokenA` (address): First token in the pair (must not be zero or `baseToken`).
-    - `oracleParams` (OracleParams): Struct with oracle configuration (`oracleAddress`, `oracleFunction`, `oracleBitSize`, `oracleIsSigned`, `oracleDecimals`).
+    - `tokenA` (address): First token in pair.
+    - `oracleParams` (OracleParams): Oracle configuration for `tokenA`.
   - **Actions**:
-    - Verifies `baseToken` is set, `tokenA` is valid and not equal to `baseToken`, and pair isn’t already listed.
-    - Validates oracle parameters: non-zero `oracleAddress`, non-zero `oracleFunction`, `oracleBitSize` > 0 and ≤ 256, `oracleDecimals` ≤ 18.
-    - Verifies at least one router, `listingLogicAddress`, `liquidityLogicAddress`, and `registryAddress` are set.
-    - Calls `_deployPair` to create listing and liquidity contracts with salt based on `tokenA`, `baseToken`, and `listingCount`.
-    - Calls `_initializeListing` to set up listing contract with `routers` array, listing ID, liquidity address, `tokenA`, `baseToken`, agent, registry, `globalizerAddress` (if set), and `oracleParams`.
-    - Calls `_initializeLiquidity` to set up liquidity contract with `routers` array, listing ID, listing address, `tokenA`, `baseToken`, and agent.
-    - Calls `_updateState` to update `getListing`, `allListings`, `allListedTokens`, `queryByAddress`, `getLister`, and `listingsByLister`, storing `msg.sender` as lister.
-    - Emits `ListingCreated` event with `tokenA`, `baseToken`, listing address, liquidity address, listing ID, and lister.
+    - Validates `baseToken`, `tokenA` (non-zero, not `baseToken`), unlisted pair, routers, logic addresses, registry, and `oracleParams`.
+    - Calls `_deployPair`, `_initializeListing`, `_initializeLiquidity`, `_updateState`.
+    - Stores `msg.sender` as lister.
+    - Emits `ListingCreated`.
     - Increments `listingCount`.
   - **Returns**:
-    - `listingAddress` (address): Address of the new listing contract.
-    - `liquidityAddress` (address): Address of the new liquidity contract.
+    - `listingAddress` (address): New listing contract address.
+    - `liquidityAddress` (address): New liquidity contract address.
+  - **Internal Call Tree**:
+    - `_deployPair`: Calls `deploy` on `ICCListingLogic` and `ISSLiquidityLogic`.
+    - `_initializeListing`: Calls `setRouters`, `setListingId`, `setLiquidityAddress`, `setTokens`, `setAgent`, `setRegistry`, `setGlobalizerAddress`, `setOracleParams`, `setBaseOracleParams` (if `_baseOracleSet`).
+    - `_initializeLiquidity`: Calls `setRouters`, `setListingId`, `setListingAddress`, `setTokens`, `setAgent`.
+    - `_updateState`: Updates `getListing`, `allListings`, `allListedTokens`, `queryByAddress`, `getLister`, `listingsByLister`.
+  - **External Call Tree**:
+    - `ICCListingLogic.deploy`.
+    - `ISSLiquidityLogic.deploy`.
+    - `ICCListingTemplate` setters: `setRouters`, `setListingId`, `setLiquidityAddress`, `setTokens`, `setAgent`, `setRegistry`, `setGlobalizerAddress`, `setOracleParams`, `setBaseOracleParams`.
+    - `ISSLiquidityTemplate` setters: `setRouters`, `setListingId`, `setListingAddress`, `setTokens`, `setAgent`.
+  - **Emits**: `ListingCreated`.
+  
 - **relistToken**
   - **Parameters**:
-    - `tokenA` (address): First token in the pair (must not be zero or `baseToken`).
-    - `oracleParams` (OracleParams): Struct with oracle configuration.
+    - `tokenA` (address): First token in pair.
+    - `oracleParams` (OracleParams): Oracle configuration for `tokenA`.
   - **Actions**:
-    - Verifies `baseToken` is set, `tokenA` is valid and not equal to `baseToken`, and pair is already listed.
-    - Verifies `msg.sender` is the original lister via `getLister`.
-    - Validates oracle parameters: non-zero `oracleAddress`, non-zero `oracleFunction`, `oracleBitSize` > 0 and ≤ 256, `oracleDecimals` ≤ 18.
-    - Verifies at least one router, `listingLogicAddress`, `liquidityLogicAddress`, and `registryAddress` are set.
-    - Calls `_deployPair` to create new listing and liquidity contracts with salt based on `tokenA`, `baseToken`, and `listingCount`.
-    - Calls `_initializeListing` to set up new listing contract with `routers` array, listing ID, liquidity address, `tokenA`, `baseToken`, agent, registry, `globalizerAddress` (if set), and `oracleParams`.
-    - Calls `_initializeLiquidity` to set up new liquidity contract with `routers` array, listing ID, listing address, `tokenA`, `baseToken`, and agent.
-    - Updates `getListing`, `allListings`, `queryByAddress`, `getLister`, and `listingsByLister` with new listing address and `msg.sender` as lister.
-    - Emits `ListingRelisted` event with `tokenA`, `baseToken`, old listing address, new listing address, listing ID, and lister.
+    - Validates `baseToken`, `tokenA`, existing listing, lister, routers, logic addresses, registry, and `oracleParams`.
+    - Calls `_deployPair`, `_initializeListing`, `_initializeLiquidity`.
+    - Updates state mappings/arrays.
+    - Emits `ListingRelisted`.
     - Increments `listingCount`.
   - **Returns**:
-    - `newListingAddress` (address): Address of the new listing contract.
-    - `newLiquidityAddress` (address): Address of the new liquidity contract.
+    - `newListingAddress` (address): New listing contract address.
+    - `newLiquidityAddress` (address): New liquidity contract address.
+  - **Internal Call Tree**:
+    - Same as `listToken`.
+  - **External Call Tree**:
+    - Same as `listToken`.
+  - **Emits**: `ListingRelisted`.
 - **transferLister**
   - **Parameters**:
-    - `listingAddress` (address): Address of the listing to transfer lister status.
-    - `newLister` (address): Address of the new lister.
+    - `listingAddress` (address): Listing to transfer.
+    - `newLister` (address): New lister address.
   - **Actions**:
-    - Verifies `msg.sender` is the current lister via `getLister`.
-    - Requires non-zero `newLister` address.
-    - Updates `getLister` mapping with `newLister`.
-    - Retrieves `listingId` from `allListings` and appends to `listingsByLister` for `newLister`.
-    - Emits `ListerTransferred` event.
+    - Validates `msg.sender` as current lister and non-zero `newLister`.
+    - Updates `getLister` and `listingsByLister`.
+    - Emits `ListerTransferred`.
+  - **Emits**: `ListerTransferred`.
 - **getListingsByLister**
   - **Parameters**:
-    - `lister` (address): Address of the lister to query.
-    - `maxIteration` (uint256): Number of indices to return per step.
+    - `lister` (address): Lister to query.
+    - `maxIteration` (uint256): Indices per step.
     - `step` (uint256): Pagination step.
   - **Actions**:
-    - Retrieves indices from `listingsByLister` mapping.
-    - Calculates start and end bounds based on `step` and `maxIteration`.
-    - Returns a subset of indices for pagination.
+    - Returns paginated listing IDs from `listingsByLister`.
   - **Returns**:
-    - `uint256[]`: Array of listing IDs for the lister.
+    - `uint256[]`: Listing IDs.
 
 #### View Functions
 
@@ -216,72 +245,68 @@ The agent manages token listings, enables the creation of unique listings and li
   - **Parameters**:
     - `listingAddress` (address): Address to check.
   - **Actions**:
-    - Iterates `allListings` to find matching address.
-    - If found, retrieves `tokenA` and `tokenB` via `ICCListingTemplate.getTokens`.
-    - Retrieves liquidity address via `ICCListing.liquidityAddressView`.
-    - Constructs `ListingDetails` struct with `listingAddress`, `liquidityAddress`, `tokenA`, `tokenB`, and `listingId`.
+    - Checks `allListings` for `listingAddress`.
+    - Retrieves `tokenA`, `tokenB` via `ICCListingTemplate.getTokens`.
+    - Retrieves `liquidityAddress` via `ICCListing.liquidityAddressView`.
   - **Returns**:
-    - `isValid` (bool): True if listing is valid.
-    - `details` (ListingDetails): Struct with `listingAddress`, `liquidityAddress`, `tokenA`, `tokenB`, and `listingId`.
+    - `isValid` (bool): True if valid.
+    - `details` (ListingDetails): Listing details.
+  - **External Call Tree**:
+    - `ICCListingTemplate.getTokens`.
+    - `ICCListing.liquidityAddressView`.
 - **queryByIndex**
   - **Parameters**:
     - `index` (uint256): Index to query.
   - **Actions**:
-    - Validates index is within `allListings` length.
-    - Retrieves listing address from `allListings` array.
+    - Validates index and returns `allListings` entry.
   - **Returns**:
-    - `address`: Listing address at the index.
+    - `address`: Listing address.
 - **queryByAddressView**
   - **Parameters**:
     - `target` (address): Token to query.
-    - `maxIteration` (uint256): Number of indices to return per step.
+    - `maxIteration` (uint256): Indices per step.
     - `step` (uint256): Pagination step.
   - **Actions**:
-    - Retrieves indices from `queryByAddress` mapping.
-    - Calculates start and end bounds based on `step` and `maxIteration`.
-    - Returns a subset of indices for pagination.
+    - Returns paginated listing IDs from `queryByAddress`.
   - **Returns**:
-    - `uint256[]`: Array of listing IDs for the target token.
+    - `uint256[]`: Listing IDs.
 - **queryByAddressLength**
   - **Parameters**:
     - `target` (address): Token to query.
   - **Actions**:
-    - Retrieves length of `queryByAddress` array for the target token.
+    - Returns `queryByAddress` array length.
   - **Returns**:
-    - `uint256`: Number of listing IDs for the target token.
+    - `uint256`: Number of listing IDs.
 - **allListingsLength**
   - **Actions**:
-    - Retrieves length of `allListings` array.
+    - Returns `allListings` length.
   - **Returns**:
-    - `uint256`: Total number of listings.
+    - `uint256`: Total listings.
 - **allListedTokensLength**
   - **Actions**:
-    - Retrieves length of `allListedTokens` array.
+    - Returns `allListedTokens` length.
   - **Returns**:
-    - `uint256`: Total number of listed tokens.
+    - `uint256`: Total listed tokens.
 
-## Additional Details
+### Additional Details
 
 - **Relisting Behavior**:
-  - **Purpose**: `relistToken` allows the original lister to replace a token pair listing with a new one to update routers, oracle parameters, or other configurations.
+  - **Purpose**: Replaces a token pair listing to update routers, oracle parameters, or configurations.
   - **Replacement**:
-    - Deploys new `MFPListingTemplate` and `SSLiquidityTemplate` contracts with a new `listingId`.
-    - Updates `getListing`, `allListings`, `queryByAddress`, `getLister`, and `listingsByLister` with new listing address and lister.
-    - Old listing remains in `allListings` but is no longer referenced in `getListing` for the `tokenA`-`baseToken` pair.
-  - **User Interaction with Old Listings**:
-    - Old listings remain accessible via `CCOrderRouter` functions (e.g., `createTokenBuyOrder`, `createTokenSellOrder`, `clearSingleOrder`, `executeLongPayouts`, `executeShortPayouts`, `settleLongLiquid`, `settleShortLiquid`) because `isValidListing` validates against `allListings`.
-    - Users can interact with old listings by explicitly providing their addresses, allowing order creation, cancellation, or payout execution, provided sufficient liquidity and valid order states.
-    - New orders for the `tokenA`-`baseToken` pair will use the new listing address via `getListing[tokenA]`, potentially causing confusion if users interact with the old listing unintentionally.
-  - **Event**: Emits `ListingRelisted` with `tokenA`, `baseToken`, old and new listing addresses, new `listingId`, and lister.
+    - Deploys new `MFPListingTemplate` and `SSLiquidityTemplate` contracts.
+    - Updates state mappings/arrays, keeping old listing in `allListings`.
+  - **User Interaction**:
+    - Old listings remain accessible via `CCOrderRouter` functions, validated by `isValidListing`.
+    - New orders use `getListing[tokenA]`.
+  - **Event**: `ListingRelisted`.
 - **Oracle Parameters**:
-  - **Purpose**: `OracleParams` struct allows users to configure oracle settings during `listToken` and `relistToken`, enabling price feeds for the listing contract (e.g., via Chainlink).
-  - **Validation**: Ensures `oracleAddress` is non-zero, `oracleFunction` is non-zero, `oracleBitSize` is > 0 and ≤ 256, and `oracleDecimals` is ≤ 18.
-  - **Integration**: Passed to `setOracleParams` in the listing contract during `_initializeListing`, ensuring price feed compatibility with `OMFListingTemplate`.
+  - Configures `tokenA` and base token oracle settings during `listToken`/`relistToken`.
+  - Validates `oracleAddress`, `oracleFunction`, `oracleBitSize` (≤ 256), `oracleDecimals` (≤ 18).
+  - Sets via `setOracleParams` and `setBaseOracleParams` in `_initializeListing`.
 - **Globalizer Integration**:
-  - The `globalizerAddress` is set in new listing contracts via `setGlobalizerAddress` during `_initializeListing` if defined, enabling integration with a separate globalizer contract for order and liquidity management.
+  - Sets `globalizerAddress` in listings if defined.
 - **Lister Tracking**:
-  - `msg.sender` is stored as the lister in `listToken` via `getLister` and `listingsByLister`.
-  - `transferLister` allows the current lister to transfer control to a new address, updating `getLister` and `listingsByLister`.
-  - `getListingsByLister` provides paginated access to a lister’s listing IDs.
+  - Stores `msg.sender` as lister in `listToken`/`relistToken`.
+  - `transferLister` updates lister status.
 - **No Native ETH Support**:
-  - Unlike `MFPAgent`, `OMFAgent` does not support native ETH as `tokenA`. All listings use `tokenA` as an ERC20 token and `baseToken` as `tokenB`.
+  - Listings use ERC20 `tokenA` and `baseToken`.

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.9
+// Version: 0.3.10
 // Changes:
+// - v0.3.10: Added base token oracle parameters (baseOracleAddress, baseOracleFunction, baseOracleBitSize, baseOracleIsSigned, baseOracleDecimals, _baseOracleSet); updated prices function to compute base token price / tokenA price, normalized to 18 decimals
 // - v0.3.9: Added oracle address, function, scaling, decimals; updated prices function to use oracle data normalized to 18 decimals
 // - v0.3.8: Added minimum price "1" in prices
 // - v0.3.7: Derived "MFP" from "CC"
@@ -56,6 +57,13 @@ uint16 public oracleBitSize; // Bit size of oracle return type (e.g., 256 for in
 bool public oracleIsSigned; // True for signed (int), false for unsigned (uint)
 uint8 public oracleDecimals; // Oracle decimals (e.g., 8 for Chainlink)
 bool private _oracleSet; // Tracks if oracle params are set
+
+address public baseOracleAddress; // Base token oracle contract address
+bytes4 public baseOracleFunction; // Base token oracle function selector
+uint16 public baseOracleBitSize; // Bit size of base token oracle return type
+bool public baseOracleIsSigned; // True for signed (int), false for unsigned (uint)
+uint8 public baseOracleDecimals; // Base token oracle decimals
+bool private _baseOracleSet; // Tracks if base oracle params are set
 
     DayStartFee public dayStartFee; // Returns DayStartFee memory fee
   
@@ -517,6 +525,28 @@ function setOracleParams(address _oracleAddress, bytes4 _oracleFunction, uint16 
     emit OracleParamsSet(_oracleAddress, _oracleFunction, _oracleBitSize, _oracleIsSigned, _oracleDecimals);
 }
 
+// Sets base oracle parameters, callable once
+function setBaseOracleParams(
+    address _baseOracleAddress,
+    bytes4 _baseOracleFunction,
+    uint16 _baseOracleBitSize,
+    bool _baseOracleIsSigned,
+    uint8 _baseOracleDecimals
+) external {
+    require(!_baseOracleSet, "Base oracle params already set");
+    require(_baseOracleAddress != address(0), "Invalid base oracle address");
+    require(_baseOracleFunction != bytes4(0), "Invalid base oracle function");
+    require(_baseOracleBitSize > 0 && _baseOracleBitSize <= 256, "Invalid base bit size");
+    require(_baseOracleDecimals <= 18, "Invalid base oracle decimals");
+    baseOracleAddress = _baseOracleAddress;
+    baseOracleFunction = _baseOracleFunction;
+    baseOracleBitSize = _baseOracleBitSize;
+    baseOracleIsSigned = _baseOracleIsSigned;
+    baseOracleDecimals = _baseOracleDecimals;
+    _baseOracleSet = true;
+    emit OracleParamsSet(_baseOracleAddress, _baseOracleFunction, _baseOracleBitSize, _baseOracleIsSigned, _baseOracleDecimals);
+}
+
     // Sets globalizer contract address, callable once
     function setGlobalizerAddress(address globalizerAddress_) external {
         require(!_globalizerSet, "Globalizer already set");
@@ -624,25 +654,41 @@ function setOracleParams(address _oracleAddress, bytes4 _oracleFunction, uint16 
         return routerAddresses;
     }
     
-// Fetches price from oracle and normalizes to 18 decimals
+// Modified prices function to compute base token price / tokenA price
 function prices(uint256 _listingId) external view returns (uint256 price) {
-    require(oracleAddress != address(0), "Oracle not set");
-    (bool success, bytes memory data) = oracleAddress.staticcall(abi.encodeWithSelector(oracleFunction));
-    require(success, "Oracle call failed");
-    
-    uint256 rawPrice;
+    require(oracleAddress != address(0) && baseOracleAddress != address(0), "Oracle not set");
+
+    // Fetch and decode tokenA price
+    (bool successA, bytes memory dataA) = oracleAddress.staticcall(abi.encodeWithSelector(oracleFunction));
+    require(successA, "TokenA oracle call failed");
+    uint256 rawPriceA;
     if (oracleIsSigned) {
-        // Decode as int256 and cast to uint256, assuming all signed types fit within int256
-        int256 priceInt = abi.decode(data, (int256));
-        require(priceInt > 0, "Invalid oracle price");
-        rawPrice = uint256(priceInt);
+        int256 priceIntA = abi.decode(dataA, (int256));
+        require(priceIntA > 0, "Invalid tokenA oracle price");
+        rawPriceA = uint256(priceIntA);
     } else {
-        // Decode as uint256 for all unsigned types
-        rawPrice = abi.decode(data, (uint256));
-        require(rawPrice > 0, "Invalid oracle price");
+        rawPriceA = abi.decode(dataA, (uint256));
+        require(rawPriceA > 0, "Invalid tokenA oracle price");
     }
-    
-    return normalize(rawPrice, oracleDecimals);
+    uint256 normalizedPriceA = normalize(rawPriceA, oracleDecimals);
+
+    // Fetch and decode base token price
+    (bool successB, bytes memory dataB) = baseOracleAddress.staticcall(abi.encodeWithSelector(baseOracleFunction));
+    require(successB, "Base oracle call failed");
+    uint256 rawPriceB;
+    if (baseOracleIsSigned) {
+        int256 priceIntB = abi.decode(dataB, (int256));
+        require(priceIntB > 0, "Invalid base oracle price");
+        rawPriceB = uint256(priceIntB);
+    } else {
+        rawPriceB = abi.decode(dataB, (uint256));
+        require(rawPriceB > 0, "Invalid base oracle price");
+    }
+    uint256 normalizedPriceB = normalize(rawPriceB, baseOracleDecimals);
+
+    // Compute price as base token price / tokenA price, normalized to 18 decimals
+    require(normalizedPriceA > 0, "TokenA price is zero");
+    return (normalizedPriceB * 1e18) / normalizedPriceA;
 }
 
     // Rounds a timestamp to the start of its day (midnight UTC)
