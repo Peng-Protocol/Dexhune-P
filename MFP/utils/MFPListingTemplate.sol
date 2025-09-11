@@ -6,6 +6,7 @@ pragma solidity ^0.8.2;
 // - v0.3.9: Replaced UpdateType struct with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs.
 //   Updated ccUpdate to accept new struct arrays, removing updateType, updateSort, updateData arrays.
 //   Modified _processBuyOrderUpdate and _processSellOrderUpdate to handle new structs directly without encoding/decoding.
+//   Updated _processHistoricalUpdate to handle full HistoricalUpdate struct, using helper functions _updateHistoricalData and _updateDayStartIndex for clarity and reduced complexity.
 //   Ensured direct struct field assignments for clarity and gas efficiency.
 // -v0.3.8: Added minimum price "1", in prices. 
 // -v0.3.7: Derived "MFP" from "CC". 
