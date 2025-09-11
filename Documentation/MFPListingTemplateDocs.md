@@ -1,17 +1,18 @@
 # MFPListingTemplate Documentation
 
 ## Overview
-The `MFPListingTemplate` contract (Solidity ^0.8.2) supports decentralized trading for a token pair, price discovery via `IERC20.balanceOf`. It manages buy and sell orders and normalized (1e18 precision) balances. Volumes are tracked in `_historicalData` during order settlement or cancellation, with auto-generated historical data if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch for external calls.
+The `MFPListingTemplate` contract (Solidity ^0.8.2) supports decentralized trading for a token pair, with price discovery via `IERC20.balanceOf`. It manages buy/sell orders and normalized (1e18 precision) balances. Volumes are tracked in `_historicalData` during order settlement/cancellation, with auto-generated historical data if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch for external calls.
 
-**Version**: 0.3.8 (Updated 2025-09-04)
+**Version**: 0.3.9 (Updated 2025-09-11)
 
 **Changes**:
-- v0.3.8: Added minimum price "1", in prices. 
-- v0.3.7: Created "MFP" from "SS", removed Uniswap functionality. 
+- v0.3.9: Replaced `UpdateType` struct with `BuyOrderUpdate`, `SellOrderUpdate`, `BalanceUpdate`, `HistoricalUpdate` structs. Updated `ccUpdate` to accept new struct arrays, removing `updateType`, `updateSort`, `updateData` arrays. Modified `_processBuyOrderUpdate` and `_processSellOrderUpdate` to handle new structs directly without encoding/decoding. Ensured direct struct field assignments for clarity and gas efficiency.
+- Updated `_processHistoricalUpdate` to handle full `HistoricalUpdate` struct, using helper functions `_updateHistoricalData` and `_updateDayStartIndex` for clarity and reduced complexity.
+- v0.3.8: Added minimum price "1" in `prices`.
+- v0.3.7: Derived "MFP" from "CC".
 
 **Compatibility**:
 - CCLiquidityTemplate.sol (v0.1.9)
-
 
 ## Interfaces
 - **IERC20**: Defines `decimals()`, `transfer(address, uint256)`, `balanceOf(address)`.
@@ -22,17 +23,20 @@ The `MFPListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradi
 
 ## Structs
 - **DayStartFee**: `dayStartXFeesAcc`, `dayStartYFeesAcc`, `timestamp`.
-- **Balance**: `xBalance`, `yBalance` (normalized, 1e18).
 - **HistoricalData**: `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, `timestamp`.
 - **BuyOrderCore**: `makerAddress`, `recipientAddress`, `status` (0: cancelled, 1: pending, 2: partially filled, 3: filled).
 - **BuyOrderPricing**: `maxPrice`, `minPrice` (1e18).
 - **BuyOrderAmounts**: `pending` (tokenB), `filled` (tokenB), `amountSent` (tokenA).
 - **SellOrderCore**, **SellOrderPricing**, **SellOrderAmounts**: Similar, with `pending` (tokenA), `amountSent` (tokenB).
-- **UpdateType**: `updateType` (0: balance, 1: buy, 2: sell, 3: historical), `structId` (0: Core, 1: Pricing, 2: Amounts), `index`, `value`, `addr`, `recipient`, `maxPrice`, `minPrice`, `amountSent`.
+- **BuyOrderUpdate**: `structId` (0: Core, 1: Pricing, 2: Amounts), `orderId`, `makerAddress`, `recipientAddress`, `status`, `maxPrice`, `minPrice`, `pending`, `filled`, `amountSent`.
+- **SellOrderUpdate**: Similar to `BuyOrderUpdate`.
+- **BalanceUpdate**: `xBalance`, `yBalance` (normalized, 1e18).
+- **HistoricalUpdate**: `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, `timestamp`.
 - **OrderStatus**: `hasCore`, `hasPricing`, `hasAmounts`.
 
 ## State Variables
-- **`_routers`**: `mapping(address => bool) public` - Authorized routers.
+- **`routers`**: `mapping(address => bool) public` - Authorized routers.
+- **`routerAddresses`**: `address[] private` - Router addresses.
 - **`_routersSet`**: `bool private` - Locks router settings.
 - **`tokenA`, `tokenB`**: `address public` - Token pair (ETH as `address(0)`).
 - **`decimalsA`, `decimalsB`**: `uint8 public` - Token decimals.
@@ -40,11 +44,12 @@ The `MFPListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradi
 - **`agentView`**: `address public` - Agent address.
 - **`registryAddress`**: `address public` - Registry address.
 - **`liquidityAddressView`**: `address public` - Liquidity contract.
-- **`globalizerAddress`, `_globalizerSet`**: `address public`, `bool private` - Globalizer contract.
+- **`globalizerAddress`**: `address public` - Globalizer contract.
+- **`_globalizerSet`**: `bool private` - Locks globalizer setting.
 - **`nextOrderId`**: `uint256 private` - Order ID counter.
 - **`dayStartFee`**: `DayStartFee public` - Daily fee tracking.
 - **`_pendingBuyOrders`, `_pendingSellOrders`**: `uint256[] private` - Pending order IDs.
-- **`makerPendingOrders`**: `mapping(address => uint256[]) public` - Maker order IDs.
+- **`makerPendingOrders`**: `mapping(address => uint256[]) private` - Maker order IDs.
 - **`_historicalData`**: `HistoricalData[] private` - Price/volume history.
 - **`_dayStartIndices`**: `mapping(uint256 => uint256) private` - Midnight timestamps to indices.
 - **`buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`**: `mapping(uint256 => ...)` - Buy order data.
@@ -62,21 +67,21 @@ The `MFPListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradi
 
 #### setRouters(address[] memory routers_)
 - **Purpose**: Authorizes routers for `ccUpdate`, `transactToken`, `transactNative`.
-- **State Changes**: `_routers`, `_routersSet`.
+- **State Changes**: `routers`, `routerAddresses`, `_routersSet`.
 - **Restrictions**: Reverts if `_routersSet` or `routers_` invalid/empty.
 - **Internal Call Tree**: None.
-- **Parameters/Interactions**: Sets `_routers` entries to true.
+- **Parameters/Interactions**: Sets `routers` entries to true, populates `routerAddresses`.
 
 #### resetRouters()
-- **Purpose**: Fetches lister via `ICCAgent.getLister`, restricts to lister, clears `_routers`, updates with `ICCAgent.getRouters`.
-- **State Changes**: `_routers`, `_routersSet`.
+- **Purpose**: Fetches lister via `ICCAgent.getLister`, restricts to lister, clears `routers`, updates with `ICCAgent.getRouters`.
+- **State Changes**: `routers`, `routerAddresses`, `_routersSet`.
 - **Restrictions**: Reverts if `msg.sender` not lister or no routers.
-- **Internal Call Tree**: `_clearRouters` (`ICCAgent.getRouters`), `_fetchAgentRouters` (`ICCAgent.getRouters`), `_setNewRouters`.
-- **Parameters/Interactions**: Uses `agentView`, `listingId`.
+- **Internal Call Tree**: None (directly calls `ICCAgent.getLister`, `ICCAgent.getRouters`).
+- **Parameters/Interactions**: Uses `agentView`, updates `routers`, `routerAddresses`.
 
 #### setTokens(address tokenA_, address tokenB_)
-- **Purpose**: Sets `tokenA`, `tokenB`, `decimalsA`, `decimalsB` (callable once).
-- **State Changes**: `tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `dayStartFee`.
+- **Purpose**: Sets `tokenA`, `tokenB`, `decimalsA`, `decimalsB`, initializes `_historicalData`, `dayStartFee` (callable once).
+- **State Changes**: `tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `_historicalData`, `_dayStartIndices`, `dayStartFee`.
 - **Restrictions**: Reverts if tokens set, identical, or both zero.
 - **Internal Call Tree**: `_floorToMidnight`.
 - **Parameters/Interactions**: Calls `IERC20.decimals` for `tokenA_`, `tokenB_`.
@@ -102,52 +107,56 @@ The `MFPListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradi
 - **Internal Call Tree**: None.
 - **Parameters/Interactions**: Sets `registryAddress` for `_updateRegistry`.
 
-#### transactToken(address recipient, address token, uint256 amount)
-- **Purpose**: Transfers ERC20 tokens via `IERC20.transfer`, updates `_balance`, calls `_updateRegistry`.
-- **State Changes**: `_balance.xBalance` or `yBalance`.
-- **Restrictions**: Router-only, sufficient balance.
-- **Internal Call Tree**: `denormalize`, `_updateRegistry` (`ITokenRegistry.initializeTokens`, `uint2str`).
-- **Parameters/Interactions**: Uses `tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `registryAddress`.
+#### setLiquidityAddress(address _liquidityAddress)
+- **Purpose**: Sets `liquidityAddressView` (callable once).
+- **State Changes**: `liquidityAddressView`.
+- **Restrictions**: Reverts if `liquidityAddressView` set or invalid.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Sets `liquidityAddressView` for `ccUpdate` fee fetching.
 
-#### transactNative(address recipient, uint256 amount)
-- **Purpose**: Transfers ETH via low-level `call`, updates `_balance`, calls `_updateRegistry`.
-- **State Changes**: `_balance.xBalance` or `yBalance`.
-- **Restrictions**: Router-only, sufficient balance.
-- **Internal Call Tree**: `denormalize`, `_updateRegistry` (`ITokenRegistry.initializeTokens`, `uint2str`).
-- **Parameters/Interactions**: Uses `tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `registryAddress`.
+#### transactToken(address token, uint256 amount, address recipient)
+- **Purpose**: Transfers ERC20 tokens via `IERC20.transfer` with pre/post balance checks.
+- **State Changes**: None directly (affects token balances).
+- **Restrictions**: Router-only, valid token (`tokenA` or `tokenB`), non-zero `amount`, valid `recipient`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Uses `routers`, `tokenA`, `tokenB`, `IERC20.transfer`, `IERC20.balanceOf`. Emits `TransactionFailed` on failure.
 
-#### ccUpdate(uint8[] calldata updateType, uint8[] calldata updateSort, uint256[] calldata updateData)
-- **Purpose**: Updates balances, buy/sell orders, or historical data, callable by routers.
+#### transactNative(uint256 amount, address recipient)
+- **Purpose**: Transfers ETH via low-level `call` with pre/post balance checks.
+- **State Changes**: None directly (affects ETH balance).
+- **Restrictions**: Router-only, one token must be `address(0)`, non-zero `amount`, valid `recipient`, `msg.value` matches `amount`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Uses `routers`, `tokenA`, `tokenB`, low-level `call`. Emits `TransactionFailed` on failure.
+
+#### ccUpdate(BuyOrderUpdate[] calldata buyUpdates, SellOrderUpdate[] calldata sellUpdates, BalanceUpdate[] calldata balanceUpdates, HistoricalUpdate[] calldata historicalUpdates)
+- **Purpose**: Updates buy/sell orders, balances, or historical data, callable by routers.
 - **Parameters**:
-  - `updateType`: Array of update types (0: balance, 1: buy order, 2: sell order, 3: historical).
-  - `updateSort`: Array specifying struct to update (0: Core, 1: Pricing, 2: Amounts for orders;  assent
+  - `buyUpdates`: Array of `BuyOrderUpdate` structs for buy orders.
+  - `sellUpdates`: Array of `SellOrderUpdate` structs for sell orders.
+  - `balanceUpdates`: Array of `BalanceUpdate` structs for balances.
+  - `historicalUpdates`: Array of `HistoricalUpdate` structs for historical data.
 - **Logic**:
-  1. Verifies router caller and array length consistency.
-  2. Computes current midnight timestamp (`(block.timestamp / 86400) * 86400`).
-  3. Initializes `balanceUpdated`, `updatedOrders`, `updatedCount`.
-  4. Processes updates:
-     - **Balance (`updateType=0`)**: unused, retained for compatibility. 
-     - **Buy Order (`updateType=1`)**: Calls `_processBuyOrderUpdate`:
-       - `structId=0` (Core): Decodes `updateData[i]` as `(address makerAddress, address recipientAddress, uint8 status)`. Updates `buyOrderCore[orderId]`, manages `_pendingBuyOrders`, `makerPendingOrders` via `removePendingOrder` if `status=0` or `3`. Sets `orderStatus.hasCore`. Emits `OrderUpdated`.
-       - `structId=1` (Pricing): Decodes `updateData[i]` as `(uint256 maxPrice, uint256 minPrice)`. Updates `buyOrderPricing[orderId]`. Sets `orderStatus.hasPricing`.
-       - `structId=2` (Amounts): Decodes `updateData[i]` as `(uint256 pending, uint256 filled, uint256 amountSent)`. Updates `buyOrderAmounts[orderId]`, adds difference of old and new `filled` to `_historicalData.yVolume`, same for `amountSent` to `_historicalData.xVolume`. Sets `orderStatus.hasAmounts`.
-       - Invalid `structId` emits `UpdateFailed`.
-     - **Sell Order (`updateType=2`)**: Similar, updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingSellOrders`, adds differenc of old and new `filled` to `_historicalData.xVolume`, same for `amountSent` to `_historicalData.yVolume`.
-     - **Historical (`updateType=3`)**: Calls `_processHistoricalUpdate` to create `HistoricalData` with `price=updateData[i]`, current balances, timestamp, updates `_dayStartIndices`.
-  5. Updates `dayStartFee` if not same day, fetching fees via `ICCLiquidityTemplate.liquidityDetail`.
+  1. Verifies router caller via `routers`.
+  2. Processes `buyUpdates` via `_processBuyOrderUpdate`:
+     - `structId=0` (Core): Updates `buyOrderCore`, manages `_pendingBuyOrders`, `makerPendingOrders` via `removePendingOrder` if `status=0` or `3`, increments `nextOrderId` if `status=1`. Sets `orderStatus.hasCore`. Emits `OrderUpdated`.
+     - `structId=1` (Pricing): Updates `buyOrderPricing`. Sets `orderStatus.hasPricing`.
+     - `structId=2` (Amounts): Updates `buyOrderAmounts`, adds difference of old/new `filled` to `_historicalData.yVolume`, `amountSent` to `_historicalData.xVolume`. Sets `orderStatus.hasAmounts`.
+     - Invalid `structId` emits `UpdateFailed`.
+  3. Processes `sellUpdates` via `_processSellOrderUpdate` (similar, updates `sellOrder*`, `_pendingSellOrders`, `_historicalData.xVolume`, `_historicalData.yVolume`).
+  4. Processes `balanceUpdates`: Pushes `HistoricalData` with current price (`(balanceB * 1e18) / balanceA` or 1), `xBalance`, `yBalance`. Emits `BalancesUpdated`.
+  5. Processes `historicalUpdates` via `_processHistoricalUpdate`: Creates `HistoricalData` with `price`, balances, timestamp, updates `_dayStartIndices`. Emits `UpdateFailed` if `price=0`.
   6. Checks `orderStatus` for completeness, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
-  7. Calls `globalizeUpdate`.
-- **State Changes**: `_balance`, `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`, `_historicalData`, `_dayStartIndices`, `dayStartFee`.
-- **External Interactions**: `IERC20.balanceOf`, `ICCLiquidityTemplate.liquidityDetail`, `ITokenRegistry.initializeTokens` (via `_updateRegistry`), `ICCGlobalizer.globalizeOrders` (via `globalizeUpdate`).
-- **Internal Call Tree**: `_processBalanceUpdate` (sets `_balance`, emits `BalancesUpdated`), `_processBuyOrderUpdate` (updates buy orders, calls `removePendingOrder`, `uint2str`, `_updateRegistry`), `_processSellOrderUpdate` (updates sell orders, calls `removePendingOrder`, `uint2str`, `_updateRegistry`), `_processHistoricalUpdate` (creates `HistoricalData`, calls `_floorToMidnight`), `_updateRegistry` (calls `ITokenRegistry.initializeTokens`), `globalizeUpdate` (calls `ICCGlobalizer.globalizeOrders`, `uint2str`), `_floorToMidnight` (timestamp rounding), `_isSameDay` (day check), `removePendingOrder` (array management), `uint2str` (error messages).
+  7. Updates `dayStartFee` if not same day, fetching fees via `ICCLiquidityTemplate.liquidityDetail`.
+  8. Calls `globalizeUpdate`.
+- **State Changes**: `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`, `_historicalData`, `_dayStartIndices`, `dayStartFee`, `nextOrderId`.
+- **External Interactions**: `IERC20.balanceOf` (`ccUpdate`, `prices`), `ICCLiquidityTemplate.liquidityDetail` (`ccUpdate`), `ITokenRegistry.initializeTokens` (`_updateRegistry`), `ICCGlobalizer.globalizeOrders` (`globalizeUpdate`).
+- **Internal Call Tree**: `_processBuyOrderUpdate` (`removePendingOrder`, `_updateRegistry`), `_processSellOrderUpdate` (`removePendingOrder`, `_updateRegistry`), `_processHistoricalUpdate` (`_updateHistoricalData`, `_updateDayStartIndex`, `_floorToMidnight`), `_updateRegistry` (`ITokenRegistry.initializeTokens`), `globalizeUpdate` (`ICCGlobalizer.globalizeOrders`), `_floorToMidnight`, `_isSameDay`, `removePendingOrder`, `normalize`.
 - **Errors**: Emits `UpdateFailed`, `OrderUpdateIncomplete`, `OrderUpdatesComplete`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`.
-- **Parameters/Interactions**: `updateType`, `updateSort`, `updateData` allow flexible updates. `updateData` encodes struct fields (e.g., `(address, address, uint8)` for Core) via `abi.decode`. Balances use `tokenA`, `tokenB` via `IERC20.balanceOf`. Fees and global updates interact with external contracts.
-
 
 ### Internal Functions
 #### normalize(uint256 amount, uint8 decimals) returns (uint256 normalized)
 - **Purpose**: Converts amounts to 1e18 precision.
-- **Callers**: `ccUpdate` (`_processBalanceUpdate`, `_processBuyOrderUpdate`, `_processSellOrderUpdate`), `prices`, `volumeBalances`.
+- **Callers**: `ccUpdate`, `prices`, `volumeBalances`, `_updateHistoricalData`.
 - **Parameters/Interactions**: Uses `decimalsA`, `decimalsB`.
 
 #### denormalize(uint256 amount, uint8 decimals) returns (uint256 denormalized)
@@ -158,219 +167,180 @@ The `MFPListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradi
 #### _isSameDay(uint256 time1, uint256 time2) returns (bool sameDay)
 - **Purpose**: Checks if timestamps are in the same day.
 - **Callers**: `ccUpdate`.
-- **Parameters/Interactions**: Used for `dayStartFee` updates.
+- **Parameters/Interactions**: Used for `dayStartFee`, `_dayStartIndices`.
 
 #### _floorToMidnight(uint256 timestamp) returns (uint256 midnight)
 - **Purpose**: Rounds timestamp to midnight UTC.
-- **Callers**: `setTokens`, `ccUpdate` (`_processHistoricalUpdate`).
+- **Callers**: `setTokens`, `ccUpdate`, `_updateHistoricalData`, `_updateDayStartIndex`.
 - **Parameters/Interactions**: Used for `HistoricalData.timestamp`, `dayStartFee.timestamp`, `_dayStartIndices`.
 
 #### _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) returns (uint256 volumeChange)
 - **Purpose**: Returns volume from `_historicalData` at/after `startTime`.
-- **Callers**: None (analytics in `CCDexlytan`).
+- **Callers**: None (intended for analytics).
 - **Parameters/Interactions**: Queries `_historicalData` with `maxIterations`.
 
 #### _updateRegistry(address maker)
 - **Purpose**: Updates registry with token balances.
-- **Callers**: `ccUpdate` (`_processBuyOrderUpdate`, `_processSellOrderUpdate`), `transactToken`, `transactNative`.
-- **Internal Call Tree**: `uint2str`.
-- **Parameters/Interactions**: Calls `ITokenRegistry.initializeTokens` with `tokenA`, `tokenB`.
+- **Callers**: `_processBuyOrderUpdate`, `_processSellOrderUpdate`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Calls `ITokenRegistry.initializeTokens` with `tokenA`, `tokenB`. Emits `RegistryUpdateFailed`, `ExternalCallFailed`.
 
 #### globalizeUpdate()
 - **Purpose**: Notifies `ICCGlobalizer` of latest order.
 - **Callers**: `ccUpdate`.
-- **Internal Call Tree**: `uint2str`.
-- **Parameters/Interactions**: Calls `ICCGlobalizer.globalizeOrders` with `maker`, `tokenA` or `tokenB`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Calls `ICCGlobalizer.globalizeOrders` with `maker`, `tokenA` or `tokenB`. Emits `GlobalUpdateFailed`, `ExternalCallFailed`.
+
+#### removePendingOrder(uint256[] storage orders, uint256 orderId)
+- **Purpose**: Removes order ID from array.
+- **Callers**: `_processBuyOrderUpdate`, `_processSellOrderUpdate`.
+- **Parameters/Interactions**: Modifies `_pendingBuyOrders` or `_pendingSellOrders`.
+
+#### _processBuyOrderUpdate(BuyOrderUpdate memory update)
+- **Purpose**: Updates buy order structs, manages `_pendingBuyOrders`, `makerPendingOrders`.
+- **Callers**: `ccUpdate`.
+- **Internal Call Tree**: `removePendingOrder`, `_updateRegistry`.
+- **Parameters/Interactions**: Updates `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `_historicalData.yVolume`, `_historicalData.xVolume`, `orderStatus`, `nextOrderId`. Emits `OrderUpdated`, `UpdateFailed`.
+
+#### _processSellOrderUpdate(SellOrderUpdate memory update)
+- **Purpose**: Updates sell order structs, manages `_pendingSellOrders`, `makerPendingOrders`.
+- **Callers**: `ccUpdate`.
+- **Internal Call Tree**: `removePendingOrder`, `_updateRegistry`.
+- **Parameters/Interactions**: Updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_historicalData.xVolume`, `_historicalData.yVolume`, `orderStatus`, `nextOrderId`. Emits `OrderUpdated`, `UpdateFailed`.
+
+#### _processHistoricalUpdate(HistoricalUpdate memory update) returns (bool historicalUpdated)
+- **Purpose**: Creates `HistoricalData` entry.
+- **Callers**: `ccUpdate`.
+- **Internal Call Tree**: `_updateHistoricalData`, `_updateDayStartIndex`, `_floorToMidnight`.
+- **Parameters/Interactions**: Uses `price`, balances, timestamp. Updates `_historicalData`, `_dayStartIndices`. Emits `UpdateFailed`.
+
+#### _updateHistoricalData(HistoricalUpdate memory update)
+- **Purpose**: Pushes new `HistoricalData` entry.
+- **Callers**: `_processHistoricalUpdate`.
+- **Internal Call Tree**: `normalize`, `_floorToMidnight`.
+- **Parameters/Interactions**: Uses `tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `IERC20.balanceOf`.
+
+#### _updateDayStartIndex(uint256 timestamp)
+- **Purpose**: Updates `_dayStartIndices` for midnight timestamp.
+- **Callers**: `_processHistoricalUpdate`.
+- **Internal Call Tree**: `_floorToMidnight`.
+- **Parameters/Interactions**: Updates `_dayStartIndices`.
 
 #### uint2str(uint256 _i) returns (string str)
 - **Purpose**: Converts uint to string for error messages.
-- **Callers**: `ccUpdate`, `transactToken`, `transactNative`, `_updateRegistry`, `globalizeUpdate`.
+- **Callers**: `_updateRegistry`, `globalizeUpdate`, `transactToken`, `transactNative`.
 - **Parameters/Interactions**: Supports error messages.
 
-#### _processBuyOrderUpdate(uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount) returns (uint256)
-- **Purpose**: Updates buy order structs, manages `_pendingBuyOrders`, `makerPendingOrders`.
-- **Callers**: `ccUpdate`.
-- **Internal Call Tree**: `removePendingOrder`, `uint2str`, `_updateRegistry`.
-- **Parameters/Interactions**: Updates `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `_historicalData.yVolume`, `_historicalData.xVolume`.
-
-#### _processSellOrderUpdate(uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount) returns (uint256)
-- **Purpose**: Updates sell order structs, manages `_pendingSellOrders`, `makerPendingOrders`.
-- **Callers**: `ccUpdate`.
-- **Internal Call Tree**: `removePendingOrder`, `uint2str`, `_updateRegistry`.
-- **Parameters/Interactions**: Updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_historicalData.xVolume`, `_historicalData.yVolume`.
-
-#### _processHistoricalUpdate(uint8 structId, uint256 value) returns (bool historicalUpdated)
-- **Purpose**: Creates `HistoricalData` entry.
-- **Callers**: `ccUpdate`.
-- **Internal Call Tree**: `_floorToMidnight`.
-- **Parameters/Interactions**: Uses `value` as `price`, `balanceA` - `balanceB`, and timestamp.
-
-#### _clearRouters()
-- **Purpose**: Clears `_routers` mapping using `ICCAgent.getRouters`.
-- **Callers**: `resetRouters`.
-- **Internal Call Tree**: `ICCAgent.getRouters`.
-- **Parameters/Interactions**: Resets `_routers`, `_routersSet`.
-
-#### _fetchAgentRouters() returns (address[] memory newRouters)
-- **Purpose**: Fetches routers from `ICCAgent.getRouters`.
-- **Callers**: `resetRouters`.
-- **Internal Call Tree**: `ICCAgent.getRouters`.
-- **Parameters/Interactions**: Returns router array or empty array.
-
-#### _setNewRouters(address[] memory newRouters)
-- **Purpose**: Updates `_routers` mapping with new routers.
-- **Callers**: `resetRouters`.
+### View Functions
+#### getTokens() returns (address tokenA_, address tokenB_)
+- **Purpose**: Returns `tokenA`, `tokenB`.
+- **Restrictions**: Reverts if tokens not set.
 - **Internal Call Tree**: None.
-- **Parameters/Interactions**: Sets `_routers` entries to true, updates `_routersSet`.
+- **Parameters/Interactions**: None.
 
-## View Functions
-#### getTokens()
-* **Purpose**: Returns the addresses of the two tokens in the trading pair, `tokenA` and `tokenB`.
-* **State Changes**: None.
-* **Restrictions**: Reverts if the tokens have not been set.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: None.
+#### getNextOrderId() returns (uint256 orderId_)
+- **Purpose**: Returns `nextOrderId`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: None.
 
-#### getNextOrderId()
-* **Purpose**: Returns the next available order ID. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: None.
+#### routerAddressesView() returns (address[] memory addresses)
+- **Purpose**: Returns `routerAddresses`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: None.
 
-#### routerAddressesView()
-* **Purpose**: Returns the addresses of the authorized routers. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: None.
+#### prices(uint256 _listingId) returns (uint256 price)
+- **Purpose**: Computes price as `(balanceB * 1e18) / balanceA` or 1 if either balance is zero.
+- **Internal Call Tree**: `normalize`.
+- **Parameters/Interactions**: Uses `tokenA`, `tokenB`, `IERC20.balanceOf`, `decimalsA`, `decimalsB`.
 
-#### prices(uint256 _listingId)
-* **Purpose**: Computes and returns the current price based on the contract's normalized token balances. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: `normalize`. 
-* **Parameters/Interactions**: It normalizes the balances of `tokenA` and `tokenB` to 1e18 precision using `normalize` and then calculates the price as `$$(balanceB * 1e18) / balanceA$$` or returns `1` if either balance is zero. [cite: 377, 378, 379]
+#### floorToMidnightView(uint256 inputTimestamp) returns (uint256 midnight)
+- **Purpose**: Rounds `inputTimestamp` to midnight UTC.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: None.
 
-#### floorToMidnightView(uint256 inputTimestamp)
-* **Purpose**: Rounds a given timestamp down to the start of its day in UTC (midnight). 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Takes `inputTimestamp` and returns the midnight timestamp by dividing by `86400` (the number of seconds in a day) and then multiplying by `86400`. [cite: 380]
+#### isSameDayView(uint256 firstTimestamp, uint256 secondTimestamp) returns (bool sameDay)
+- **Purpose**: Checks if timestamps are in the same day.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: None.
 
-#### isSameDayView(uint256 firstTimestamp, uint256 secondTimestamp)
-* **Purpose**: Checks if two timestamps fall within the same calendar day (UTC). 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Compares the integer division of both timestamps by `86400`. 
+#### getDayStartIndex(uint256 midnightTimestamp) returns (uint256 index)
+- **Purpose**: Returns `_dayStartIndices[midnightTimestamp]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `_dayStartIndices`.
 
-#### getDayStartIndex(uint256 midnightTimestamp)
-* **Purpose**: Returns the index in the `_historicalData` array for a given midnight timestamp. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `_dayStartIndices` mapping with the `midnightTimestamp`. 
+#### volumeBalances(uint256 _listingId) returns (uint256 xBalance, uint256 yBalance)
+- **Purpose**: Returns normalized `tokenA`, `tokenB` balances.
+- **Internal Call Tree**: `normalize`.
+- **Parameters/Interactions**: Uses `tokenA`, `tokenB`, `IERC20.balanceOf`, `decimalsA`, `decimalsB`.
 
-#### volumeBalances(uint256 _listingId)
-* **Purpose**: Returns the normalized, real-time token balances (`xBalance` and `yBalance`) of the contract. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: `normalize`. 
-* **Parameters/Interactions**: Calls `IERC20.balanceOf` for `tokenA` and `tokenB` and then normalizes the amounts. 
+#### makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations) returns (uint256[] memory orderIds)
+- **Purpose**: Returns pending buy order IDs for `maker`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `makerPendingOrders`, `buyOrderCore`.
 
-#### makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations)
-* **Purpose**: Returns a list of pending buy order IDs for a specific maker. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `makerPendingOrders` mapping, filters for pending buy orders (`status == 1`), and returns up to `maxIterations` results starting from `step`. 
+#### makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations) returns (uint256[] memory orderIds)
+- **Purpose**: Returns pending sell order IDs for `maker`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `makerPendingOrders`, `sellOrderCore`.
 
-#### makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations)
-* **Purpose**: Returns a list of pending sell order IDs for a specific maker. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `makerPendingOrders` mapping, filters for pending sell orders (`status == 1`), and returns up to `maxIterations` results starting from `step`. 
+#### getBuyOrderCore(uint256 orderId) returns (address makerAddress, address recipientAddress, uint8 status)
+- **Purpose**: Returns `buyOrderCore[orderId]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `buyOrderCore`.
 
-#### getBuyOrderCore(uint256 orderId)
-* **Purpose**: Returns the core details of a specific buy order. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `buyOrderCore` mapping with `orderId` to get the `makerAddress`, `recipientAddress`, and `status`. 
+#### getBuyOrderPricing(uint256 orderId) returns (uint256 maxPrice, uint256 minPrice)
+- **Purpose**: Returns `buyOrderPricing[orderId]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `buyOrderPricing`.
 
-#### getBuyOrderPricing(uint256 orderId)
-* **Purpose**: Returns the pricing details of a specific buy order. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `buyOrderPricing` mapping with `orderId` to get the `maxPrice` and `minPrice`. 
+#### getBuyOrderAmounts(uint256 orderId) returns (uint256 pending, uint256 filled, uint256 amountSent)
+- **Purpose**: Returns `buyOrderAmounts[orderId]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `buyOrderAmounts`.
 
-#### getBuyOrderAmounts(uint256 orderId)
-* **Purpose**: Returns the amounts related to a specific buy order.
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `buyOrderAmounts` mapping with `orderId` to get the `pending` amount, `filled` amount, and `amountSent`. 
+#### getSellOrderCore(uint256 orderId) returns (address makerAddress, address recipientAddress, uint8 status)
+- **Purpose**: Returns `sellOrderCore[orderId]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `sellOrderCore`.
 
-#### getSellOrderCore(uint256 orderId)
-* **Purpose**: Returns the core details of a specific sell order. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `sellOrderCore` mapping with `orderId` to get the `makerAddress`, `recipientAddress`, and `status`. 
+#### getSellOrderPricing(uint256 orderId) returns (uint256 maxPrice, uint256 minPrice)
+- **Purpose**: Returns `sellOrderPricing[orderId]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `sellOrderPricing`.
 
-#### getSellOrderPricing(uint256 orderId)
-* **Purpose**: Returns the pricing details of a specific sell order. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `sellOrderPricing` mapping with `orderId` to get the `maxPrice` and `minPrice`. 
+#### getSellOrderAmounts(uint256 orderId) returns (uint256 pending, uint256 filled, uint256 amountSent)
+- **Purpose**: Returns `sellOrderAmounts[orderId]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `sellOrderAmounts`.
 
-#### getSellOrderAmounts(uint256 orderId)
-* **Purpose**: Returns the amounts related to a specific sell order. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `sellOrderAmounts` mapping with `orderId` to get the `pending` amount, `filled` amount, and `amountSent`. 
+#### makerOrdersView(address maker, uint256 step, uint256 maxIterations) returns (uint256[] memory orderIds)
+- **Purpose**: Returns `makerPendingOrders[maker]` subset.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `makerPendingOrders`.
 
-#### makerOrdersView(address maker, uint256 step, uint256 maxIterations)
-* **Purpose**: Returns a list of order IDs for a specific maker.
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Retrieves all orders for the `maker` from `makerPendingOrders` and returns up to `maxIterations` IDs starting from `step`. 
+#### makerPendingOrdersView(address maker) returns (uint256[] memory orderIds)
+- **Purpose**: Returns all `makerPendingOrders[maker]`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `makerPendingOrders`.
 
-#### makerPendingOrdersView(address maker)
-* **Purpose**: Returns all pending order IDs for a specific maker. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Directly returns the array of order IDs from the `makerPendingOrders` mapping. 
+#### getHistoricalDataView(uint256 index) returns (HistoricalData memory data)
+- **Purpose**: Returns `_historicalData[index]`.
+- **Restrictions**: Reverts if `index` out of bounds.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Queries `_historicalData`.
 
-#### getHistoricalDataView(uint256 index)
-* **Purpose**: Returns a `HistoricalData` struct from the `_historicalData` array at a given index. [cite: 403]
-* **State Changes**: None.
-* **Restrictions**: Reverts if the index is out of bounds. 
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: Queries the `_historicalData` array at the specified `index`.
-
-#### historicalDataLengthView()
-* **Purpose**: Returns the number of entries in the `_historicalData` array. 
-* **State Changes**: None.
-* **Restrictions**: None.
-* **Internal Call Tree**: None.
-* **Parameters/Interactions**: None.
+#### historicalDataLengthView() returns (uint256 length)
+- **Purpose**: Returns `_historicalData.length`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: None.
 
 ## Parameters and Interactions
-- **Orders**: `ccUpdate` with `updateType=0` updates `_balance`. Buy (`updateType=1`): inputs `tokenB` (`amounts.filled`), outputs `tokenA` (`amounts.amountSent`). Sell (`updateType=2`): inputs `tokenA` (`amounts.filled`), outputs `tokenB` (`amounts.amountSent`). Buy adds to `yVolume`, sell to `xVolume`. Tracked via `orderStatus`, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
-- **Price**: Computed via listing balances, `IERC20.balanceOf` in `prices`.
-- **Registry**: Updated via `_updateRegistry` in `ccUpdate`, `transactToken`, `transactNative` with `tokenA`, `tokenB`.
+- **Orders**: `ccUpdate` with `buyUpdates`/`sellUpdates` updates orders. Buy: inputs `tokenB` (`amounts.filled`), outputs `tokenA` (`amounts.amountSent`). Sell: inputs `tokenA` (`amounts.filled`), outputs `tokenB` (`amounts.amountSent`). Buy adds to `yVolume`, sell to `xVolume`. Tracked via `orderStatus`, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
+- **Price**: Computed via `IERC20.balanceOf` in `prices`, returns `(balanceB * 1e18) / balanceA` or 1.
+- **Registry**: Updated via `_updateRegistry` in `ccUpdate` with `tokenA`, `tokenB`.
 - **Globalizer**: Updated via `globalizeUpdate` in `ccUpdate` with `maker`, `tokenA` or `tokenB`.
 - **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` for fees in `ccUpdate`, stored in `dayStartFee`.
-- **Historical Data**: Stored in `_historicalData` via `ccUpdate` (`updateType=3`) or auto-generated, using `prices`.
-- **External Calls**: `IERC20.balanceOf` (`prices`, `volumeBalances`, `transactToken`), `IERC20.transfer` (`transactToken`), `IERC20.decimals` (`setTokens`), `ICCLiquidityTemplate.liquidityDetail` (`ccUpdate`), `ITokenRegistry.initializeTokens` (`_updateRegistry`), `ICCGlobalizer.globalizeOrders` (`globalizeUpdate`), `ICCAgent.getLister` (`resetRouters`), `ICCAgent.getRouters` (`resetRouters`, `_clearRouters`, `_fetchAgentRouters`), low-level `call` (`transactNative`).
-- **Security**: Router checks, try-catch, explicit casting, relaxed validation, emits `UpdateFailed`, `TransactionFailed`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`.
-- **Optimization**: Normalized amounts, `maxIterations` in view functions, auto-generated historical data, helper functions in `ccUpdate` and `resetRouters`.
+- **Historical Data**: Stored in `_historicalData` via `ccUpdate` (`historicalUpdates`) or auto-generated in `balanceUpdates`, using `prices`.
+- **External Calls**: `IERC20.balanceOf` (`prices`, `volumeBalances`, `transactToken`, `ccUpdate`), `IERC20.transfer` (`transactToken`), `IERC20.decimals` (`setTokens`), `ICCLiquidityTemplate.liquidityDetail` (`ccUpdate`), `ITokenRegistry.initializeTokens` (`_updateRegistry`), `ICCGlobalizer.globalizeOrders` (`globalizeUpdate`), `ICCAgent.getLister` (`resetRouters`), `ICCAgent.getRouters` (`resetRouters`), low-level `call` (`transactNative`).
+- **Security**: Router checks, try-catch, explicit casting, relaxed validation, emits `UpdateFailed`, `TransactionFailed`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`, `OrderUpdated`, `BalancesUpdated`, `OrderUpdatesComplete`, `OrderUpdateIncomplete`.
+- **Optimization**: Normalized amounts, `maxIterations` in view functions, auto-generated historical data, direct struct assignments in `ccUpdate`.
