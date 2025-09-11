@@ -1,12 +1,18 @@
-// SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
+/*
+ * SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
+ * Version: 0.3.11
+ * Changes:
+ * - v0.3.11: Replaced UpdateType struct with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs.
+ *   Updated ccUpdate to accept new struct arrays, removing updateType, updateSort, updateData arrays.
+ *   Modified _processBuyOrderUpdate and _processSellOrderUpdate to handle new structs directly without encoding/decoding.
+ *   Updated _processHistoricalUpdate to use helper functions _updateHistoricalData and _updateDayStartIndex for clarity.
+ *   Incremented nextOrderId in _processBuyOrderUpdate and _processSellOrderUpdate for new orders.
+ * - v0.3.10: Added base token oracle parameters; updated prices function to compute base token price / tokenA price.
+ * - v0.3.9: Added oracle parameters; updated prices function to use oracle data.
+ * - v0.3.8: Added minimum price "1" in prices.
+ * - v0.3.7: Derived "MFP" from "CC".
+ */
 pragma solidity ^0.8.2;
-
-// Version: 0.3.10
-// Changes:
-// - v0.3.10: Added base token oracle parameters (baseOracleAddress, baseOracleFunction, baseOracleBitSize, baseOracleIsSigned, baseOracleDecimals, _baseOracleSet); updated prices function to compute base token price / tokenA price, normalized to 18 decimals
-// - v0.3.9: Added oracle address, function, scaling, decimals; updated prices function to use oracle data normalized to 18 decimals
-// - v0.3.8: Added minimum price "1" in prices
-// - v0.3.7: Derived "MFP" from "CC"
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -127,17 +133,47 @@ bool private _baseOracleSet; // Tracks if base oracle params are set
         uint256 amountSent; // Amount of tokenB sent during settlement
     }
     
-    struct UpdateType {
-        uint8 updateType; // 0: balance, 1: buy order, 2: sell order, 3: historical
-        uint8 structId;   // 0: Core, 1: Pricing, 2: Amounts
-        uint256 index;    // orderId or slot index
-        uint256 value;    // principal or amount (normalized) or price
-        address addr;     // makerAddress
-        address recipient; // recipientAddress
-        uint256 maxPrice; // for Pricing struct
-        uint256 minPrice; // for Pricing struct
-        uint256 amountSent; // Amount of opposite token sent during settlement
-    }
+    // New structs to replace UpdateType
+struct BuyOrderUpdate {
+    uint8 structId; // 0: Core, 1: Pricing, 2: Amounts
+    uint256 orderId; // Order ID
+    address makerAddress; // Maker address
+    address recipientAddress; // Recipient address
+    uint8 status; // 0: cancelled, 1: pending, 2: partially filled, 3: filled
+    uint256 maxPrice; // Max price for Pricing
+    uint256 minPrice; // Min price for Pricing
+    uint256 pending; // Pending amount for Amounts
+    uint256 filled; // Filled amount for Amounts
+    uint256 amountSent; // Amount sent for Amounts
+}
+
+struct SellOrderUpdate {
+    uint8 structId; // 0: Core, 1: Pricing, 2: Amounts
+    uint256 orderId; // Order ID
+    address makerAddress; // Maker address
+    address recipientAddress; // Recipient address
+    uint8 status; // 0: cancelled, 1: pending, 2: partially filled, 3: filled
+    uint256 maxPrice; // Max price for Pricing
+    uint256 minPrice; // Min price for Pricing
+    uint256 pending; // Pending amount for Amounts
+    uint256 filled; // Filled amount for Amounts
+    uint256 amountSent; // Amount sent for Amounts
+}
+
+struct BalanceUpdate {
+    uint256 xBalance; // Normalized xBalance
+    uint256 yBalance; // Normalized yBalance
+}
+
+struct HistoricalUpdate {
+    uint256 price; // Current price
+    uint256 xBalance; // xBalance
+    uint256 yBalance; // yBalance
+    uint256 xVolume; // xVolume
+    uint256 yVolume; // yVolume
+    uint256 timestamp; // Timestamp
+}
+
     struct OrderStatus {
         bool hasCore;    // Tracks if Core struct is set
         bool hasPricing; // Tracks if Pricing struct is set
@@ -313,201 +349,230 @@ bool private _baseOracleSet; // Tracks if base oracle params are set
         }
     }
 
-    // Processes buy order updates
-    function _processBuyOrderUpdate(
-        uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount
-    ) internal returns (uint256) {
-        uint256 orderId = value; // value is used as orderId
-        if (structId == 0) {
-            BuyOrderCore memory core;
-            (core.makerAddress, core.recipientAddress, core.status) = abi.decode(
-                bytes(uint2str(value)), (address, address, uint8)
-            );
-            buyOrderCore[orderId] = core;
-            orderStatus[orderId].hasCore = true;
-            if (core.status == 1) {
-                _pendingBuyOrders.push(orderId);
-                makerPendingOrders[core.makerAddress].push(orderId);
-            } else if (core.status == 0 || core.status == 3) {
-                removePendingOrder(_pendingBuyOrders, orderId);
-                removePendingOrder(makerPendingOrders[core.makerAddress], orderId);
-            }
-            emit OrderUpdated(listingId, orderId, true, core.status);
-        } else if (structId == 1) {
-            BuyOrderPricing memory pricing;
-            (pricing.maxPrice, pricing.minPrice) = abi.decode(
-                bytes(uint2str(value)), (uint256, uint256)
-            );
-            buyOrderPricing[orderId] = pricing;
-            orderStatus[orderId].hasPricing = true;
-        } else if (structId == 2) {
-            BuyOrderAmounts memory amounts;
-            (amounts.pending, amounts.filled, amounts.amountSent) = abi.decode(
-                bytes(uint2str(value)), (uint256, uint256, uint256)
-            );
-            if (_historicalData.length > 0) {
-                uint256 oldFilled = buyOrderAmounts[orderId].filled;
-                uint256 oldAmountSent = buyOrderAmounts[orderId].amountSent;
-                if (amounts.filled > oldFilled) {
-                    _historicalData[_historicalData.length - 1].yVolume += amounts.filled - oldFilled; // tokenB volume
-                }
-                if (amounts.amountSent > oldAmountSent) {
-                    _historicalData[_historicalData.length - 1].xVolume += amounts.amountSent - oldAmountSent; // tokenA volume
-                }
-            }
-            buyOrderAmounts[orderId] = amounts;
-            orderStatus[orderId].hasAmounts = true;
-        } else {
-            emit UpdateFailed(listingId, "Invalid buy order structId");
-            return updatedCount;
+// New _processBuyOrderUpdate function for struct params
+function _processBuyOrderUpdate(BuyOrderUpdate memory update) internal returns (uint256) {
+    // Processes buy order update using struct fields directly
+    uint256 orderId = update.orderId;
+    if (update.structId == 0) { // Core
+        buyOrderCore[orderId] = BuyOrderCore({
+            makerAddress: update.makerAddress,
+            recipientAddress: update.recipientAddress,
+            status: update.status
+        });
+        orderStatus[orderId].hasCore = true;
+        if (update.status == 0 || update.status == 3) {
+            removePendingOrder(_pendingBuyOrders, orderId);
+            removePendingOrder(makerPendingOrders[update.makerAddress], orderId);
+        } else if (update.status == 1) {
+            _pendingBuyOrders.push(orderId);
+            makerPendingOrders[update.makerAddress].push(orderId);
+            _updateRegistry(update.makerAddress);
+            nextOrderId++; // Increment for new pending orders
         }
+        emit OrderUpdated(listingId, orderId, true, update.status);
+        return orderId;
+    } else if (update.structId == 1) { // Pricing
+        buyOrderPricing[orderId] = BuyOrderPricing({
+            maxPrice: update.maxPrice,
+            minPrice: update.minPrice
+        });
+        orderStatus[orderId].hasPricing = true;
+        return orderId;
+    } else if (update.structId == 2) { // Amounts
+        BuyOrderAmounts storage amounts = buyOrderAmounts[orderId];
+        uint256 oldFilled = amounts.filled;
+        uint256 oldAmountSent = amounts.amountSent;
+        amounts.pending = update.pending;
+        amounts.filled = update.filled;
+        amounts.amountSent = update.amountSent;
+        orderStatus[orderId].hasAmounts = true;
+        // Update historical volumes
+        if (_historicalData.length > 0) {
+            if (update.filled > oldFilled) {
+                _historicalData[_historicalData.length - 1].yVolume += (update.filled - oldFilled); // tokenB filled
+            }
+            if (update.amountSent > oldAmountSent) {
+                _historicalData[_historicalData.length - 1].xVolume += (update.amountSent - oldAmountSent); // tokenA sent
+            }
+        }
+        return orderId;
+    } else {
+        emit UpdateFailed(listingId, "Invalid buy order structId");
+        return orderId;
+    }
+}
+
+// New _processSellOrderUpdate function for struct params 
+function _processSellOrderUpdate(SellOrderUpdate memory update) internal returns (uint256) {
+    // Processes sell order update using struct fields directly
+    uint256 orderId = update.orderId;
+    if (update.structId == 0) { // Core
+        sellOrderCore[orderId] = SellOrderCore({
+            makerAddress: update.makerAddress,
+            recipientAddress: update.recipientAddress,
+            status: update.status
+        });
+        orderStatus[orderId].hasCore = true;
+        if (update.status == 0 || update.status == 3) {
+            removePendingOrder(_pendingSellOrders, orderId);
+            removePendingOrder(makerPendingOrders[update.makerAddress], orderId);
+        } else if (update.status == 1) {
+            _pendingSellOrders.push(orderId);
+            makerPendingOrders[update.makerAddress].push(orderId);
+            _updateRegistry(update.makerAddress);
+            nextOrderId++; // Increment for new pending orders
+        }
+        emit OrderUpdated(listingId, orderId, false, update.status);
+        return orderId;
+    } else if (update.structId == 1) { // Pricing
+        sellOrderPricing[orderId] = SellOrderPricing({
+            maxPrice: update.maxPrice,
+            minPrice: update.minPrice
+        });
+        orderStatus[orderId].hasPricing = true;
+        return orderId;
+    } else if (update.structId == 2) { // Amounts
+        SellOrderAmounts storage amounts = sellOrderAmounts[orderId];
+        uint256 oldFilled = amounts.filled;
+        uint256 oldAmountSent = amounts.amountSent;
+        amounts.pending = update.pending;
+        amounts.filled = update.filled;
+        amounts.amountSent = update.amountSent;
+        orderStatus[orderId].hasAmounts = true;
+        // Update historical volumes
+        if (_historicalData.length > 0) {
+            if (update.filled > oldFilled) {
+                _historicalData[_historicalData.length - 1].xVolume += (update.filled - oldFilled); // tokenA filled
+            }
+            if (update.amountSent > oldAmountSent) {
+                _historicalData[_historicalData.length - 1].yVolume += (update.amountSent - oldAmountSent); // tokenB sent
+            }
+        }
+        return orderId;
+    } else {
+        emit UpdateFailed(listingId, "Invalid sell order structId");
+        return orderId;
+    }
+}
+
+// New _processHistoricalUpdate function and helpers for full historical updates
+function _processHistoricalUpdate(HistoricalUpdate memory update) internal returns (bool historicalUpdated) {
+    // Processes historical data update using struct fields directly
+    if (update.price == 0) {
+        emit UpdateFailed(listingId, "Invalid historical price");
+        return false;
+    }
+    _updateHistoricalData(update);
+    _updateDayStartIndex(update.timestamp);
+    return true;
+}
+
+function _updateHistoricalData(HistoricalUpdate memory update) internal {
+    // Pushes new historical data entry
+    uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
+    uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
+    _historicalData.push(HistoricalData({
+        price: update.price,
+        xBalance: update.xBalance > 0 ? update.xBalance : balanceA,
+        yBalance: update.yBalance > 0 ? update.yBalance : balanceB,
+        xVolume: update.xVolume,
+        yVolume: update.yVolume,
+        timestamp: update.timestamp > 0 ? update.timestamp : _floorToMidnight(block.timestamp)
+    }));
+}
+
+function _updateDayStartIndex(uint256 timestamp) internal {
+    // Updates day start index for new midnight timestamp
+    uint256 midnight = _floorToMidnight(timestamp);
+    if (_dayStartIndices[midnight] == 0) {
+        _dayStartIndices[midnight] = _historicalData.length - 1;
+    }
+}
+
+// New ccUpdate function with struct params
+function ccUpdate(
+    BuyOrderUpdate[] calldata buyUpdates,
+    SellOrderUpdate[] calldata sellUpdates,
+    BalanceUpdate[] calldata balanceUpdates,
+    HistoricalUpdate[] calldata historicalUpdates
+) external {
+    // Validates caller is a router
+    require(routers[msg.sender], "Not a router");
+
+    // Process buy order updates
+    uint256[] memory updatedOrders = new uint256[](buyUpdates.length + sellUpdates.length);
+    uint256 updatedCount = 0;
+    for (uint256 i = 0; i < buyUpdates.length; i++) {
+        uint256 orderId = _processBuyOrderUpdate(buyUpdates[i]);
         if (updatedCount < updatedOrders.length && updatedOrders[updatedCount] != orderId) {
             updatedOrders[updatedCount] = orderId;
             updatedCount++;
         }
-        return updatedCount;
     }
-
-    function _processSellOrderUpdate(
-        uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount
-    ) internal returns (uint256) {
-        uint256 orderId = value; // value is used as orderId
-        if (structId == 0) {
-            SellOrderCore memory core;
-            (core.makerAddress, core.recipientAddress, core.status) = abi.decode(
-                bytes(uint2str(value)), (address, address, uint8)
-            );
-            sellOrderCore[orderId] = core;
-            orderStatus[orderId].hasCore = true;
-            if (core.status == 1) {
-                _pendingSellOrders.push(orderId);
-                makerPendingOrders[core.makerAddress].push(orderId);
-            } else if (core.status == 0 || core.status == 3) {
-                removePendingOrder(_pendingSellOrders, orderId);
-                removePendingOrder(makerPendingOrders[core.makerAddress], orderId);
-            }
-            emit OrderUpdated(listingId, orderId, false, core.status);
-        } else if (structId == 1) {
-            SellOrderPricing memory pricing;
-            (pricing.maxPrice, pricing.minPrice) = abi.decode(
-                bytes(uint2str(value)), (uint256, uint256)
-            );
-            sellOrderPricing[orderId] = pricing;
-            orderStatus[orderId].hasPricing = true;
-        } else if (structId == 2) {
-            SellOrderAmounts memory amounts;
-            (amounts.pending, amounts.filled, amounts.amountSent) = abi.decode(
-                bytes(uint2str(value)), (uint256, uint256, uint256)
-            );
-            if (_historicalData.length > 0) {
-                uint256 oldFilled = sellOrderAmounts[orderId].filled;
-                uint256 oldAmountSent = sellOrderAmounts[orderId].amountSent;
-                if (amounts.filled > oldFilled) {
-                    _historicalData[_historicalData.length - 1].xVolume += amounts.filled - oldFilled; // tokenA volume
-                }
-                if (amounts.amountSent > oldAmountSent) {
-                    _historicalData[_historicalData.length - 1].yVolume += amounts.amountSent - oldAmountSent; // tokenB volume
-                }
-            }
-            sellOrderAmounts[orderId] = amounts;
-            orderStatus[orderId].hasAmounts = true;
-        } else {
-            emit UpdateFailed(listingId, "Invalid sell order structId");
-            return updatedCount;
-        }
+    // Process sell order updates
+    for (uint256 i = 0; i < sellUpdates.length; i++) {
+        uint256 orderId = _processSellOrderUpdate(sellUpdates[i]);
         if (updatedCount < updatedOrders.length && updatedOrders[updatedCount] != orderId) {
             updatedOrders[updatedCount] = orderId;
             updatedCount++;
         }
-        return updatedCount;
     }
-
-    // Processes historical data updates
-    function _processHistoricalUpdate(uint8 structId, uint256 value) internal returns (bool historicalUpdated) {
-        if (structId != 0) {
-            emit UpdateFailed(listingId, "Invalid historical structId");
-            return false;
-        }
+    // Process balance updates
+    for (uint256 i = 0; i < balanceUpdates.length; i++) {
         uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
         uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
         _historicalData.push(HistoricalData({
-            price: value,
-            xBalance: balanceA,
-            yBalance: balanceB,
+            price: (balanceA == 0 || balanceB == 0) ? 1 : (balanceB * 1e18) / balanceA,
+            xBalance: balanceUpdates[i].xBalance,
+            yBalance: balanceUpdates[i].yBalance,
             xVolume: 0,
             yVolume: 0,
-            timestamp: value > 0 ? block.timestamp : _floorToMidnight(block.timestamp)
+            timestamp: block.timestamp
         }));
-        uint256 midnight = _floorToMidnight(block.timestamp);
-        if (_dayStartIndices[midnight] == 0) {
+        emit BalancesUpdated(listingId, balanceUpdates[i].xBalance, balanceUpdates[i].yBalance);
+    }
+    // Process historical data updates
+    for (uint256 i = 0; i < historicalUpdates.length; i++) {
+        if (!_processHistoricalUpdate(historicalUpdates[i])) {
+            emit UpdateFailed(listingId, "Historical update failed");
+        }
+        uint256 midnight = _floorToMidnight(historicalUpdates[i].timestamp);
+        if (!_isSameDay(_historicalData[_historicalData.length - 1].timestamp, historicalUpdates[i].timestamp)) {
             _dayStartIndices[midnight] = _historicalData.length - 1;
         }
-        return true;
     }
-
-    // Modified ccUpdate function with three parameters
-    function ccUpdate(
-        uint8[] calldata updateType,
-        uint8[] calldata updateSort,
-        uint256[] calldata updateData
-    ) external {
-        require(routers[msg.sender], "Caller not router");
-        require(updateType.length == updateSort.length && updateType.length == updateData.length,
-                "Array length mismatch");
-        uint256 currentMidnight = (block.timestamp / 86400) * 86400;
-        uint256[] memory updatedOrders = new uint256[](updateType.length);
-        uint256 updatedCount = 0;
-
-        for (uint256 i = 0; i < updateType.length; i++) {
-            if (updateType[i] == 0) {
-                continue; // No manual balance updates, handled by volumeBalances
-            } else if (updateType[i] == 1) {
-                updatedCount = _processBuyOrderUpdate(
-                    updateSort[i], updateData[i], updatedOrders, updatedCount
-                );
-            } else if (updateType[i] == 2) {
-                updatedCount = _processSellOrderUpdate(
-                    updateSort[i], updateData[i], updatedOrders, updatedCount
-                );
-            } else if (updateType[i] == 3) {
-                _processHistoricalUpdate(updateSort[i], updateData[i]);
-            } else {
-                emit UpdateFailed(listingId, "Invalid update type");
-                continue;
-            }
+    // Process updated orders for completeness
+    for (uint256 i = 0; i < updatedCount; i++) {
+        uint256 orderId = updatedOrders[i];
+        OrderStatus storage status = orderStatus[orderId];
+        bool isBuy = buyOrderCore[orderId].makerAddress != address(0);
+        if (status.hasCore && status.hasPricing && status.hasAmounts) {
+            emit OrderUpdatesComplete(listingId, orderId, isBuy);
+        } else {
+            string memory reason = !status.hasCore ? "Missing Core struct" :
+                                  !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
+            emit OrderUpdateIncomplete(listingId, orderId, reason);
         }
-
-        if (_historicalData.length > 0 && !_isSameDay(dayStartFee.timestamp, currentMidnight)) {
-            dayStartFee = DayStartFee({
-                dayStartXFeesAcc: 0,
-                dayStartYFeesAcc: 0,
-                timestamp: currentMidnight
-            });
-            try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
-                uint256 /* xLiq */, uint256 /* yLiq */, uint256, uint256, uint256 xFees, uint256 yFees
-            ) {
-                dayStartFee.dayStartXFeesAcc = xFees;
-                dayStartFee.dayStartYFeesAcc = yFees;
-            } catch {
-                emit UpdateFailed(listingId, "Failed to fetch liquidity details");
-            }
-        }
-
-        for (uint256 i = 0; i < updatedCount; i++) {
-            uint256 orderId = updatedOrders[i];
-            OrderStatus storage status = orderStatus[orderId];
-            bool isBuy = buyOrderCore[orderId].makerAddress != address(0);
-            if (status.hasCore && status.hasPricing && status.hasAmounts) {
-                emit OrderUpdatesComplete(listingId, orderId, isBuy);
-            } else {
-                string memory reason = !status.hasCore ? "Missing Core struct" :
-                                      !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
-                emit OrderUpdateIncomplete(listingId, orderId, reason);
-            }
-        }
-
-        globalizeUpdate();
     }
+    // Update dayStartFee if needed
+    uint256 currentMidnight = _floorToMidnight(block.timestamp);
+    if (_historicalData.length > 0 && !_isSameDay(dayStartFee.timestamp, currentMidnight)) {
+        dayStartFee = DayStartFee({
+            dayStartXFeesAcc: 0,
+            dayStartYFeesAcc: 0,
+            timestamp: currentMidnight
+        });
+        try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
+            uint256 /* xLiq */, uint256 /* yLiq */, uint256, uint256, uint256 xFees, uint256 yFees
+        ) {
+            dayStartFee.dayStartXFeesAcc = xFees;
+            dayStartFee.dayStartYFeesAcc = yFees;
+        } catch {
+            emit UpdateFailed(listingId, "Failed to fetch liquidity details");
+        }
+    }
+    globalizeUpdate();
+}
 
 // Sets oracle parameters, callable once
 function setOracleParams(address _oracleAddress, bytes4 _oracleFunction, uint16 _oracleBitSize, bool _oracleIsSigned, uint8 _oracleDecimals) external {
