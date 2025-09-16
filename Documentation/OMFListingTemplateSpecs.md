@@ -3,9 +3,10 @@
 ## Overview
 The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate` for decentralized trading of a token pair, using external oracles (e.g., Chainlink) for price discovery of tokenA and a base token, replacing `IERC20.balanceOf` for pricing. It manages buy/sell orders, normalized balances (1e18 precision), and tracks volumes in `_historicalData` during order settlement/cancellation. Auto-generated historical data is used if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch.
 
-**Version**: 0.3.11 (Updated 2025-09-11)
+**Version**: 0.3.12 (Updated 2025-09-16)
 
 **Changes**:
+- v0.3.12: Patched `_processHistoricalUpdate` to use `HistoricalUpdate` struct directly, removing `uint2str` usage. Updated `_updateHistoricalData` and `_updateDayStartIndex` to align with `CCListingTemplate`’s struct-based approach, ensuring new `HistoricalData` entries per update while preserving OMF’s oracle-based pricing.
 - v0.3.11: Replaced `UpdateType` with `BuyOrderUpdate`, `SellOrderUpdate`, `BalanceUpdate`, `HistoricalUpdate` structs. Updated `ccUpdate` to accept new struct arrays, removing `updateType`, `updateSort`, `updateData`. Modified `_processBuyOrderUpdate` and `_processSellOrderUpdate` to use structs directly, eliminating encoding/decoding. Updated `_processHistoricalUpdate` with helpers `_updateHistoricalData`, `_updateDayStartIndex`. Incremented `nextOrderId` in `_processBuyOrderUpdate`, `_processSellOrderUpdate` for new orders.
 - v0.3.10: Added base token oracle parameters and `setBaseOracleParams`; updated `prices` to compute `baseTokenPrice / tokenAPrice`.
 - v0.3.9: Added oracle parameters and `setOracleParams`; updated `prices` to use oracle data.
@@ -160,7 +161,7 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
   3. Processes `sellUpdates` via `_processSellOrderUpdate`:
      - Similar to buy, updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingSellOrders`, adds `filled` to `_historicalData.xVolume`, `amountSent` to `_historicalData.yVolume`.
   4. Processes `balanceUpdates`: Pushes `HistoricalData` with computed price, emits `BalancesUpdated`.
-  5. Processes `historicalUpdates` via `_processHistoricalUpdate`: Creates `HistoricalData`, updates `_dayStartIndices`.
+  5. Processes `historicalUpdates` via `_processHistoricalUpdate`: Creates new `HistoricalData` entry per update, updates `_dayStartIndices`.
   6. Updates `dayStartFee` if not same day, fetches fees via `ICCLiquidityTemplate.liquidityDetail`.
   7. Checks `orderStatus`, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
   8. Calls `globalizeUpdate`.
@@ -212,12 +213,6 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **External Callers**: None.
 - **Parameters/Interactions**: Calls `ICCGlobalizer.globalizeOrders`, emits `GlobalUpdateFailed`, `ExternalCallFailed`.
 
-#### uint2str(uint256 _i) returns (string str)
-- **Purpose**: Converts uint to string for error messages.
-- **Callers**: `globalizeUpdate`, `_updateRegistry`.
-- **External Callers**: None.
-- **Parameters/Interactions**: Supports error messages.
-
 #### removePendingOrder(uint256[] storage orders, uint256 orderId)
 - **Purpose**: Removes order ID from array.
 - **Callers**: `_processBuyOrderUpdate`, `_processSellOrderUpdate`.
@@ -237,22 +232,22 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **Parameters/Interactions**: Updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_historicalData.xVolume`, `_historicalData.yVolume`, calls `removePendingOrder`, `_updateRegistry`, increments `nextOrderId`.
 
 #### _processHistoricalUpdate(HistoricalUpdate memory update) returns (bool historicalUpdated)
-- **Purpose**: Creates `HistoricalData` entry with balances and price.
+- **Purpose**: Creates new `HistoricalData` entry per update with balances and price.
 - **Callers**: `ccUpdate`.
 - **External Callers**: None.
-- **Parameters/Interactions**: Calls `_updateHistoricalData`, `_updateDayStartIndex`, `_floorToMidnight`, `normalize`, `IERC20.balanceOf`.
+- **Parameters/Interactions**: Calls `_updateHistoricalData`, `_updateDayStartIndex`, `_floorToMidnight`, `normalize`, `IERC20.balanceOf`. Emits `UpdateFailed` if `price` is zero.
 
 #### _updateHistoricalData(HistoricalUpdate memory update)
-- **Purpose**: Pushes new `HistoricalData` entry.
+- **Purpose**: Pushes new `HistoricalData` entry with normalized balances.
 - **Callers**: `_processHistoricalUpdate`.
 - **External Callers**: None.
-- **Parameters/Interactions**: Uses `normalize`, `IERC20.balanceOf`.
+- **Parameters/Interactions**: Uses `normalize`, `IERC20.balanceOf`, sets `timestamp` to `update.timestamp` or midnight.
 
 #### _updateDayStartIndex(uint256 timestamp)
 - **Purpose**: Updates `_dayStartIndices` for midnight timestamp.
 - **Callers**: `_processHistoricalUpdate`.
 - **External Callers**: None.
-- **Parameters/Interactions**: Calls `_floorToMidnight`.
+- **Parameters/Interactions**: Calls `_floorToMidnight`, updates `_dayStartIndices` if unset.
 
 ### View Functions
 #### getTokens()
@@ -415,7 +410,7 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **Registry**: Updated via `_updateRegistry` in `ccUpdate` with `tokenA`, `tokenB`.
 - **Globalizer**: Updated via `globalizeUpdate` in `ccUpdate`.
 - **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` for fees in `ccUpdate`.
-- **Historical Data**: Stored in `_historicalData` via `ccUpdate` (`historicalUpdates`) or auto-generated.
+- **Historical Data**: Stored in `_historicalData` via `ccUpdate` (`historicalUpdates`) or auto-generated, with new entries per update.
 - **External Calls**: `IERC20.balanceOf`, `IERC20.transfer`, `IERC20.decimals`, `ICCLiquidityTemplate.liquidityDetail`, `ITokenRegistry.initializeTokens`, `ICCGlobalizer.globalizeOrders`, `ICCAgent.getLister`, `ICCAgent.getRouters`, `IOracle` calls, low-level `call`.
 - **Security**: Router checks, try-catch, explicit casting, emits `UpdateFailed`, `TransactionFailed`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`, `OracleParamsSet`.
 - **Optimization**: Normalized amounts, `maxIterations`, helper functions in `ccUpdate`.
