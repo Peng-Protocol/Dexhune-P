@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.9
+// Version: 0.3.10
 // Changes:
+// - v0.3.10: Integrated CCListingTemplate v0.3.11 changes. Updated _processHistoricalUpdate to use HistoricalUpdate struct directly, removing structId and value parameters. Added _updateHistoricalData and _updateDayStartIndex helper functions. Removed uint2str in error messages. Preserved MFP-specific balance update logic in ccUpdate and prices function using contract balances.
 // - v0.3.9: Replaced UpdateType struct with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs.
 //   Updated ccUpdate to accept new struct arrays, removing updateType, updateSort, updateData arrays.
 //   Modified _processBuyOrderUpdate and _processSellOrderUpdate to handle new structs directly without encoding/decoding.
@@ -421,128 +422,128 @@ contract MFPListingTemplate {
         }
     }
 
-// Modified _processHistoricalUpdate function
-    function _processHistoricalUpdate(HistoricalUpdate memory update) internal returns (bool historicalUpdated) {
-        // Processes historical data update using struct fields directly
-        if (update.price == 0) {
-            emit UpdateFailed(listingId, "Invalid historical price");
-            return false;
-        }
-        _updateHistoricalData(update);
-        _updateDayStartIndex(update.timestamp);
-        return true;
+// Updated _processHistoricalUpdate to use full HistoricalUpdate struct
+function _processHistoricalUpdate(HistoricalUpdate memory update) internal returns (bool historicalUpdated) {
+    // Processes historical data update using struct fields directly
+    if (update.price == 0) {
+        emit UpdateFailed(listingId, "Invalid historical price");
+        return false;
     }
+    _updateHistoricalData(update);
+    _updateDayStartIndex(update.timestamp);
+    return true;
+}
 
-    // Helper function to update historical data array
-    function _updateHistoricalData(HistoricalUpdate memory update) internal {
-        // Pushes new historical data entry
+// Helper function to update historical data array
+function _updateHistoricalData(HistoricalUpdate memory update) internal {
+    // Pushes new historical data entry
+    uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
+    uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
+    _historicalData.push(HistoricalData({
+        price: update.price,
+        xBalance: update.xBalance > 0 ? update.xBalance : balanceA,
+        yBalance: update.yBalance > 0 ? update.yBalance : balanceB,
+        xVolume: update.xVolume,
+        yVolume: update.yVolume,
+        timestamp: update.timestamp > 0 ? update.timestamp : _floorToMidnight(block.timestamp)
+    }));
+}
+
+// Helper function to update day start index
+function _updateDayStartIndex(uint256 timestamp) internal {
+    // Updates day start index for new midnight timestamp
+    uint256 midnight = _floorToMidnight(timestamp);
+    if (_dayStartIndices[midnight] == 0) {
+        _dayStartIndices[midnight] = _historicalData.length - 1;
+    }
+}
+
+// Updated ccUpdate function to align with new _processHistoricalUpdate and maintain MFP-specific balance logic
+function ccUpdate(
+    BuyOrderUpdate[] calldata buyUpdates,
+    SellOrderUpdate[] calldata sellUpdates,
+    BalanceUpdate[] calldata balanceUpdates,
+    HistoricalUpdate[] calldata historicalUpdates
+) external {
+    // Validates caller is a router
+    require(routers[msg.sender], "Not a router");
+
+    // Process buy order updates
+    for (uint256 i = 0; i < buyUpdates.length; i++) {
+        _processBuyOrderUpdate(buyUpdates[i]);
+    }
+    // Process sell order updates
+    for (uint256 i = 0; i < sellUpdates.length; i++) {
+        _processSellOrderUpdate(sellUpdates[i]);
+    }
+    // Process balance updates with MFP-specific price calculation
+    for (uint256 i = 0; i < balanceUpdates.length; i++) {
         uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
         uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
         _historicalData.push(HistoricalData({
-            price: update.price,
-            xBalance: update.xBalance > 0 ? update.xBalance : balanceA,
-            yBalance: update.yBalance > 0 ? update.yBalance : balanceB,
-            xVolume: update.xVolume,
-            yVolume: update.yVolume,
-            timestamp: update.timestamp > 0 ? update.timestamp : _floorToMidnight(block.timestamp)
+            price: (balanceA == 0 || balanceB == 0) ? 1 : (balanceB * 1e18) / balanceA,
+            xBalance: balanceUpdates[i].xBalance,
+            yBalance: balanceUpdates[i].yBalance,
+            xVolume: 0,
+            yVolume: 0,
+            timestamp: block.timestamp
         }));
+        emit BalancesUpdated(listingId, balanceUpdates[i].xBalance, balanceUpdates[i].yBalance);
     }
-
-    // Helper function to update day start index
-    function _updateDayStartIndex(uint256 timestamp) internal {
-        // Updates day start index for new midnight timestamp
-        uint256 midnight = _floorToMidnight(timestamp);
-        if (_dayStartIndices[midnight] == 0) {
+    // Process historical data updates
+    for (uint256 i = 0; i < historicalUpdates.length; i++) {
+        if (!_processHistoricalUpdate(historicalUpdates[i])) {
+            emit UpdateFailed(listingId, "Historical update failed");
+        }
+        uint256 midnight = _floorToMidnight(historicalUpdates[i].timestamp);
+        if (!_isSameDay(_historicalData[_historicalData.length - 1].timestamp, historicalUpdates[i].timestamp)) {
             _dayStartIndices[midnight] = _historicalData.length - 1;
         }
     }
-
-// Modified ccUpdate function
-    function ccUpdate(
-        BuyOrderUpdate[] calldata buyUpdates,
-        SellOrderUpdate[] calldata sellUpdates,
-        BalanceUpdate[] calldata balanceUpdates,
-        HistoricalUpdate[] calldata historicalUpdates
-    ) external {
-        // Validates caller is a router
-        require(routers[msg.sender], "Not a router");
-
-        // Process buy order updates
-        for (uint256 i = 0; i < buyUpdates.length; i++) {
-            _processBuyOrderUpdate(buyUpdates[i]);
+    // Process updated orders for completeness
+    for (uint256 i = 0; i < buyUpdates.length; i++) {
+        uint256 orderId = buyUpdates[i].orderId;
+        OrderStatus storage status = orderStatus[orderId];
+        bool isBuy = true;
+        if (status.hasCore && status.hasPricing && status.hasAmounts) {
+            emit OrderUpdatesComplete(listingId, orderId, isBuy);
+        } else {
+            string memory reason = !status.hasCore ? "Missing Core struct" :
+                                  !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
+            emit OrderUpdateIncomplete(listingId, orderId, reason);
         }
-        // Process sell order updates
-        for (uint256 i = 0; i < sellUpdates.length; i++) {
-            _processSellOrderUpdate(sellUpdates[i]);
-        }
-        // Process balance updates
-        for (uint256 i = 0; i < balanceUpdates.length; i++) {
-            uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
-            uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
-            _historicalData.push(HistoricalData({
-                price: (balanceA == 0 || balanceB == 0) ? 1 : (balanceB * 1e18) / balanceA,
-                xBalance: balanceUpdates[i].xBalance,
-                yBalance: balanceUpdates[i].yBalance,
-                xVolume: 0,
-                yVolume: 0,
-                timestamp: block.timestamp
-            }));
-            emit BalancesUpdated(listingId, balanceUpdates[i].xBalance, balanceUpdates[i].yBalance);
-        }
-        // Process historical data updates
-        for (uint256 i = 0; i < historicalUpdates.length; i++) {
-            if (!_processHistoricalUpdate(historicalUpdates[i])) {
-                emit UpdateFailed(listingId, "Historical update failed");
-            }
-            uint256 midnight = _floorToMidnight(historicalUpdates[i].timestamp);
-            if (!_isSameDay(_historicalData[_historicalData.length - 1].timestamp, historicalUpdates[i].timestamp)) {
-                _dayStartIndices[midnight] = _historicalData.length - 1;
-            }
-        }
-        // Process updated orders for completeness
-        for (uint256 i = 0; i < buyUpdates.length; i++) {
-            uint256 orderId = buyUpdates[i].orderId;
-            OrderStatus storage status = orderStatus[orderId];
-            bool isBuy = true;
-            if (status.hasCore && status.hasPricing && status.hasAmounts) {
-                emit OrderUpdatesComplete(listingId, orderId, isBuy);
-            } else {
-                string memory reason = !status.hasCore ? "Missing Core struct" :
-                                      !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
-                emit OrderUpdateIncomplete(listingId, orderId, reason);
-            }
-        }
-        for (uint256 i = 0; i < sellUpdates.length; i++) {
-            uint256 orderId = sellUpdates[i].orderId;
-            OrderStatus storage status = orderStatus[orderId];
-            bool isBuy = false;
-            if (status.hasCore && status.hasPricing && status.hasAmounts) {
-                emit OrderUpdatesComplete(listingId, orderId, isBuy);
-            } else {
-                string memory reason = !status.hasCore ? "Missing Core struct" :
-                                      !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
-                emit OrderUpdateIncomplete(listingId, orderId, reason);
-            }
-        }
-        // Update dayStartFee if needed
-        uint256 currentMidnight = _floorToMidnight(block.timestamp);
-        if (_historicalData.length > 0 && !_isSameDay(dayStartFee.timestamp, currentMidnight)) {
-            dayStartFee = DayStartFee({
-                dayStartXFeesAcc: 0,
-                dayStartYFeesAcc: 0,
-                timestamp: currentMidnight
-            });
-            try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
-                uint256 /* xLiq */, uint256 /* yLiq */, uint256, uint256, uint256 xFees, uint256 yFees
-            ) {
-                dayStartFee.dayStartXFeesAcc = xFees;
-                dayStartFee.dayStartYFeesAcc = yFees;
-            } catch {
-                emit UpdateFailed(listingId, "Failed to fetch liquidity details");
-            }
-        }
-        globalizeUpdate();
     }
+    for (uint256 i = 0; i < sellUpdates.length; i++) {
+        uint256 orderId = sellUpdates[i].orderId;
+        OrderStatus storage status = orderStatus[orderId];
+        bool isBuy = false;
+        if (status.hasCore && status.hasPricing && status.hasAmounts) {
+            emit OrderUpdatesComplete(listingId, orderId, isBuy);
+        } else {
+            string memory reason = !status.hasCore ? "Missing Core struct" :
+                                  !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
+            emit OrderUpdateIncomplete(listingId, orderId, reason);
+        }
+    }
+    // Update dayStartFee if needed
+    uint256 currentMidnight = _floorToMidnight(block.timestamp);
+    if (_historicalData.length > 0 && !_isSameDay(dayStartFee.timestamp, currentMidnight)) {
+        dayStartFee = DayStartFee({
+            dayStartXFeesAcc: 0,
+            dayStartYFeesAcc: 0,
+            timestamp: currentMidnight
+        });
+        try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
+            uint256 /* xLiq */, uint256 /* yLiq */, uint256, uint256, uint256 xFees, uint256 yFees
+        ) {
+            dayStartFee.dayStartXFeesAcc = xFees;
+            dayStartFee.dayStartYFeesAcc = yFees;
+        } catch {
+            emit UpdateFailed(listingId, "Failed to fetch liquidity details");
+        }
+    }
+    globalizeUpdate();
+}
 
     // Sets globalizer contract address, callable once
     function setGlobalizerAddress(address globalizerAddress_) external {

@@ -1,7 +1,8 @@
 /*
  * SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- * Version: 0.3.11
+ * Version: 0.3.12
  * Changes:
+ * - v0.3.12: Patched _processHistoricalUpdate to use HistoricalUpdate struct directly, removing uint2str usage. Updated _updateHistoricalData and _updateDayStartIndex to align with CCListingTemplate's struct-based approach for consistency, while preserving OMF's oracle-based pricing and other unique features.
  * - v0.3.11: Replaced UpdateType struct with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs.
  *   Updated ccUpdate to accept new struct arrays, removing updateType, updateSort, updateData arrays.
  *   Modified _processBuyOrderUpdate and _processSellOrderUpdate to handle new structs directly without encoding/decoding.
@@ -455,7 +456,7 @@ function _processSellOrderUpdate(SellOrderUpdate memory update) internal returns
     }
 }
 
-// New _processHistoricalUpdate function and helpers for full historical updates
+// Updated _processHistoricalUpdate to use full HistoricalUpdate struct
 function _processHistoricalUpdate(HistoricalUpdate memory update) internal returns (bool historicalUpdated) {
     // Processes historical data update using struct fields directly
     if (update.price == 0) {
@@ -467,8 +468,9 @@ function _processHistoricalUpdate(HistoricalUpdate memory update) internal retur
     return true;
 }
 
+// Helper function to update historical data array
 function _updateHistoricalData(HistoricalUpdate memory update) internal {
-    // Pushes new historical data entry
+    // Pushes new historical data entry with normalized balances
     uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
     uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
     _historicalData.push(HistoricalData({
@@ -481,6 +483,7 @@ function _updateHistoricalData(HistoricalUpdate memory update) internal {
     }));
 }
 
+// Helper function to update day start index
 function _updateDayStartIndex(uint256 timestamp) internal {
     // Updates day start index for new midnight timestamp
     uint256 midnight = _floorToMidnight(timestamp);
