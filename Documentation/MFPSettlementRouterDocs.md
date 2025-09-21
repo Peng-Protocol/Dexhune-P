@@ -15,7 +15,9 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 - `MFPSettlementPartial.sol` (v0.1.1)
 
 ### Changes
+- **v0.1.1**: Updated `_validateOrder` and `_validateOrderParams` to process orders with `status >= 1 && < 3` (partially filled or pending). Modified `_prepareUpdateData` to accumulate `filled` and `amountSent` for cumulative accounting.
 - **v0.1.0**: Initial implementation, replacing Uniswap V2 with direct transfers from `CCListingTemplate`. Added impact price calculation (`impact = (pendingAmount * 1e18) / settlementBalance`, buy: `price * (1e18 + impact) / 1e18`, sell: `price * (1e18 - impact) / 1e18`) and partial settlement logic (`maxAmount = (settlementBalance * percentageDiff) / 100`, where `percentageDiff = (maxPrice / currentPrice * 100 - 100)` for buys). Compatible with `CCListingTemplate.sol` (v0.3.9), `CCMainPartial.sol` (v0.1.5).
+
 
 ## Mappings
 - None defined directly in `MFPSettlementRouter` or `MFPSettlementPartial`. Relies on `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -37,18 +39,18 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
     - `_initSettlement` → Fetches order IDs, validates non-zero orders and step.
     - `_createHistoricalEntry` → Creates `HistoricalUpdate` using `volumeBalances`, `prices`, `historicalDataLengthView`, `getHistoricalDataView`.
     - `_processOrderBatch` → Iterates orders, calls `_validateOrder`, `_processOrder`, `_updateOrder`.
-    - `_validateOrder` → Fetches order data (`getBuyOrderAmounts`/`getSellOrderAmounts`, `getBuyOrderCore`/`getSellOrderCore`), checks pricing via `_checkPricing`.
+    - `_validateOrder` → Fetches order data (`getBuyOrderAmounts`/`getSellOrderAmounts`, `getBuyOrderCore`/`getSellOrderCore`), checks `status >= 1 && < 3`, pricing via `_checkPricing`.
     - `_processOrder` → Calls `_processBuyOrder` or `_processSellOrder`.
     - `_processBuyOrder` → Validates via `_validateOrderParams`, computes swap amount via `_computeSwapAmount`, applies updates via `_applyOrderUpdate`.
     - `_processSellOrder` → Validates via `_validateOrderParams`, computes swap amount via `_computeSwapAmount`, applies updates via `_applyOrderUpdate`.
     - `_applyOrderUpdate` → Executes transfer via `_executeOrderSwap`, prepares updates via `_prepareUpdateData`.
     - `_executeOrderSwap` → Performs direct transfer (`transactNative` or `transactToken`) to recipient, tracks `amountSent` with pre/post balance checks.
-    - `_prepareUpdateData` → Updates `filled` and `status` via `_updateFilledAndStatus`.
+    - `_prepareUpdateData` → Updates `filled` and `status` via `_updateFilledAndStatus`, accumulates `filled` and `amountSent`.
     - `_updateOrder` → Applies updates via `ccUpdate`.
 
 ## Internal Functions
 ### MFPSettlementRouter
-- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderContext memory context**: Fetches order data, validates status and pending amount, checks pricing via `_checkPricing`.
+- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderContext memory context**: Fetches order data, validates `status >= 1 && < 3` and pending amount, checks pricing via `_checkPricing`.
 - **_processOrder(address listingAddress, bool isBuyOrder, ICCListing listingContract, OrderContext memory context, SettlementContext memory settlementContext) → OrderContext memory**: Delegates to `_processBuyOrder` or `_processSellOrder`.
 - **_updateOrder(ICCListing listingContract, OrderContext memory context, bool isBuyOrder) → (bool success, string memory reason)**: Applies `ccUpdate` with `buyUpdates` or `sellUpdates`, returns success or error reason.
 - **_initSettlement(address listingAddress, bool isBuyOrder, uint256 step, ICCListing listingContract) → (SettlementState memory state, uint256[] memory orderIds)**: Initializes state, fetches order IDs.
@@ -58,12 +60,12 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 ### MFPSettlementPartial
 - **_checkPricing(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) → bool**: Validates order pricing, computes impact price (`impact = (pendingAmount * 1e18) / settlementBalance`, buy: increase price, sell: decrease price), reverts on zero balance or price.
 - **_computeAmountSent(address tokenAddress, address recipientAddress, uint256 amount) → uint256 preBalance**: Returns pre-transfer balance for tracking `amountSent`.
-- **_validateOrderParams(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderProcessContext memory context**: Fetches and validates order details (core, pricing, amounts).
+- **_validateOrderParams(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderProcessContext memory context**: Fetches and validates order details (core, pricing, amounts), checks `status >= 1 && < 3`.
 - **_computeSwapAmount(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, SettlementContext memory settlementContext) → OrderProcessContext memory**: Computes `swapAmount`, applies partial settlement if impact price exceeds bounds (e.g., `(settlementBalance * ((maxPrice / currentPrice * 100 - 100))) / 100` for buys).
 - **_executeOrderSwap(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, ICCListing listingContract) → OrderProcessContext memory**: Executes direct transfer (`transactNative` or `transactToken`), tracks `amountSent` with pre/post balance checks.
 - **_extractPendingAmount(OrderProcessContext memory context, bool isBuyOrder) → uint256 pending**: Extracts pending amount from updates or context.
-- **_updateFilledAndStatus(OrderProcessContext memory context, bool isBuyOrder, uint256 pendingAmount) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)**: Updates `filled` and `status` (3 if fully settled, 2 if partial).
-- **_prepareUpdateData(OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)**: Prepares update structs for `ccUpdate`.
+- **_updateFilledAndStatus(OrderProcessContext memory context, bool isBuyOrder, uint256 pendingAmount) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)**: Updates `filled` and `status` (3 if fully settled, 2 if partial), accumulates `filled`.
+- **_prepareUpdateData(OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)**: Prepares update structs for `ccUpdate`, accumulates `amountSent`.
 - **_applyOrderUpdate(address listingAddress, ICCListing listingContract, OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)**: Executes transfer, prepares updates.
 - **_processBuyOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract, SettlementContext memory settlementContext) → ICCListing.BuyOrderUpdate[] memory buyUpdates**: Validates, computes swap amount, applies updates for buy orders.
 - **_processSellOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract, SettlementContext memory settlementContext) → ICCListing.SellOrderUpdate[] memory sellUpdates**: Validates, computes swap amount, applies updates for sell orders.
@@ -85,7 +87,7 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 - **Decimal Handling**: Uses `normalize`/`denormalize` for 18-decimal precision, assumes `IERC20.decimals` or 18 for ETH.
 - **Zero-Amount Handling**: Reverts on zero `swapAmount` or settlement balance, returns empty updates for failed transfers.
 - **Pending/Filled**: Uses `swapAmount` (tokenB for buys, tokenA for sells) for `pending` and `filled`, accumulating `filled`.
-- **AmountSent**: Tracks actual tokens received by recipient (tokenA for buys, tokenB for sells) with pre/post balance checks.
+- **AmountSent**: Tracks actual tokens received (tokenA for buys, tokenB for sells) with pre/post balance checks, accumulates per partial fill.
 - **Historical Data**: Creates `HistoricalUpdate` at the start of `settleOrders` if pending orders exist, logging `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`.
 
 ## Additional Details
@@ -93,7 +95,7 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 - **Gas Optimization**: Uses `step`, `maxIterations`, and dynamic arrays. Refactored with `SettlementState` (v0.1.0).
 - **Listing Validation**: `onlyValidListing` checks `ICCAgent.isValidListing`.
 - **Error Handling**: Try-catch in `transactNative`, `transactToken`, and `ccUpdate` with decoded reasons.
-- **Status Handling**: Sets status to 3 (fully settled) if `swapAmount >= pendingAmount`, otherwise 2 (partially settled).
+- **Status Handling**: Validates `status >= 1 && < 3`, sets to 3 (fully settled) if `swapAmount >= pendingAmount`, otherwise 2 (partially settled).
 - **ccUpdate Call Locations**:
   - `_updateOrder` applies `buyUpdates` or `sellUpdates` for orders.
   - `_createHistoricalEntry` applies `historicalUpdates` at the start of `settleOrders`.

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.1
 // Changes:
+// - v0.1.1: Updated validation to check status >= 1 && < 3
 // - v0.1.0: Initial implementation, replaces Uniswap V2 with direct transfers from listing template. Added impact price and partial settlement logic per instructions. Compatible with CCListingTemplate.sol (v0.3.9), CCMainPartial.sol (v0.1.5), MFPSettlementPartial.sol (v0.1.0).
 
 import "./utils/MFPSettlementPartial.sol";
@@ -16,22 +17,21 @@ contract MFPSettlementRouter is MFPSettlementPartial {
     }
 
     function _validateOrder(
-        address listingAddress,
-        uint256 orderId,
-        bool isBuyOrder,
-        ICCListing listingContract
-    ) internal view returns (OrderContext memory context) {
-        // Validates order details and pricing
-        context.orderId = orderId;
-        (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
-        (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
-        if (context.pending == 0 || context.status != 1) {
-            revert(string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
-        }
-        if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
-            revert(string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
-        }
+    address listingAddress,
+    uint256 orderId,
+    bool isBuyOrder,
+    ICCListing listingContract
+) internal view returns (OrderContext memory context) {
+    context.orderId = orderId;
+    (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
+    (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
+    if (context.pending == 0 || context.status < 1 || context.status >= 3) {
+        revert(string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
     }
+    if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
+        revert(string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
+    }
+}
 
     function _processOrder(
         address listingAddress,
