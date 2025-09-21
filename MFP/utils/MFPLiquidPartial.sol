@@ -1,7 +1,9 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.1.0
- Changes:
+ Version: 0.1.2
+Changes:
+- v0.1.2: Refactored _prepBuyOrderUpdate and _prepSellOrderUpdate to address stack too deep error (x64). Split logic into helper functions (_fetchOrderData, _transferPrincipal, _updateLiquidity, _transferSettlement, _computeResult) with TransferContext struct to reduce stack usage.
+- v0.1.1: Patched _prepBuyOrderUpdate and _prepSellOrderUpdate to send settlement tokens from liquidity contract instead of listing contract, updating xLiquid/yLiquid accordingly.
  - v0.1.0: Created MFPLiquidPartial.sol from CCLiquidPartial.sol v0.0.45, removed Uniswap functionality (IUniswapV2Pair, _getSwapReserves, MissingUniswapRouter event), replaced _computeSwapImpact with _computeImpactPrice using settlementAmount/xBalance for impact percentage, updated _processSingleOrder and _validateOrderPricing for new price logic.
 */
 
@@ -74,6 +76,13 @@ contract MFPLiquidPartial is CCMainPartial {
         uint8 tokenDecimals;
         bool isBuyOrder;
     }
+    
+    struct TransferContext {
+    address maker;
+    address recipient;
+    uint8 status;
+    uint256 amountSent;
+}
 
     event FeeDeducted(address indexed listingAddress, uint256 orderId, bool isBuyOrder, uint256 feeAmount, uint256 netAmount);
     event PriceOutOfBounds(address indexed listingAddress, uint256 orderId, uint256 impactPrice, uint256 maxPrice, uint256 minPrice);
@@ -227,63 +236,93 @@ contract MFPLiquidPartial is CCMainPartial {
         });
     }
 
-    function _prepBuyOrderUpdate(
-        address listingAddress,
-        uint256 orderId,
-        uint256 pendingAmount,
-        uint256 amountOut
-    ) private returns (PrepOrderUpdateResult memory result) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        (address maker, address recipient, uint8 status) = listingContract.getBuyOrderCore(orderId);
-        (, uint256 minPrice) = listingContract.getBuyOrderPricing(orderId);
-        (address tokenAddress, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
-        uint256 preBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
-        listingContract.transactToken(tokenAddress, amountOut, recipient);
-        uint256 postBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
-        uint256 amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
-        uint256 normalizedReceived = normalize(amountOut, tokenDecimals);
-        uint8 newStatus = pendingAmount == 0 ? 0 : (amountOut >= pendingAmount ? 3 : 2);
-        result = PrepOrderUpdateResult({
-            tokenAddress: tokenAddress,
-            tokenDecimals: tokenDecimals,
-            makerAddress: maker,
-            recipientAddress: recipient,
-            amountReceived: amountOut,
-            normalizedReceived: normalizedReceived,
-            amountSent: amountSent,
-            preTransferWithdrawn: amountOut,
-            status: newStatus
-        });
-    }
+    // Fetches order data to reduce stack usage
+function _fetchOrderData(address listingAddress, uint256 orderId, bool isBuyOrder) private view returns (TransferContext memory context, address tokenAddress, uint8 tokenDecimals) {
+    ICCListing listingContract = ICCListing(listingAddress);
+    (context.maker, context.recipient, context.status) = isBuyOrder 
+        ? listingContract.getBuyOrderCore(orderId) 
+        : listingContract.getSellOrderCore(orderId);
+    (tokenAddress, tokenDecimals) = _getTokenAndDecimals(listingAddress, !isBuyOrder);
+}
 
-    function _prepSellOrderUpdate(
-        address listingAddress,
-        uint256 orderId,
-        uint256 pendingAmount,
-        uint256 amountOut
-    ) private returns (PrepOrderUpdateResult memory result) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        (address maker, address recipient, uint8 status) = listingContract.getSellOrderCore(orderId);
-        (, uint256 minPrice) = listingContract.getSellOrderPricing(orderId);
-        (address tokenAddress, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
-        uint256 preBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
-        listingContract.transactToken(tokenAddress, amountOut, recipient);
-        uint256 postBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
-        uint256 amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
-        uint256 normalizedReceived = normalize(amountOut, tokenDecimals);
-        uint8 newStatus = pendingAmount == 0 ? 0 : (amountOut >= pendingAmount ? 3 : 2);
-        result = PrepOrderUpdateResult({
-            tokenAddress: tokenAddress,
-            tokenDecimals: tokenDecimals,
-            makerAddress: maker,
-            recipientAddress: recipient,
-            amountReceived: amountOut,
-            normalizedReceived: normalizedReceived,
-            amountSent: amountSent,
-            preTransferWithdrawn: amountOut,
-            status: newStatus
-        });
+// Transfers principal to liquidity contract
+function _transferPrincipal(address listingAddress, uint256 pendingAmount, bool isBuyOrder) private {
+    ICCListing listingContract = ICCListing(listingAddress);
+    address token = isBuyOrder ? listingContract.tokenB() : listingContract.tokenA();
+    try listingContract.transactToken(token, pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Principal transfer failed: ", reason)));
     }
+}
+
+// Updates liquidity for principal
+function _updateLiquidity(address listingAddress, uint256 pendingAmount, bool isBuyOrder, uint8 tokenDecimals) private {
+    ICCLiquidity liquidityContract = ICCLiquidity(ICCListing(listingAddress).liquidityAddressView());
+    (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
+    ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
+    updates[0] = ICCLiquidity.UpdateType({
+        updateType: 0,
+        index: isBuyOrder ? 1 : 0,
+        value: normalize(pendingAmount, tokenDecimals) + (isBuyOrder ? yAmount : xAmount),
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.ccUpdate(address(this), updates) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Principal liquidity update failed: ", reason)));
+    }
+}
+
+// Transfers settlement token from liquidity contract
+function _transferSettlement(address listingAddress, address maker, address tokenAddress, uint256 amountOut, address recipient) private returns (uint256 amountSent) {
+    ICCLiquidity liquidityContract = ICCLiquidity(ICCListing(listingAddress).liquidityAddressView());
+    uint256 preBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
+    try liquidityContract.transactToken(maker, tokenAddress, amountOut, recipient) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Settlement transfer failed: ", reason)));
+    }
+    uint256 postBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
+    amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
+}
+
+// Computes final result for order update
+function _computeResult(address tokenAddress, uint8 tokenDecimals, TransferContext memory context, uint256 amountOut, uint256 pendingAmount) private pure returns (PrepOrderUpdateResult memory result) {
+    uint8 newStatus = pendingAmount == 0 ? 0 : (amountOut >= pendingAmount ? 3 : 2);
+    result = PrepOrderUpdateResult({
+        tokenAddress: tokenAddress,
+        tokenDecimals: tokenDecimals,
+        makerAddress: context.maker,
+        recipientAddress: context.recipient,
+        amountReceived: amountOut,
+        normalizedReceived: normalize(amountOut, tokenDecimals),
+        amountSent: context.amountSent,
+        preTransferWithdrawn: amountOut,
+        status: newStatus
+    });
+}
+
+function _prepBuyOrderUpdate(
+    address listingAddress,
+    uint256 orderId,
+    uint256 pendingAmount,
+    uint256 amountOut
+) private returns (PrepOrderUpdateResult memory result) {
+    (TransferContext memory context, address tokenAddress, uint8 tokenDecimals) = _fetchOrderData(listingAddress, orderId, true);
+    _transferPrincipal(listingAddress, pendingAmount, true);
+    _updateLiquidity(listingAddress, pendingAmount, true, tokenDecimals);
+    context.amountSent = _transferSettlement(listingAddress, context.maker, tokenAddress, amountOut, context.recipient);
+    result = _computeResult(tokenAddress, tokenDecimals, context, amountOut, pendingAmount);
+}
+
+function _prepSellOrderUpdate(
+    address listingAddress,
+    uint256 orderId,
+    uint256 pendingAmount,
+    uint256 amountOut
+) private returns (PrepOrderUpdateResult memory result) {
+    (TransferContext memory context, address tokenAddress, uint8 tokenDecimals) = _fetchOrderData(listingAddress, orderId, false);
+    _transferPrincipal(listingAddress, pendingAmount, false);
+    _updateLiquidity(listingAddress, pendingAmount, false, tokenDecimals);
+    context.amountSent = _transferSettlement(listingAddress, context.maker, tokenAddress, amountOut, context.recipient);
+    result = _computeResult(tokenAddress, tokenDecimals, context, amountOut, pendingAmount);
+}
 
     function executeSingleBuyLiquid(address listingAddress, uint256 orderIdentifier) internal returns (bool success) {
         ICCListing listingContract = ICCListing(listingAddress);
