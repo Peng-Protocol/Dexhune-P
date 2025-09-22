@@ -3,9 +3,10 @@
 ## Overview
 The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate` for decentralized trading of a token pair, using external oracles (e.g., Chainlink) for price discovery of tokenA and a base token, replacing `IERC20.balanceOf` for pricing. It manages buy/sell orders, normalized balances (1e18 precision), and tracks volumes in `_historicalData` during order settlement/cancellation. Auto-generated historical data is used if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch.
 
-**Version**: 0.3.12 (Updated 2025-09-16)
+**Version**: 0.3.13 (Updated 2025-09-22)
 
 **Changes**:
+- v0.3.13: Patched `prices` function to compute `tokenAUSDPrice / baseTokenUSDPrice` for XAU/USD base token compatibility with `MFPSettlementRouter` and `MFPLiquidRouter`.
 - v0.3.12: Patched `_processHistoricalUpdate` to use `HistoricalUpdate` struct directly, removing `uint2str` usage. Updated `_updateHistoricalData` and `_updateDayStartIndex` to align with `CCListingTemplate`’s struct-based approach, ensuring new `HistoricalData` entries per update while preserving OMF’s oracle-based pricing.
 - v0.3.11: Replaced `UpdateType` with `BuyOrderUpdate`, `SellOrderUpdate`, `BalanceUpdate`, `HistoricalUpdate` structs. Updated `ccUpdate` to accept new struct arrays, removing `updateType`, `updateSort`, `updateData`. Modified `_processBuyOrderUpdate` and `_processSellOrderUpdate` to use structs directly, eliminating encoding/decoding. Updated `_processHistoricalUpdate` with helpers `_updateHistoricalData`, `_updateDayStartIndex`. Incremented `nextOrderId` in `_processBuyOrderUpdate`, `_processSellOrderUpdate` for new orders.
 - v0.3.10: Added base token oracle parameters and `setBaseOracleParams`; updated `prices` to compute `baseTokenPrice / tokenAPrice`.
@@ -272,7 +273,7 @@ The `OMFListingTemplate` contract (Solidity ^0.8.2) extends `MFPListingTemplate`
 - **Parameters/Interactions**: None.
 
 #### prices(uint256 _listingId)
-- **Purpose**: Computes `baseTokenPrice / tokenAPrice` using oracles, normalized to 1e18.
+- **Purpose**: Computes `tokenAPrice / baseTokenUSDPrice` using oracles, normalized to 1e18.
 - **State Changes**: None.
 - **Restrictions**: Reverts if oracles not set, calls fail, prices non-positive, or `tokenAPrice` zero.
 - **Internal Call Tree**: `normalize`.

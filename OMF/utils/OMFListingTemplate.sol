@@ -1,7 +1,8 @@
 /*
  * SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- * Version: 0.3.12
- * Changes:
+* Version: 0.3.13
+* Changes:
+* - v0.3.13: Patched prices function to compute tokenAUSDPrice / baseTokenUSDPrice for XAU/USD base token compatibility with MFPSettlementRouter and MFPLiquidRouter.
  * - v0.3.12: Patched _processHistoricalUpdate to use HistoricalUpdate struct directly, removing uint2str usage. Updated _updateHistoricalData and _updateDayStartIndex to align with CCListingTemplate's struct-based approach for consistency, while preserving OMF's oracle-based pricing and other unique features.
  * - v0.3.11: Replaced UpdateType struct with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs.
  *   Updated ccUpdate to accept new struct arrays, removing updateType, updateSort, updateData arrays.
@@ -722,7 +723,7 @@ function setBaseOracleParams(
         return routerAddresses;
     }
     
-// Modified prices function to compute base token price / tokenA price
+// Modified prices function to compute tokenAUSDPrice / baseTokenUSDPrice
 function prices(uint256 _listingId) external view returns (uint256 price) {
     require(oracleAddress != address(0) && baseOracleAddress != address(0), "Oracle not set");
 
@@ -754,9 +755,9 @@ function prices(uint256 _listingId) external view returns (uint256 price) {
     }
     uint256 normalizedPriceB = normalize(rawPriceB, baseOracleDecimals);
 
-    // Compute price as base token price / tokenA price, normalized to 18 decimals
-    require(normalizedPriceA > 0, "TokenA price is zero");
-    return (normalizedPriceB * 1e18) / normalizedPriceA;
+    // Compute price as tokenAUSDPrice / baseTokenUSDPrice, normalized to 18 decimals
+    require(normalizedPriceB > 0, "Base token price is zero");
+    return (normalizedPriceA * 1e18) / normalizedPriceB;
 }
 
     // Rounds a timestamp to the start of its day (midnight UTC)
