@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.1.2
+ Version: 0.1.3
 Changes:
+- v0.1.3: Updated _computeFee to enforce 0.01% minimum and 10% maximum fees, scaling with usage.
 - v0.1.2: Refactored _prepBuyOrderUpdate and _prepSellOrderUpdate to address stack too deep error (x64). Split logic into helper functions (_fetchOrderData, _transferPrincipal, _updateLiquidity, _transferSettlement, _computeResult) with TransferContext struct to reduce stack usage.
 - v0.1.1: Patched _prepBuyOrderUpdate and _prepSellOrderUpdate to send settlement tokens from liquidity contract instead of listing contract, updating xLiquid/yLiquid accordingly.
  - v0.1.0: Created MFPLiquidPartial.sol from CCLiquidPartial.sol v0.0.45, removed Uniswap functionality (IUniswapV2Pair, _getSwapReserves, MissingUniswapRouter event), replaced _computeSwapImpact with _computeImpactPrice using settlementAmount/xBalance for impact percentage, updated _processSingleOrder and _validateOrderPricing for new price logic.
@@ -427,19 +428,19 @@ function _prepSellOrderUpdate(
     }
 
     function _computeFee(address listingAddress, uint256 pendingAmount, bool isBuyOrder) private view returns (FeeContext memory feeContext) {
-        ICCLiquidity liquidityContract = ICCLiquidity(ICCListing(listingAddress).liquidityAddressView());
-        (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
-        (, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, isBuyOrder);
-        uint256 liquidityAmount = isBuyOrder ? yLiquid : xLiquid;
-        uint256 normalizedPending = normalize(pendingAmount, tokenDecimals);
-        uint256 normalizedLiquidity = normalize(liquidityAmount, tokenDecimals);
-        uint256 feePercent = normalizedLiquidity > 0 ? (normalizedPending * 1e18) / normalizedLiquidity : 1e18;
-        feePercent = feePercent > 1e18 ? 1e18 : feePercent;
-        feeContext.feeAmount = (pendingAmount * feePercent) / 1e20;
-        feeContext.netAmount = pendingAmount - feeContext.feeAmount;
-        feeContext.liquidityAmount = liquidityAmount;
-        feeContext.decimals = tokenDecimals;
-    }
+    ICCLiquidity liquidityContract = ICCLiquidity(ICCListing(listingAddress).liquidityAddressView());
+    (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
+    (, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, isBuyOrder);
+    uint256 liquidityAmount = isBuyOrder ? yLiquid : xLiquid;
+    uint256 normalizedPending = normalize(pendingAmount, tokenDecimals);
+    uint256 normalizedLiquidity = normalize(liquidityAmount, tokenDecimals);
+    uint256 feePercent = normalizedLiquidity > 0 ? (normalizedPending * 1e18) / normalizedLiquidity : 1e18;
+    feePercent = feePercent < 1e14 ? 1e14 : feePercent > 1e18 ? 1e18 : feePercent; // 0.01% min, 10% max
+    feeContext.feeAmount = (pendingAmount * feePercent) / 1e18;
+    feeContext.netAmount = pendingAmount - feeContext.feeAmount;
+    feeContext.liquidityAmount = liquidityAmount;
+    feeContext.decimals = tokenDecimals;
+}
 
     function _computeSwapAmount(address listingAddress, FeeContext memory feeContext, bool isBuyOrder) private view returns (LiquidityUpdateContext memory context) {
         context.pendingAmount = feeContext.netAmount;
