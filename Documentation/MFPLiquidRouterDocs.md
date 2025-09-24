@@ -61,10 +61,15 @@ Formulas in `MFPLiquidPartial.sol` (v0.1.4) govern settlement and price impact c
    - **Used in**: `_computeImpactPrice`, `_fetchOrderData`, `_updateLiquidity`, `_computeResult`, `_processSingleOrder`, `_prepareLiquidityUpdates`, `_computeFee`, `_executeOrderWithFees`.
    - **Description**: Ensures 18-decimal precision for calculations, reverting to native decimals for transfers.
 
-6. **Fee Calculation**:
-   - **Formula**: `feePercent = (normalizedSent / normalizedLiquidity) * 1e18`, clamped between 0.01% (1e14) and 10% (1e18); `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
-   - **Used in**: `_computeFee`, `_executeOrderWithFees`, `_prepareLiquidityUpdates`.
-   - **Description**: Calculates fee based on `amountSent` usage (`xLiquid` for sell, `yLiquid` for buy). At 83.33% usage (`normalizedSent = 100`, `normalizedLiquidity = 120`), `feePercent = 8.33%` (0.8333e18).
+6.  **Fee Calculation**:
+    * **Formula**:
+        * `usagePercent = (normalize(amountOut, decimalsOut) * 1e18) / normalize(outputLiquidity, decimalsOut)`.
+        * `feePercent = usagePercent / 10`.
+        * `feePercent = max(1e14, min(1e17, feePercent))` (clamped between 0.01% and 10%).
+        * `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
+    * **Used in**: `_computeFee` (called by `_processSingleOrder` → `_executeOrderWithFees`).
+    * **Description**: A dynamic fee is calculated based on the usage of the **output** liquidity pool (i.e., `xLiquid` for buys, `yLiquid` for sells). The fee percentage is **one-tenth** of the liquidity usage percentage, clamped between a **0.01% minimum** and a **10% maximum**. This incentivizes liquidity providers by scaling fees with slippage. For example, if an order requires `amountSent` of 100 from an available `outputLiquidity` of 120, the usage is 83.33%, resulting in an 8.333% fee.
+    * **Usage**: The `feeAmount` is deducted from the user's input (`pendingAmount`) before the swap calculation. The fee is then added to the corresponding fee pool (`yFees` for buys, `xFees` for sells).
 
 7. **Liquidity Updates**:
    - **Formula**:
