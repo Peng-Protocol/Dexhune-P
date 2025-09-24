@@ -1,11 +1,11 @@
 # MFPLiquidRouter Contract Documentation
 
 ## Overview
-The `MFPLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `ICCLiquidity`, inheriting `MFPLiquidPartial`. It integrates with `ICCListing`, `ICCLiquidity`, and `IERC20`. Removes Uniswap V2 functionality, using impact price calculation: `impactPercentage = settlementAmount / xBalance`, adjusting price as `currentPrice * (1 ± impactPercentage)` (plus for buys, minus for sells). Features a fee system (0.01% min, 10% max based on liquidity usage), user-specific settlement via `makerPendingOrdersView`, and gas-efficient iteration with `step`. Uses `ReentrancyGuard` for security. Fees are transferred with `pendingAmount` and recorded in `xFees`/`yFees`. Liquidity updates: for buy orders, `pendingAmount` increases `yLiquid`, `amountOut` decreases `xLiquid`; for sell orders, `pendingAmount` increases `xLiquid`, `amountOut` decreases `yLiquid`.
+The `MFPLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `ICCLiquidity`, inheriting `MFPLiquidPartial`. It integrates with `ICCListing`, `ICCLiquidity`, and `IERC20`. Removes Uniswap V2 functionality, using impact price calculation: `impactPercentage = settlementAmount / xBalance`, adjusting price as `currentPrice * (1 ± impactPercentage)` (plus for buys, minus for sells). Features a fee system (0.01% min, 10% max based on `amountSent` usage), user-specific settlement via `makerPendingOrdersView`, and gas-efficient iteration with `step`. Uses `ReentrancyGuard` for security. Fees are transferred with `pendingAmount` and recorded in `xFees`/`yFees`. Liquidity updates: for buy orders, `pendingAmount` increases `yLiquid`, `amountOut` decreases `xLiquid`; for sell orders, `pendingAmount` increases `xLiquid`, `amountOut` decreases `yLiquid`.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.3 (updated 2025-09-24)
+**Version:** 0.1.4 (updated 2025-09-24)
 
 **Inheritance Tree:** `MFPLiquidRouter` → `MFPLiquidPartial` (v0.1.4) → `CCMainPartial` (v0.1.5)
 
@@ -62,9 +62,9 @@ Formulas in `MFPLiquidPartial.sol` (v0.1.4) govern settlement and price impact c
    - **Description**: Ensures 18-decimal precision for calculations, reverting to native decimals for transfers.
 
 6. **Fee Calculation**:
-   - **Formula**: `feePercent = (normalizedPending / normalizedLiquidity) * 1e18`, clamped between 0.01% (1e14) and 10% (1e18); `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
+   - **Formula**: `feePercent = (normalizedSent / normalizedLiquidity) * 1e18`, clamped between 0.01% (1e14) and 10% (1e18); `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
    - **Used in**: `_computeFee`, `_executeOrderWithFees`, `_prepareLiquidityUpdates`.
-   - **Description**: Calculates fee based on liquidity usage (`xLiquid` for sell, `yLiquid` for buy). At 100% usage (`normalizedPending == normalizedLiquidity`), `feePercent = 10%` (1e18).
+   - **Description**: Calculates fee based on `amountSent` usage (`xLiquid` for sell, `yLiquid` for buy). At 83.33% usage (`normalizedSent = 100`, `normalizedLiquidity = 120`), `feePercent = 8.33%` (0.8333e18).
 
 7. **Liquidity Updates**:
    - **Formula**:
@@ -136,7 +136,7 @@ Formulas in `MFPLiquidPartial.sol` (v0.1.4) govern settlement and price impact c
 - **_computeImpactPrice**: Calculates price impact as `currentPrice * (1 ± settlementAmount/xBalance)` and `amountOut` based on `currentPrice`.
 - **_getTokenAndDecimals**: Retrieves token address and decimals.
 - **_validateOrderPricing**: Validates prices, emits `PriceOutOfBounds`.
-- **_computeFee**: Calculates `feeAmount`, `netAmount` based on liquidity usage (0.01% min, 10% max).
+- **_computeFee**: Calculates `feeAmount`, `netAmount` based on `amountSent` usage (0.01% min, 10% max).
 - **_computeSwapAmount**: Computes `amountOut` for liquidity updates.
 - **_toSingleUpdateArray**: Converts single update to array for `ICCLiquidity.ccUpdate`.
 - **_prepareLiquidityUpdates**: Transfers `pendingAmount` (via `transactToken` for ERC20, `transactNative` for ETH), updates `xLiquid`, `yLiquid`, `xFees`/`yFees` via `ICCLiquidity.ccUpdate`, reverts on critical failures.

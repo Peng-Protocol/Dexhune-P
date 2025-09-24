@@ -432,9 +432,10 @@ function _prepSellOrderUpdate(
     (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
     (, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, isBuyOrder);
     uint256 liquidityAmount = isBuyOrder ? yLiquid : xLiquid;
-    uint256 normalizedPending = normalize(pendingAmount, tokenDecimals);
+    (, uint256 amountSent) = _computeImpactPrice(listingAddress, pendingAmount, isBuyOrder);
+    uint256 normalizedSent = normalize(amountSent, tokenDecimals);
     uint256 normalizedLiquidity = normalize(liquidityAmount, tokenDecimals);
-    uint256 feePercent = normalizedLiquidity > 0 ? (normalizedPending * 1e18) / normalizedLiquidity : 1e18;
+    uint256 feePercent = normalizedLiquidity > 0 ? (normalizedSent * 1e18) / normalizedLiquidity : 1e18;
     feePercent = feePercent < 1e14 ? 1e14 : feePercent > 1e18 ? 1e18 : feePercent; // 0.01% min, 10% max
     feeContext.feeAmount = (pendingAmount * feePercent) / 1e18;
     feeContext.netAmount = pendingAmount - feeContext.feeAmount;
