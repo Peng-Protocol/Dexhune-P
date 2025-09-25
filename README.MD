@@ -183,7 +183,7 @@ As seen in `CCListingTemplate`.
 Handles order settlement for `MFPListingTemplate` using direct transfers.
 
 ## Key Interactions
-- **Order Settlement**: Iterates over pending orders using `pendingBuyOrdersView`/`pendingSellOrdersView`. Processes in batches with `step` and `maxIterations` (e.g., orders [2,22,23,24,30], `step`=2, `maxIterations`=3 processes 22,23,24).
+- **Order Settlement**: Iterates over pending orders using `pendingBuyOrdersView`/`pendingSellOrdersView`. Processes in batches with `step` and `maxIterations` (e.g., orders [2,22,23,24,30], `step`=1 (zero based indexing), `maxIterations`=3 processes 22,23,24).
 - **Order Validation**: Ensures non-zero pending amounts and status (1 or 2) in `_validateOrder`.
 - **Balance Handling**: Uses `transactToken`/`transactNative` for transfers, checking post-transfer balances.
 - **Update Application**: Applies updates via `ccUpdate` with `BuyOrderUpdate`/`SellOrderUpdate` structs. Updates `pending`, `filled`, `amountSent`, and `status` (2 for partial, 3 for filled) via `ccUpdate`.
@@ -199,7 +199,7 @@ As seen in `MFPListingTemplate` and `CCLiquidityTemplate`.
 
 ## Key Interactions
 - **Liquid Settlement**: Uses liquidity balances to settle active or pending orders, restricts settlement using impact price (as seen in `MFPSettlementRouter`) for consistency. 
-- **Pagination**: Limits processing up to `maxIterations` orders starting from `step`. E.g; if a pending orders array has (5) orders, "2,22,23,24,30", the user or frontend specifies a `step` "2" and `maxIterations` "3" this limits processing to orders "22,23,24". 
+- **Pagination**: Limits processing up to `maxIterations` orders starting from `step`. E.g; if a pending orders array has (5) orders, "2,22,23,24,30", the user or frontend specifies a `step` "1" (zero based indexing)and `maxIterations` "3" this limits processing to orders "22,23,24". 
 - **Fee Handling**: Deducts fees (between 0.01% to 10% depending on how much of the liquidity balance was used, e.g 83% usage will charge 8.3% in fees). Records fees in `CCLiquidityTemplate` using `ccUpdate`. 
 - **Liquidity Updates**: Transfers principal to liquidity contract and adjusts `xLiquid`/`yLiquid` using normalized amounts (1e18 decimals) to ensure consistency.
 - **Historical Data**: Creates `HistoricalUpdate` entries before processing orders, capturing current `volumeBalances` and `prices(0)` from `MFPListingTemplate` for accurate tracking.
@@ -213,7 +213,7 @@ As seen in `MFPListingTemplate` and `CCLiquidityTemplate`.
 3. **Invalid Pricing**: If the order's pricing (`impactPrice`) is outside `maxPrice`/`minPrice`, it emits a `PriceOutOfBounds` event, skips the order, and continues processing others, ensuring batch operations proceed.
 4. **Zero Pending Amount**: If an order's `pendingAmount` is zero, `_processOrderBatch` skips it without reverting, continuing to the next order.
 
-- **Null Impact**: Because all orders settled using `MFPLiquidRouter` transfer principal from the listing template to the liquidity template ; they have no long term impact on price. The original order creation momentarily increases/reduces the price but once settled using `x/yLiquid` the price increase/reduction is completely negated. 
+- **Null Impact**: Because all orders settled using `MFPLiquidRouter` transfer principal from the listing template to the liquidity template ; they have no long term impact on price. The original order creation momentarily increases/reduces the price but once settled using `x/yLiquid` the price increase/reduction  is completely negated. 
 
 # CCLiquidityRouter
 
@@ -228,4 +228,3 @@ As seen in `CCListingTemplate` and `CCLiquidityTemplate`.
 - **Depositor Changes**: Allows the original depositor to transfer ownership of their slot. 
 - **Slot Creation**: Each deposit uses a unique slot, old slots cannot be reused. 
 - **Security**: Uses `onlyValidListing` modifier for listing validation via `CCAgent` `isValidListing`. Employs `nonReentrant` to prevent reentrancy attacks. Failures trigger events for graceful degradation.
-
