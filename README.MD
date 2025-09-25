@@ -213,7 +213,7 @@ As seen in `MFPListingTemplate` and `CCLiquidityTemplate`.
 3. **Invalid Pricing**: If the order's pricing (`impactPrice`) is outside `maxPrice`/`minPrice`, it emits a `PriceOutOfBounds` event, skips the order, and continues processing others, ensuring batch operations proceed.
 4. **Zero Pending Amount**: If an order's `pendingAmount` is zero, `_processOrderBatch` skips it without reverting, continuing to the next order.
 
-- **Null Impact**: Because all orders settled using `MFPLiquidRouter` transfer principal from the listing template to the liquidity template ; they have no long term impact on price. The original order creation momentarily increases the price but once settled using `x/yLiquid` the price increase is completely negated. 
+- **Null Impact**: Because all orders settled using `MFPLiquidRouter` transfer principal from the listing template to the liquidity template ; they have no long term impact on price. The original order creation momentarily increases/reduces the price but once settled using `x/yLiquid` the price increase/reduction is completely negated. 
 
 # CCLiquidityRouter
 
@@ -228,3 +228,4 @@ As seen in `CCListingTemplate` and `CCLiquidityTemplate`.
 - **Depositor Changes**: Allows the original depositor to transfer ownership of their slot. 
 - **Slot Creation**: Each deposit uses a unique slot, old slots cannot be reused. 
 - **Security**: Uses `onlyValidListing` modifier for listing validation via `CCAgent` `isValidListing`. Employs `nonReentrant` to prevent reentrancy attacks. Failures trigger events for graceful degradation.
+
