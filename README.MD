@@ -205,12 +205,15 @@ As seen in `MFPListingTemplate` and `CCLiquidityTemplate`.
 - **Historical Data**: Creates `HistoricalUpdate` entries before processing orders, capturing current `volumeBalances` and `prices(0)` from `MFPListingTemplate` for accurate tracking.
 - **Security**: Uses `nonReentrant` modifier to prevent reentrancy. Validates listings via `onlyValidListing` modifier.
 - **Full Settlement**: Only Executes full settlement of pending or active orders, can settle orders that were previously partially settled but does not create partial settlement. 
-- *Listing Balances**: The `volumeBalances` function in `MFPListingTemplate` is used  to check available token balances (`xBalance`, `yBalance`) before settling orders. It ensures sufficient balances exists to process buy/sell orders without reverting due to insufficient funds. For buy orders, it verifies `yBalance` (TokenB) is adequate for the principal; for sell orders, it checks `xBalance` (TokenA). 
-- *Graceful Degradation**: The system avoids reverts for non-critical failures. Such as;
+- **Listing Balances**: The `volumeBalances` function in `MFPListingTemplate` is used  to check available token balances (`xBalance`, `yBalance`) before settling orders. It ensures sufficient balances exist to process buy/sell orders without reverting due to insufficient funds. For buy orders, it verifies `yBalance` (TokenB) is adequate for the principal; for sell orders, it checks `xBalance` (TokenA). 
+
+- **Graceful Degradation**: The system avoids reverts for non-critical failures. Such as;
 1. **No Pending Orders**: If `makerPendingOrdersView` returns an empty array or `step` exceeds the array length, the contract emits a `NoPendingOrders` event and returns without reverting.
 2. **Insufficient Liquidity**: If `volumeBalances` indicates zero `xBalance` (for sell orders) or `yBalance` (for buy orders), it emits an `InsufficientBalance` event and exits without processing, avoiding a revert.
 3. **Invalid Pricing**: If the order's pricing (`impactPrice`) is outside `maxPrice`/`minPrice`, it emits a `PriceOutOfBounds` event, skips the order, and continues processing others, ensuring batch operations proceed.
 4. **Zero Pending Amount**: If an order's `pendingAmount` is zero, `_processOrderBatch` skips it without reverting, continuing to the next order.
+
+- **Null Impact**: Because all orders settled using `MFPLiquidRouter` transfer principal from the listing template to the liquidity template ; they have no long term impact on price. The original order creation momentarily increases the price but once settled using `x/yLiquid` the price increase is completely negated. 
 
 # CCLiquidityRouter
 
