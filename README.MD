@@ -6,7 +6,7 @@ Dexhune-P is an Automated Market Maker (AMM) x Orderbook Hybrid, the system allo
 The name **Marker Foundry** is derived from the  fictional setting of Dead Space™ where "Markers" are sources of unlimited energy but at a dark cost. In the far flung future, mankind, in desperation, replicates these markers, fulfilling a cosmic evolutionary cycle.  
 
 ## System Summary
-Dexhune-P operates via `MFPAgent` or `OMFAgent` to deploy `MFPListingTemplate` or `OMFListingTemplate` and `CCLiquidityTemplate` contracts for unique token pairs. `MFPListingTemplate` or `OMFListingTemplate` serve as the order book, enabling order creation, cancellation, and settlement via `CCOrderRouter`, `MFPSettlementRouter`, and `MFPLiquidRouter`. It uses the relative presence of `TokenB / TokenA` for pricing (inverted calculation on OMF based on oracle prices), enables partial fills, tracking historical data and balances. `CCLiquidityTemplate` enables deposits, withdrawals, fee claims, and payouts, storing liquidity details and slot data. `CCLiquidityRouter` handles deposits, partial withdrawals with compensation, and fee calculations, while `MFPLiquidRouter` settles orders using liquidity balances, charging up to 1% fees. `CCGlobalizer` and `TokenRegistry` ensure cross-contract order and balance consistency. Pagination (`maxIterations`, `step`) optimizes queries, and relisting supports system upgrades.
+Dexhune-P operates via `MFPAgent` or `OMFAgent` to deploy `MFPListingTemplate` or `OMFListingTemplate` and `CCLiquidityTemplate` contracts for unique token pairs. `MFPListingTemplate` or `OMFListingTemplate` serve as the order book, enabling order creation, cancellation, and settlement via `CCOrderRouter`, `MFPSettlementRouter`, and `MFPLiquidRouter`. It uses the relative presence of `TokenB / TokenA` for pricing (inverted calculation on OMF based on oracle prices), enables partial fills, tracking historical data and balances. `CCLiquidityTemplate` enables deposits, withdrawals, fee claims, and payouts, storing liquidity details and slot data. `CCLiquidityRouter` handles deposits, partial withdrawals with compensation, and fee calculations, while `MFPLiquidRouter` settles orders using liquidity balances, charging between 0.01% and 10% in fees (regular settlement has zero fees). `CCGlobalizer` and `TokenRegistry` ensure cross-contract order and balance consistency. Pagination (`maxIterations`, `step`) optimizes queries, and relisting supports system upgrades.
 
 # MFPAgent
 
@@ -67,7 +67,7 @@ The `MFPListingTemplate` contract (Solidity ^0.8.2) serves as the central order 
 
 - **MFPSettlementRouter**: Settles orders using listing template balances, respects order max/min price bounds with partial fills, accounts for slippage. Fetches pending orders using; (`pendingBuyOrdersView`, `pendingSellOrdersView`) and updates order states via `ccUpdate`. 
 
-- **MFPLiquidRouter**: Settles only the caller's buy/sell orders using liquidity balances (charges a fee up to 1% depending on liquidity usage), transfers principal to liquidity template and updates liquid balances (`xLiquid`, `yLiquid`). 
+- **MFPLiquidRouter**: Settles only the caller's buy/sell orders using liquidity balances (charges a fee between 0.01% and 10% depending on liquidity usage), transfers principal to liquidity template and updates liquid balances (`xLiquid`, `yLiquid`). 
 Only uses listing template for fetching liquidity address via orders via `liquidityAddressView`, fetches orders using `makerPendingOrdersView` and updates order states via `ccUpdate` and transfers principal via `transactToken` or `transactNative`.
 
 - **CCLiquidityRouter**: Manages deposits - withdrawals - fee claims - and depositor changes on liquidity contract, only uses `liquidityAddressView` on listing template. 
@@ -183,7 +183,7 @@ As seen in `CCListingTemplate`.
 Handles order settlement for `MFPListingTemplate` using direct transfers.
 
 ## Key Interactions
-- **Order Settlement**: Iterates over pending orders using `pendingBuyOrdersView`/`pendingSellOrdersView`. Processes in batches with `step` and `maxIterations` (e.g., orders [2,22,23,24,30], `step`=2, `maxIterations`=3 processes 22,23,24).
+- **Order Settlement**: Iterates over pending orders using `pendingBuyOrdersView`/`pendingSellOrdersView`. Processes in batches with `step` and `maxIterations` (e.g., orders [2,22,23,24,30], `step`=1 (zero based indexing), `maxIterations`=3 processes 22,23,24).
 - **Order Validation**: Ensures non-zero pending amounts and status (1 or 2) in `_validateOrder`.
 - **Balance Handling**: Uses `transactToken`/`transactNative` for transfers, checking post-transfer balances.
 - **Update Application**: Applies updates via `ccUpdate` with `BuyOrderUpdate`/`SellOrderUpdate` structs. Updates `pending`, `filled`, `amountSent`, and `status` (2 for partial, 3 for filled) via `ccUpdate`.
@@ -199,18 +199,21 @@ As seen in `MFPListingTemplate` and `CCLiquidityTemplate`.
 
 ## Key Interactions
 - **Liquid Settlement**: Uses liquidity balances to settle active or pending orders, restricts settlement using impact price (as seen in `MFPSettlementRouter`) for consistency. 
-- **Pagination**: Limits processing up to `maxIterations` orders starting from `step`. E.g; if a pending orders array has (5) orders, "2,22,23,24,30", the user or frontend specifies a `step` "2" and `maxIterations` "3" this limits processing to orders "22,23,24". 
-- **Fee Handling**: Deducts fees (up to 1% if 100% of a liquidity balance is used). Records fees in `CCLiquidityTemplate` using `ccUpdate`. 
+- **Pagination**: Limits processing up to `maxIterations` orders starting from `step`. E.g; if a pending orders array has (5) orders, "2,22,23,24,30", the user or frontend specifies a `step` "1" (zero based indexing)and `maxIterations` "3" this limits processing to orders "22,23,24". 
+- **Fee Handling**: Deducts fees (between 0.01% to 10% depending on how much of the liquidity balance was used, e.g 83% usage will charge 8.3% in fees). Records fees in `CCLiquidityTemplate` using `ccUpdate`. 
 - **Liquidity Updates**: Transfers principal to liquidity contract and adjusts `xLiquid`/`yLiquid` using normalized amounts (1e18 decimals) to ensure consistency.
 - **Historical Data**: Creates `HistoricalUpdate` entries before processing orders, capturing current `volumeBalances` and `prices(0)` from `MFPListingTemplate` for accurate tracking.
 - **Security**: Uses `nonReentrant` modifier to prevent reentrancy. Validates listings via `onlyValidListing` modifier.
 - **Full Settlement**: Only Executes full settlement of pending or active orders, can settle orders that were previously partially settled but does not create partial settlement. 
-- *Listing Balances**: The `volumeBalances` function in `MFPListingTemplate` is used  to check available token balances (`xBalance`, `yBalance`) before settling orders. It ensures sufficient balances exists to process buy/sell orders without reverting due to insufficient funds. For buy orders, it verifies `yBalance` (TokenB) is adequate for the principal; for sell orders, it checks `xBalance` (TokenA). 
-- *Graceful Degradation**: The system avoids reverts for non-critical failures. Such as;
+- **Listing Balances**: The `volumeBalances` function in `MFPListingTemplate` is used  to check available token balances (`xBalance`, `yBalance`) before settling orders. It ensures sufficient balances exist to process buy/sell orders without reverting due to insufficient funds. For buy orders, it verifies `yBalance` (TokenB) is adequate for the principal; for sell orders, it checks `xBalance` (TokenA). 
+
+- **Graceful Degradation**: The system avoids reverts for non-critical failures. Such as;
 1. **No Pending Orders**: If `makerPendingOrdersView` returns an empty array or `step` exceeds the array length, the contract emits a `NoPendingOrders` event and returns without reverting.
 2. **Insufficient Liquidity**: If `volumeBalances` indicates zero `xBalance` (for sell orders) or `yBalance` (for buy orders), it emits an `InsufficientBalance` event and exits without processing, avoiding a revert.
 3. **Invalid Pricing**: If the order's pricing (`impactPrice`) is outside `maxPrice`/`minPrice`, it emits a `PriceOutOfBounds` event, skips the order, and continues processing others, ensuring batch operations proceed.
 4. **Zero Pending Amount**: If an order's `pendingAmount` is zero, `_processOrderBatch` skips it without reverting, continuing to the next order.
+
+- **Null Impact**: Because all orders settled using `MFPLiquidRouter` transfer principal from the listing template to the liquidity template ; they have no long term impact on price. The original order creation momentarily increases/reduces the price but once settled using `x/yLiquid` the price increase/reduction  is completely negated. 
 
 # CCLiquidityRouter
 
