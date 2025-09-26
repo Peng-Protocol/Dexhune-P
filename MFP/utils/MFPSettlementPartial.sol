@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.1
+// Version: 0.1.2
 // Changes:
+// - v0.1.2: Implemented non-reverting behavior for _validateOrderParams and _checkPricing, emitting OrderFailed event instead of reverting. Updated _executeOrderSwap to correctly calculate amountSent using pre/post balance checks. Modified _prepareUpdateData to set status based on pending amount after update (status = 3 if pending <= 0). 
 // - v0.1.1: Updated validation to check status >= 1 && < 3, accumulate filled and amountSent
 // - v0.1.0: Initial implementation, removes Uniswap V2 logic from CCSettlementPartial.sol. Implements direct transfer settlement with impact price and partial settlement logic per instructions. Includes uint2str for error messages. Compatible with CCListingTemplate.sol (v0.3.9), CCMainPartial.sol (v0.1.5), MFPSettlementRouter.sol (v0.1.0).
 
@@ -42,6 +43,8 @@ contract MFPSettlementPartial is CCMainPartial {
         ICCListing.SellOrderUpdate[] sellUpdates;
     }
 
+event OrderFailed(uint256 indexed orderId, string reason);
+
     function uint2str(uint256 _i) internal pure returns (string memory str) {
         // Converts uint to string for error messages
         if (_i == 0) return "0";
@@ -66,8 +69,8 @@ contract MFPSettlementPartial is CCMainPartial {
         uint256 orderIdentifier,
         bool isBuyOrder,
         uint256 pendingAmount
-    ) internal view returns (bool) {
-        // Validates order pricing and computes impact price
+    ) internal returns (bool) {
+        // Validates pricing, emits event on failure instead of reverting
         ICCListing listingContract = ICCListing(listingAddress);
         uint256 maxPrice;
         uint256 minPrice;
@@ -78,21 +81,21 @@ contract MFPSettlementPartial is CCMainPartial {
         }
         uint256 currentPrice = listingContract.prices(0);
         if (currentPrice == 0) {
-            revert("Invalid current price");
+            emit OrderFailed(orderIdentifier, "Invalid current price");
+            return false;
         }
         (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
         uint256 settlementBalance = isBuyOrder ? yBalance : xBalance;
         if (settlementBalance == 0) {
-            revert("Zero balance for settlement");
+            emit OrderFailed(orderIdentifier, "Zero balance for settlement");
+            return false;
         }
         uint256 impact = (pendingAmount * 1e18) / settlementBalance;
         uint256 impactPrice = isBuyOrder
             ? (currentPrice * (1e18 + impact)) / 1e18
             : (currentPrice * (1e18 - impact)) / 1e18;
-        if (isBuyOrder && impactPrice > maxPrice) {
-            return false;
-        }
-        if (!isBuyOrder && impactPrice < minPrice) {
+        if (isBuyOrder && impactPrice > maxPrice || !isBuyOrder && impactPrice < minPrice) {
+            emit OrderFailed(orderIdentifier, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderIdentifier))));
             return false;
         }
         return true;
@@ -110,29 +113,29 @@ contract MFPSettlementPartial is CCMainPartial {
     }
 
     function _validateOrderParams(
-    address listingAddress,
-    uint256 orderId,
-    bool isBuyOrder,
-    ICCListing listingContract
-) internal view returns (OrderProcessContext memory context) {
-    context.orderId = orderId;
-    (context.pendingAmount, context.filled, context.amountSent) = isBuyOrder
-        ? listingContract.getBuyOrderAmounts(orderId)
-        : listingContract.getSellOrderAmounts(orderId);
-    (context.makerAddress, context.recipientAddress, context.status) = isBuyOrder
-        ? listingContract.getBuyOrderCore(orderId)
-        : listingContract.getSellOrderCore(orderId);
-    (context.maxPrice, context.minPrice) = isBuyOrder
-        ? listingContract.getBuyOrderPricing(orderId)
-        : listingContract.getSellOrderPricing(orderId);
-    context.currentPrice = listingContract.prices(0);
-    if (context.pendingAmount == 0 || context.status < 1 || context.status >= 3) {
-        revert(string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
+        address listingAddress,
+        uint256 orderId,
+        bool isBuyOrder,
+        ICCListing listingContract
+    ) internal returns (OrderProcessContext memory context, bool isValid) {
+        // Validates order params, returns context and validity flag
+        context.orderId = orderId;
+        (context.pendingAmount, context.filled, context.amountSent) = isBuyOrder
+            ? listingContract.getBuyOrderAmounts(orderId)
+            : listingContract.getSellOrderAmounts(orderId);
+        (context.makerAddress, context.recipientAddress, context.status) = isBuyOrder
+            ? listingContract.getBuyOrderCore(orderId)
+            : listingContract.getSellOrderCore(orderId);
+        (context.maxPrice, context.minPrice) = isBuyOrder
+            ? listingContract.getBuyOrderPricing(orderId)
+            : listingContract.getSellOrderPricing(orderId);
+        context.currentPrice = listingContract.prices(0);
+        if (context.pendingAmount == 0 || context.status < 1 || context.status >= 3 || context.currentPrice == 0) {
+            emit OrderFailed(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount, status, or price")));
+            return (context, false);
+        }
+        return (context, true);
     }
-    if (context.currentPrice == 0) {
-        revert(string(abi.encodePacked("Invalid current price for order ", uint2str(orderId))));
-    }
-}
 
     function _computeSwapAmount(
         address listingAddress,
@@ -169,34 +172,36 @@ contract MFPSettlementPartial is CCMainPartial {
     }
 
     function _executeOrderSwap(
-    address listingAddress,
-    bool isBuyOrder,
-    OrderProcessContext memory context,
-    ICCListing listingContract
-) internal returns (OrderProcessContext memory) {
-    // Executes direct transfer from listing template
-    address tokenToSend = isBuyOrder ? listingContract.tokenA() : listingContract.tokenB();
-    uint8 decimals = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
-    uint256 amountToSend = denormalize(context.swapAmount, decimals);
-    uint256 preBalance = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend);
-    if (tokenToSend == address(0)) {
-        try listingContract.transactNative{value: amountToSend}(amountToSend, context.recipientAddress) {
-            context.amountSent = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend) - preBalance;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Native transfer failed for order ", uint2str(context.orderId), ": ", reason)));
+        address listingAddress,
+        bool isBuyOrder,
+        OrderProcessContext memory context,
+        ICCListing listingContract
+    ) internal returns (OrderProcessContext memory) {
+        // Executes swap with accurate pre/post balance checks
+        address tokenToSend = isBuyOrder ? listingContract.tokenA() : listingContract.tokenB();
+        uint8 decimals = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
+        uint256 amountToSend = denormalize(context.swapAmount, decimals);
+        uint256 preBalance = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend);
+        if (tokenToSend == address(0)) {
+            try listingContract.transactNative{value: amountToSend}(amountToSend, context.recipientAddress) {
+                context.amountSent = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend) - preBalance;
+            } catch Error(string memory reason) {
+                emit OrderFailed(context.orderId, string(abi.encodePacked("Native transfer failed for order ", uint2str(context.orderId), ": ", reason)));
+                context.amountSent = 0;
+            }
+        } else {
+            try listingContract.transactToken(tokenToSend, amountToSend, context.recipientAddress) {
+                context.amountSent = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend) - preBalance;
+            } catch Error(string memory reason) {
+                emit OrderFailed(context.orderId, string(abi.encodePacked("Token transfer failed for order ", uint2str(context.orderId), ": ", reason)));
+                context.amountSent = 0;
+            }
         }
-    } else {
-        try listingContract.transactToken(tokenToSend, amountToSend, context.recipientAddress) {
-            context.amountSent = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend) - preBalance;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Token transfer failed for order ", uint2str(context.orderId), ": ", reason)));
+        if (context.amountSent == 0) {
+            emit OrderFailed(context.orderId, string(abi.encodePacked("No tokens sent for order ", uint2str(context.orderId))));
         }
+        return context;
     }
-    if (context.amountSent == 0) {
-        revert(string(abi.encodePacked("No tokens sent for order ", uint2str(context.orderId))));
-    }
-    return context;
-}
 
     function _extractPendingAmount(
         OrderProcessContext memory context,
@@ -278,73 +283,74 @@ contract MFPSettlementPartial is CCMainPartial {
     }
 
     function _prepareUpdateData(
-    OrderProcessContext memory context,
-    bool isBuyOrder
-) internal pure returns (
-    ICCListing.BuyOrderUpdate[] memory buyUpdates,
-    ICCListing.SellOrderUpdate[] memory sellUpdates
-) {
-    uint256 pendingAmount = _extractPendingAmount(context, isBuyOrder);
-    uint256 newFilled = context.filled + context.swapAmount; // Accumulate filled
-    uint256 newAmountSent = context.amountSent + context.swapAmount; // Accumulate amountSent
-    if (isBuyOrder) {
-        buyUpdates = new ICCListing.BuyOrderUpdate[](2);
-        uint256 newPending = pendingAmount - context.swapAmount;
-        buyUpdates[0] = ICCListing.BuyOrderUpdate({
-            structId: 2,
-            orderId: context.orderId,
-            makerAddress: context.makerAddress,
-            recipientAddress: context.recipientAddress,
-            status: context.status,
-            maxPrice: 0,
-            minPrice: 0,
-            pending: newPending,
-            filled: newFilled,
-            amountSent: newAmountSent
-        });
-        buyUpdates[1] = ICCListing.BuyOrderUpdate({
-            structId: 0,
-            orderId: context.orderId,
-            makerAddress: context.makerAddress,
-            recipientAddress: context.recipientAddress,
-            status: newPending == 0 ? 3 : 2,
-            maxPrice: 0,
-            minPrice: 0,
-            pending: 0,
-            filled: 0,
-            amountSent: 0
-        });
-        sellUpdates = new ICCListing.SellOrderUpdate[](0);
-    } else {
-        sellUpdates = new ICCListing.SellOrderUpdate[](2);
-        uint256 newPending = pendingAmount - context.swapAmount;
-        sellUpdates[0] = ICCListing.SellOrderUpdate({
-            structId: 2,
-            orderId: context.orderId,
-            makerAddress: context.makerAddress,
-            recipientAddress: context.recipientAddress,
-            status: context.status,
-            maxPrice: 0,
-            minPrice: 0,
-            pending: newPending,
-            filled: newFilled,
-            amountSent: newAmountSent
-        });
-        sellUpdates[1] = ICCListing.SellOrderUpdate({
-            structId: 0,
-            orderId: context.orderId,
-            makerAddress: context.makerAddress,
-            recipientAddress: context.recipientAddress,
-            status: newPending == 0 ? 3 : 2,
-            maxPrice: 0,
-            minPrice: 0,
-            pending: 0,
-            filled: 0,
-            amountSent: 0
-        });
-        buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+        OrderProcessContext memory context,
+        bool isBuyOrder
+    ) internal pure returns (
+        ICCListing.BuyOrderUpdate[] memory buyUpdates,
+        ICCListing.SellOrderUpdate[] memory sellUpdates
+    ) {
+        // Prepares update data, sets status based on pending amount
+        uint256 pendingAmount = _extractPendingAmount(context, isBuyOrder);
+        uint256 newPending = pendingAmount > context.swapAmount ? pendingAmount - context.swapAmount : 0;
+        uint256 newFilled = context.filled + context.swapAmount;
+        uint256 newAmountSent = context.amountSent; // Use actual amount sent from swap
+        uint8 newStatus = newPending == 0 ? 3 : 2;
+        if (isBuyOrder) {
+            buyUpdates = new ICCListing.BuyOrderUpdate[](2);
+            buyUpdates[0] = ICCListing.BuyOrderUpdate({
+                structId: 2,
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: context.status,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: newPending,
+                filled: newFilled,
+                amountSent: newAmountSent
+            });
+            buyUpdates[1] = ICCListing.BuyOrderUpdate({
+                structId: 0,
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: newStatus,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: 0,
+                filled: 0,
+                amountSent: 0
+            });
+            sellUpdates = new ICCListing.SellOrderUpdate[](0);
+        } else {
+            sellUpdates = new ICCListing.SellOrderUpdate[](2);
+            sellUpdates[0] = ICCListing.SellOrderUpdate({
+                structId: 2,
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: context.status,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: newPending,
+                filled: newFilled,
+                amountSent: newAmountSent
+            });
+            sellUpdates[1] = ICCListing.SellOrderUpdate({
+                structId: 0,
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: newStatus,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: 0,
+                filled: 0,
+                amountSent: 0
+            });
+            buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+        }
     }
-}
 
     function _applyOrderUpdate(
         address listingAddress,
@@ -367,7 +373,12 @@ contract MFPSettlementPartial is CCMainPartial {
         ICCListing listingContract,
         SettlementContext memory settlementContext
     ) internal returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
-        OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, true, listingContract);
+        // Processes buy order, skips invalid orders
+        (OrderProcessContext memory context, bool isValid) = _validateOrderParams(listingAddress, orderIdentifier, true, listingContract);
+        if (!isValid) {
+            emit OrderFailed(orderIdentifier, "Invalid buy order parameters");
+            return new ICCListing.BuyOrderUpdate[](0);
+        }
         context = _computeSwapAmount(listingAddress, true, context, settlementContext);
         (buyUpdates, ) = _applyOrderUpdate(listingAddress, listingContract, context, true);
         return buyUpdates;
@@ -379,7 +390,12 @@ contract MFPSettlementPartial is CCMainPartial {
         ICCListing listingContract,
         SettlementContext memory settlementContext
     ) internal returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
-        OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, false, listingContract);
+        // Processes sell order, skips invalid orders
+        (OrderProcessContext memory context, bool isValid) = _validateOrderParams(listingAddress, orderIdentifier, false, listingContract);
+        if (!isValid) {
+            emit OrderFailed(orderIdentifier, "Invalid sell order parameters");
+            return new ICCListing.SellOrderUpdate[](0);
+        }
         context = _computeSwapAmount(listingAddress, false, context, settlementContext);
         (, sellUpdates) = _applyOrderUpdate(listingAddress, listingContract, context, false);
         return sellUpdates;

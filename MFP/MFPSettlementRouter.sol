@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.1
+// Version: 0.1.2
 // Changes:
+// - v0.1.2: Updated _validateOrder to return (OrderContext, bool) instead of reverting, emitting OrderFailed event for invalid orders. Changed visibility to pure as _checkPricing modifies state.
 // - v0.1.1: Updated validation to check status >= 1 && < 3
 // - v0.1.0: Initial implementation, replaces Uniswap V2 with direct transfers from listing template. Added impact price and partial settlement logic per instructions. Compatible with CCListingTemplate.sol (v0.3.9), CCMainPartial.sol (v0.1.5), MFPSettlementPartial.sol (v0.1.0).
 
@@ -17,21 +18,25 @@ contract MFPSettlementRouter is MFPSettlementPartial {
     }
 
     function _validateOrder(
-    address listingAddress,
-    uint256 orderId,
-    bool isBuyOrder,
-    ICCListing listingContract
-) internal view returns (OrderContext memory context) {
-    context.orderId = orderId;
-    (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
-    (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
-    if (context.pending == 0 || context.status < 1 || context.status >= 3) {
-        revert(string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
+        address listingAddress,
+        uint256 orderId,
+        bool isBuyOrder,
+        ICCListing listingContract
+    ) internal returns (OrderContext memory context, bool isValid) {
+        // Validates order, returns context and validity flag without reverting
+        context.orderId = orderId;
+        (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
+        (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
+        if (context.pending == 0 || context.status < 1 || context.status >= 3) {
+            emit OrderFailed(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
+            return (context, false);
+        }
+        if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
+            emit OrderFailed(orderId, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
+            return (context, false);
+        }
+        return (context, true);
     }
-    if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
-        revert(string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
-    }
-}
 
     function _processOrder(
         address listingAddress,
@@ -134,14 +139,17 @@ contract MFPSettlementRouter is MFPSettlementPartial {
         ICCListing listingContract,
         SettlementContext memory settlementContext
     ) private returns (uint256 count) {
-        // Processes batch of orders
+        // Processes batch of orders, skips invalid orders, reverts on critical failures
         count = 0;
         for (uint256 i = state.step; i < orderIds.length && count < state.maxIterations; i++) {
-            OrderContext memory context = _validateOrder(state.listingAddress, orderIds[i], state.isBuyOrder, listingContract);
+            (OrderContext memory context, bool isValid) = _validateOrder(state.listingAddress, orderIds[i], state.isBuyOrder, listingContract);
+            if (!isValid) {
+                continue;
+            }
             context = _processOrder(state.listingAddress, state.isBuyOrder, listingContract, context, settlementContext);
             (bool success, string memory updateReason) = _updateOrder(listingContract, context, state.isBuyOrder);
             if (!success && bytes(updateReason).length > 0) {
-                revert(updateReason);
+                revert(string(abi.encodePacked("Critical ccUpdate failure: ", updateReason)));
             }
             if (success) {
                 count++;
