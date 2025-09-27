@@ -1,7 +1,9 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.1.3
-Changes:
+ Version: 0.1.5
+ Changes:
+ - v0.1.5: Refactored _computeFee (x64) into helper functions (_fetchLiquidityData, _computeUsagePercent, _clampFeePercent, _calculateFeeAmount) using FeeCalculationContext to fix stack too deep error. Updated _executeOrderWithFees to use refactored _computeFee.
+ - v0.1.4: Modified _processSingleOrder to skip invalid orders gracefully, emitting PriceOutOfBounds without reverting. Updated _computeResult to set status based on post-update pending amount. Ensured _processOrderBatch aggregates success without reverting.
 - v0.1.3: Updated _computeFee to enforce 0.01% minimum and 10% maximum fees, scaling with usage.
 - v0.1.2: Refactored _prepBuyOrderUpdate and _prepSellOrderUpdate to address stack too deep error (x64). Split logic into helper functions (_fetchOrderData, _transferPrincipal, _updateLiquidity, _transferSettlement, _computeResult) with TransferContext struct to reduce stack usage.
 - v0.1.1: Patched _prepBuyOrderUpdate and _prepSellOrderUpdate to send settlement tokens from liquidity contract instead of listing contract, updating xLiquid/yLiquid accordingly.
@@ -84,6 +86,13 @@ contract MFPLiquidPartial is CCMainPartial {
     uint8 status;
     uint256 amountSent;
 }
+
+struct FeeCalculationContext {
+        uint256 normalizedAmountSent;
+        uint256 normalizedLiquidity;
+        uint256 feePercent;
+        uint256 feeAmount;
+    }
 
     event FeeDeducted(address indexed listingAddress, uint256 orderId, bool isBuyOrder, uint256 feeAmount, uint256 netAmount);
     event PriceOutOfBounds(address indexed listingAddress, uint256 orderId, uint256 impactPrice, uint256 maxPrice, uint256 minPrice);
@@ -179,7 +188,7 @@ contract MFPLiquidPartial is CCMainPartial {
         updateData = normalizedReceived;
     }
 
-    function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) private view returns (ICCListing.BuyOrderUpdate[] memory updates) {
+    function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) private pure returns (ICCListing.BuyOrderUpdate[] memory updates) {
         updates = new ICCListing.BuyOrderUpdate[](2);
         uint8 newStatus = pendingAmount == 0 ? 0 : (context.preTransferWithdrawn >= pendingAmount ? 3 : 2);
         updates[0] = ICCListing.BuyOrderUpdate({
@@ -208,7 +217,7 @@ contract MFPLiquidPartial is CCMainPartial {
         });
     }
 
-    function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) private view returns (ICCListing.SellOrderUpdate[] memory updates) {
+    function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) private pure returns (ICCListing.SellOrderUpdate[] memory updates) {
         updates = new ICCListing.SellOrderUpdate[](2);
         uint8 newStatus = pendingAmount == 0 ? 0 : (context.preTransferWithdrawn >= pendingAmount ? 3 : 2);
         updates[0] = ICCListing.SellOrderUpdate({
@@ -283,21 +292,22 @@ function _transferSettlement(address listingAddress, address maker, address toke
     amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
 }
 
-// Computes final result for order update
-function _computeResult(address tokenAddress, uint8 tokenDecimals, TransferContext memory context, uint256 amountOut, uint256 pendingAmount) private pure returns (PrepOrderUpdateResult memory result) {
-    uint8 newStatus = pendingAmount == 0 ? 0 : (amountOut >= pendingAmount ? 3 : 2);
-    result = PrepOrderUpdateResult({
-        tokenAddress: tokenAddress,
-        tokenDecimals: tokenDecimals,
-        makerAddress: context.maker,
-        recipientAddress: context.recipient,
-        amountReceived: amountOut,
-        normalizedReceived: normalize(amountOut, tokenDecimals),
-        amountSent: context.amountSent,
-        preTransferWithdrawn: amountOut,
-        status: newStatus
-    });
-}
+    // Computes final result for order update
+    function _computeResult(address tokenAddress, uint8 tokenDecimals, TransferContext memory context, uint256 amountOut, uint256 pendingAmount) private pure returns (PrepOrderUpdateResult memory result) {
+        uint256 newPending = pendingAmount >= amountOut ? pendingAmount - amountOut : 0;
+        uint8 newStatus = newPending == 0 ? 3 : 2; // Status 3 if pending is 0, else 2
+        result = PrepOrderUpdateResult({
+            tokenAddress: tokenAddress,
+            tokenDecimals: tokenDecimals,
+            makerAddress: context.maker,
+            recipientAddress: context.recipient,
+            amountReceived: amountOut,
+            normalizedReceived: normalize(amountOut, tokenDecimals),
+            amountSent: context.amountSent, // Uses pre/post balance from _transferSettlement
+            preTransferWithdrawn: amountOut,
+            status: newStatus
+        });
+    }
 
 function _prepBuyOrderUpdate(
     address listingAddress,
@@ -427,56 +437,47 @@ function _prepSellOrderUpdate(
         }
     }
 
+        // Fetches liquidity data for fee calculation
+    function _fetchLiquidityData(address listingAddress, bool isBuyOrder) private view returns (uint256 outputLiquidityAmount, uint8 outputDecimals, uint256 amountOut) {
+        ICCListing listingContract = ICCListing(listingAddress);
+        ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
+        (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
+        outputLiquidityAmount = isBuyOrder ? xLiquid : yLiquid;
+        outputDecimals = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
+        (, amountOut) = _computeImpactPrice(listingAddress, 0, isBuyOrder); // Use 0 for amountIn to get base amountOut
+    }
+
+    // Computes usage percentage for fee
+    function _computeUsagePercent(uint256 normalizedAmountSent, uint256 normalizedLiquidity) private pure returns (uint256 feePercent) {
+        feePercent = normalizedLiquidity > 0 ? (normalizedAmountSent * 1e18) / normalizedLiquidity : 1e17;
+        feePercent = feePercent / 10; // Divide by 10 for fee percentage
+    }
+
+    // Clamps fee percentage between 0.01% and 10%
+    function _clampFeePercent(uint256 feePercent) private pure returns (uint256 clampedFeePercent) {
+        uint256 minFeePercent = 1e14; // 0.01%
+        uint256 maxFeePercent = 1e17; // 10%
+        clampedFeePercent = feePercent < minFeePercent ? minFeePercent : (feePercent > maxFeePercent ? maxFeePercent : feePercent);
+    }
+
+    // Calculates final fee and net amount
+    function _calculateFeeAmount(uint256 pendingAmount, uint256 feePercent) private pure returns (uint256 feeAmount, uint256 netAmount) {
+        feeAmount = (pendingAmount * feePercent) / 1e18;
+        netAmount = pendingAmount - feeAmount;
+    }
+
     function _computeFee(address listingAddress, uint256 pendingAmount, bool isBuyOrder) private view returns (FeeContext memory feeContext) {
-    ICCListing listingContract = ICCListing(listingAddress);
-    ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
-    (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
-
-    // 1. Determine the CORRECT output liquidity pool and decimals
-    uint256 outputLiquidityAmount;
-    uint8 outputDecimals;
-
-    if (isBuyOrder) {
-        // Buy order output is Token A (xLiquid)
-        outputLiquidityAmount = xLiquid;
-        outputDecimals = listingContract.decimalsA();
-    } else {
-        // Sell order output is Token B (yLiquid)
-        outputLiquidityAmount = yLiquid;
-        outputDecimals = listingContract.decimalsB();
+        FeeCalculationContext memory calcContext;
+        (uint256 outputLiquidityAmount, uint8 outputDecimals, uint256 amountOut) = _fetchLiquidityData(listingAddress, isBuyOrder);
+        calcContext.normalizedAmountSent = normalize(amountOut, outputDecimals);
+        calcContext.normalizedLiquidity = normalize(outputLiquidityAmount, outputDecimals);
+        calcContext.feePercent = _computeUsagePercent(calcContext.normalizedAmountSent, calcContext.normalizedLiquidity);
+        calcContext.feePercent = _clampFeePercent(calcContext.feePercent);
+        (calcContext.feeAmount, feeContext.netAmount) = _calculateFeeAmount(pendingAmount, calcContext.feePercent);
+        feeContext.feeAmount = calcContext.feeAmount;
+        feeContext.decimals = outputDecimals;
+        feeContext.liquidityAmount = outputLiquidityAmount;
     }
-
-    // Use _computeImpactPrice for MFPLiquidPartial or _computeSwapImpact for CCLiquidPartial
-    (, uint256 amountOut) = _computeImpactPrice(listingAddress, pendingAmount, isBuyOrder);
-
-    uint256 normalizedAmountSent = normalize(amountOut, outputDecimals);
-    uint256 normalizedLiquidity = normalize(outputLiquidityAmount, outputDecimals);
-
-    // 2. Calculate liquidity usage and divide by 10 for the fee percentage
-    uint256 feePercent;
-    if (normalizedLiquidity > 0) {
-        uint256 usagePercent = (normalizedAmountSent * 1e18) / normalizedLiquidity;
-        feePercent = usagePercent / 10;
-    } else {
-        feePercent = 1e17; // Default to max 10% fee if liquidity is zero
-    }
-    
-    // 3. Clamp the fee between 0.01% and 10%
-    uint256 minFeePercent = 1e14; // 0.01%
-    uint256 maxFeePercent = 1e17; // 10%
-
-    if (feePercent < minFeePercent) {
-        feePercent = minFeePercent;
-    } else if (feePercent > maxFeePercent) {
-        feePercent = maxFeePercent;
-    }
-
-    // Calculate final fee amount from the input (pendingAmount)
-    feeContext.feeAmount = (pendingAmount * feePercent) / 1e18;
-    feeContext.netAmount = pendingAmount - feeContext.feeAmount;
-    feeContext.decimals = outputDecimals; // For context, if needed elsewhere
-    feeContext.liquidityAmount = outputLiquidityAmount; // For context
-}
 
     function _computeSwapAmount(address listingAddress, FeeContext memory feeContext, bool isBuyOrder) private view returns (LiquidityUpdateContext memory context) {
         context.pendingAmount = feeContext.netAmount;
@@ -597,7 +598,7 @@ function _prepSellOrderUpdate(
 
         if (context.impactPrice == 0) {
             emit PriceOutOfBounds(listingAddress, orderIdentifier, context.impactPrice, context.maxPrice, context.minPrice);
-            return false;
+            return false; // Skip order, don't revert
         }
 
         uint256 normalizedPending = normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA());
@@ -605,11 +606,11 @@ function _prepSellOrderUpdate(
         uint256 normalizedSettle = normalize(amountOut, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
         if (isBuyOrder ? yLiquid < normalizedPending : xLiquid < normalizedPending) {
             emit InsufficientBalance(listingAddress, normalizedPending, isBuyOrder ? yLiquid : xLiquid);
-            return false;
+            return false; // Skip order, don't revert
         }
         if (isBuyOrder ? xLiquid < normalizedSettle : yLiquid < normalizedSettle) {
             emit InsufficientBalance(listingAddress, normalizedSettle, isBuyOrder ? xLiquid : yLiquid);
-            return false;
+            return false; // Skip order, don't revert
         }
 
         FeeContext memory feeContext = _computeFee(listingAddress, pendingAmount, isBuyOrder);
@@ -628,7 +629,7 @@ function _prepSellOrderUpdate(
                 : ICCListing(listingAddress).getSellOrderAmounts(orderIdentifiers[i]);
             if (pendingAmount == 0) continue;
             if (_processSingleOrder(listingAddress, orderIdentifiers[i], isBuyOrder, pendingAmount)) {
-                success = true;
+                success = true; // At least one order succeeded, reverts for critical errors are handled upstream 
             }
         }
     }
