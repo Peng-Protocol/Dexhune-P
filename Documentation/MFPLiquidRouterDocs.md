@@ -183,3 +183,13 @@ Checks exact principal amount transferred from `CCLlistingTemplate` to `CCLiquid
 - `step` must be <= length of pending orders.
 - `amountSent` accumulates total tokens sent across settlements.
 - Historical data created at start of settlement if orders exist, updated with current `xVolume`, `yVolume` in `_executeOrderWithFees`.
+
+### Critical vs Non-Critical Issues
+The system is designed to revert for critical errors in liquid settlement process, but skip an order with error emisson if minor issues are found. 
+- **Critical Errors**: 
+  - **Invalid Listing or Configuration:** The `onlyValidListing` call at `MFPAgent` must pass. `Agent` must be set.
+  - **Failed Liquidity or Fee Updates:** The `_prepareLiquidityUpdates` function uses try/catch and reverts on `ccUpdate` call failure. 
+  - **Failed Token Transfers:** The `_prepareLiquidityUpdates` function will revert if the `transactToken/Native` call fails. 
+- **Non-Critical Errors**: 
+  - **Invalid Pricing:** The `_processSingleOrder` function checks if the order's impact price exceeds its max/min prices, it emits a `PriceOutOfBounds` event, returns false and stops processing the order. 
+  - **Insufficient Liquidity:** If there is insufficient liquidity (xLiquid or yLiquid) for an order, processing for it will stop and the `InsufficientBalance` event will be emitted.
