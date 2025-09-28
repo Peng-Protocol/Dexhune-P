@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.2
+// Version: 0.1.3
 // Changes:
+// - v0.1.3: Modified _executeOrderSwap to revert on transfer failure instead of setting amountSent to 0, ensuring batch halts and no updates occur if transfer fails. This prevents overwriting prior amountSent values. Renamed "OrderFailed" to "OrderSkipped".
 // - v0.1.2: Implemented non-reverting behavior for _validateOrderParams and _checkPricing, emitting OrderFailed event instead of reverting. Updated _executeOrderSwap to correctly calculate amountSent using pre/post balance checks. Modified _prepareUpdateData to set status based on pending amount after update (status = 3 if pending <= 0). 
 // - v0.1.1: Updated validation to check status >= 1 && < 3, accumulate filled and amountSent
 // - v0.1.0: Initial implementation, removes Uniswap V2 logic from CCSettlementPartial.sol. Implements direct transfer settlement with impact price and partial settlement logic per instructions. Includes uint2str for error messages. Compatible with CCListingTemplate.sol (v0.3.9), CCMainPartial.sol (v0.1.5), MFPSettlementRouter.sol (v0.1.0).
@@ -43,7 +44,7 @@ contract MFPSettlementPartial is CCMainPartial {
         ICCListing.SellOrderUpdate[] sellUpdates;
     }
 
-event OrderFailed(uint256 indexed orderId, string reason);
+event OrderSkipped(uint256 indexed orderId, string reason);
 
     function uint2str(uint256 _i) internal pure returns (string memory str) {
         // Converts uint to string for error messages
@@ -81,13 +82,13 @@ event OrderFailed(uint256 indexed orderId, string reason);
         }
         uint256 currentPrice = listingContract.prices(0);
         if (currentPrice == 0) {
-            emit OrderFailed(orderIdentifier, "Invalid current price");
+            emit OrderSkipped(orderIdentifier, "Invalid current price");
             return false;
         }
         (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
         uint256 settlementBalance = isBuyOrder ? yBalance : xBalance;
         if (settlementBalance == 0) {
-            emit OrderFailed(orderIdentifier, "Zero balance for settlement");
+            emit OrderSkipped(orderIdentifier, "Zero balance for settlement");
             return false;
         }
         uint256 impact = (pendingAmount * 1e18) / settlementBalance;
@@ -95,7 +96,7 @@ event OrderFailed(uint256 indexed orderId, string reason);
             ? (currentPrice * (1e18 + impact)) / 1e18
             : (currentPrice * (1e18 - impact)) / 1e18;
         if (isBuyOrder && impactPrice > maxPrice || !isBuyOrder && impactPrice < minPrice) {
-            emit OrderFailed(orderIdentifier, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderIdentifier))));
+            emit OrderSkipped(orderIdentifier, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderIdentifier))));
             return false;
         }
         return true;
@@ -131,7 +132,7 @@ event OrderFailed(uint256 indexed orderId, string reason);
             : listingContract.getSellOrderPricing(orderId);
         context.currentPrice = listingContract.prices(0);
         if (context.pendingAmount == 0 || context.status < 1 || context.status >= 3 || context.currentPrice == 0) {
-            emit OrderFailed(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount, status, or price")));
+            emit OrderSkipped(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount, status, or price")));
             return (context, false);
         }
         return (context, true);
@@ -177,7 +178,7 @@ event OrderFailed(uint256 indexed orderId, string reason);
         OrderProcessContext memory context,
         ICCListing listingContract
     ) internal returns (OrderProcessContext memory) {
-        // Executes swap with accurate pre/post balance checks
+        // Executes swap with accurate pre/post balance checks, reverts on transfer failure
         address tokenToSend = isBuyOrder ? listingContract.tokenA() : listingContract.tokenB();
         uint8 decimals = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
         uint256 amountToSend = denormalize(context.swapAmount, decimals);
@@ -186,19 +187,14 @@ event OrderFailed(uint256 indexed orderId, string reason);
             try listingContract.transactNative{value: amountToSend}(amountToSend, context.recipientAddress) {
                 context.amountSent = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend) - preBalance;
             } catch Error(string memory reason) {
-                emit OrderFailed(context.orderId, string(abi.encodePacked("Native transfer failed for order ", uint2str(context.orderId), ": ", reason)));
-                context.amountSent = 0;
+                revert(string(abi.encodePacked("Native transfer failed for order ", uint2str(context.orderId), ": ", reason)));
             }
         } else {
             try listingContract.transactToken(tokenToSend, amountToSend, context.recipientAddress) {
                 context.amountSent = _computeAmountSent(tokenToSend, context.recipientAddress, amountToSend) - preBalance;
             } catch Error(string memory reason) {
-                emit OrderFailed(context.orderId, string(abi.encodePacked("Token transfer failed for order ", uint2str(context.orderId), ": ", reason)));
-                context.amountSent = 0;
+                revert(string(abi.encodePacked("Token transfer failed for order ", uint2str(context.orderId), ": ", reason)));
             }
-        }
-        if (context.amountSent == 0) {
-            emit OrderFailed(context.orderId, string(abi.encodePacked("No tokens sent for order ", uint2str(context.orderId))));
         }
         return context;
     }
@@ -376,7 +372,7 @@ event OrderFailed(uint256 indexed orderId, string reason);
         // Processes buy order, skips invalid orders
         (OrderProcessContext memory context, bool isValid) = _validateOrderParams(listingAddress, orderIdentifier, true, listingContract);
         if (!isValid) {
-            emit OrderFailed(orderIdentifier, "Invalid buy order parameters");
+            emit OrderSkipped(orderIdentifier, "Invalid buy order parameters");
             return new ICCListing.BuyOrderUpdate[](0);
         }
         context = _computeSwapAmount(listingAddress, true, context, settlementContext);
@@ -393,7 +389,7 @@ event OrderFailed(uint256 indexed orderId, string reason);
         // Processes sell order, skips invalid orders
         (OrderProcessContext memory context, bool isValid) = _validateOrderParams(listingAddress, orderIdentifier, false, listingContract);
         if (!isValid) {
-            emit OrderFailed(orderIdentifier, "Invalid sell order parameters");
+            emit OrderSkipped(orderIdentifier, "Invalid sell order parameters");
             return new ICCListing.SellOrderUpdate[](0);
         }
         context = _computeSwapAmount(listingAddress, false, context, settlementContext);

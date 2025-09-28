@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.2
+// Version: 0.1.3
 // Changes:
+// - v0.1.3: Modified _executeOrderSwap to revert on transfer failure instead of setting amountSent to 0, ensuring batch halts and no updates occur if transfer fails. This prevents overwriting prior amountSent values. Renamed "OrderFailed" to "OrderSkipped".
 // - v0.1.2: Updated _validateOrder to return (OrderContext, bool) instead of reverting, emitting OrderFailed event for invalid orders. Changed visibility to pure as _checkPricing modifies state.
 // - v0.1.1: Updated validation to check status >= 1 && < 3
 // - v0.1.0: Initial implementation, replaces Uniswap V2 with direct transfers from listing template. Added impact price and partial settlement logic per instructions. Compatible with CCListingTemplate.sol (v0.3.9), CCMainPartial.sol (v0.1.5), MFPSettlementPartial.sol (v0.1.0).
@@ -28,11 +29,11 @@ contract MFPSettlementRouter is MFPSettlementPartial {
         (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
         (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
         if (context.pending == 0 || context.status < 1 || context.status >= 3) {
-            emit OrderFailed(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
+            emit OrderSkipped(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
             return (context, false);
         }
         if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
-            emit OrderFailed(orderId, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
+            emit OrderSkipped(orderId, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
             return (context, false);
         }
         return (context, true);
