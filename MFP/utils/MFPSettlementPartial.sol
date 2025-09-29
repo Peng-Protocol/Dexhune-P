@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.3
+// Version: 0.1.4
 // Changes:
+// - v0.1.4: Updated _prepareUpdateData to accumulate amountSent by adding context.amountSent to prior context.amountSent, ensuring no overwrite of prior values (29/9).
 // - v0.1.3: Modified _executeOrderSwap to revert on transfer failure instead of setting amountSent to 0, ensuring batch halts and no updates occur if transfer fails. This prevents overwriting prior amountSent values. Renamed "OrderFailed" to "OrderSkipped".
 // - v0.1.2: Implemented non-reverting behavior for _validateOrderParams and _checkPricing, emitting OrderFailed event instead of reverting. Updated _executeOrderSwap to correctly calculate amountSent using pre/post balance checks. Modified _prepareUpdateData to set status based on pending amount after update (status = 3 if pending <= 0). 
 // - v0.1.1: Updated validation to check status >= 1 && < 3, accumulate filled and amountSent
@@ -279,74 +280,74 @@ event OrderSkipped(uint256 indexed orderId, string reason);
     }
 
     function _prepareUpdateData(
-        OrderProcessContext memory context,
-        bool isBuyOrder
-    ) internal pure returns (
-        ICCListing.BuyOrderUpdate[] memory buyUpdates,
-        ICCListing.SellOrderUpdate[] memory sellUpdates
-    ) {
-        // Prepares update data, sets status based on pending amount
-        uint256 pendingAmount = _extractPendingAmount(context, isBuyOrder);
-        uint256 newPending = pendingAmount > context.swapAmount ? pendingAmount - context.swapAmount : 0;
-        uint256 newFilled = context.filled + context.swapAmount;
-        uint256 newAmountSent = context.amountSent; // Use actual amount sent from swap
-        uint8 newStatus = newPending == 0 ? 3 : 2;
-        if (isBuyOrder) {
-            buyUpdates = new ICCListing.BuyOrderUpdate[](2);
-            buyUpdates[0] = ICCListing.BuyOrderUpdate({
-                structId: 2,
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: context.status,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: newPending,
-                filled: newFilled,
-                amountSent: newAmountSent
-            });
-            buyUpdates[1] = ICCListing.BuyOrderUpdate({
-                structId: 0,
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: newStatus,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: 0,
-                filled: 0,
-                amountSent: 0
-            });
-            sellUpdates = new ICCListing.SellOrderUpdate[](0);
-        } else {
-            sellUpdates = new ICCListing.SellOrderUpdate[](2);
-            sellUpdates[0] = ICCListing.SellOrderUpdate({
-                structId: 2,
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: context.status,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: newPending,
-                filled: newFilled,
-                amountSent: newAmountSent
-            });
-            sellUpdates[1] = ICCListing.SellOrderUpdate({
-                structId: 0,
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: newStatus,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: 0,
-                filled: 0,
-                amountSent: 0
-            });
-            buyUpdates = new ICCListing.BuyOrderUpdate[](0);
-        }
+    OrderProcessContext memory context,
+    bool isBuyOrder
+) internal pure returns (
+    ICCListing.BuyOrderUpdate[] memory buyUpdates,
+    ICCListing.SellOrderUpdate[] memory sellUpdates
+) {
+    // Prepares update data, sets status based on pending amount, accumulates amountSent
+    uint256 pendingAmount = _extractPendingAmount(context, isBuyOrder);
+    uint256 newPending = pendingAmount > context.swapAmount ? pendingAmount - context.swapAmount : 0;
+    uint256 newFilled = context.filled + context.swapAmount;
+    uint256 newAmountSent = context.amountSent + context.amountSent; // Accumulate prior amountSent
+    uint8 newStatus = newPending == 0 ? 3 : 2;
+    if (isBuyOrder) {
+        buyUpdates = new ICCListing.BuyOrderUpdate[](2);
+        buyUpdates[0] = ICCListing.BuyOrderUpdate({
+            structId: 2,
+            orderId: context.orderId,
+            makerAddress: context.makerAddress,
+            recipientAddress: context.recipientAddress,
+            status: context.status,
+            maxPrice: 0,
+            minPrice: 0,
+            pending: newPending,
+            filled: newFilled,
+            amountSent: newAmountSent
+        });
+        buyUpdates[1] = ICCListing.BuyOrderUpdate({
+            structId: 0,
+            orderId: context.orderId,
+            makerAddress: context.makerAddress,
+            recipientAddress: context.recipientAddress,
+            status: newStatus,
+            maxPrice: 0,
+            minPrice: 0,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
+        sellUpdates = new ICCListing.SellOrderUpdate[](0);
+    } else {
+        sellUpdates = new ICCListing.SellOrderUpdate[](2);
+        sellUpdates[0] = ICCListing.SellOrderUpdate({
+            structId: 2,
+            orderId: context.orderId,
+            makerAddress: context.makerAddress,
+            recipientAddress: context.recipientAddress,
+            status: context.status,
+            maxPrice: 0,
+            minPrice: 0,
+            pending: newPending,
+            filled: newFilled,
+            amountSent: newAmountSent
+        });
+        sellUpdates[1] = ICCListing.SellOrderUpdate({
+            structId: 0,
+            orderId: context.orderId,
+            makerAddress: context.makerAddress,
+            recipientAddress: context.recipientAddress,
+            status: newStatus,
+            maxPrice: 0,
+            minPrice: 0,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
+        buyUpdates = new ICCListing.BuyOrderUpdate[](0);
     }
+}
 
     function _applyOrderUpdate(
         address listingAddress,
