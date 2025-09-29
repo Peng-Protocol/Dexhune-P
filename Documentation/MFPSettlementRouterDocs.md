@@ -5,17 +5,18 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.4 (updated 2025-09-30)
+**Version:** 0.1.5 (updated 2025-09-29)
 
 **Inheritance Tree:** `MFPSettlementRouter` → `MFPSettlementPartial` → `CCMainPartial`
 
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.3.9)
 - `CCMainPartial.sol` (v0.1.5)
-- `MFPSettlementPartial.sol` (v0.1.4)
+- `MFPSettlementPartial.sol` (v0.1.5)
 
 ### Changes
-- **v0.1.4 (30/09)**: Updated `_prepareUpdateData` in `MFPSettlementPartial` to accumulate `amountSent` by adding prior `amountSent` from context, aligning with `CCUniPartial` v0.1.23 fix.
+- **v0.1.5**: Redid 0.1.4, adjusted `_executeOrderSwap` and `_prepareUpdateData` (29/9).
+- **v0.1.4**: Updated `_prepareUpdateData` in `MFPSettlementPartial` to accumulate `amountSent` by adding prior `amountSent` from context, aligning with `CCUniPartial` v0.1.23 fix.
 - **v0.1.3**: Renamed `OrderFailed` event to `OrderSkipped`. Updated `_executeOrderSwap` to revert on transfer failure, ensuring batch halts and prior `amountSent` is preserved.
 - **v0.1.2**: Updated `_processOrderBatch` to handle dual return values (`context`, `isValid`) from `_validateOrder`, skipping invalid orders with `OrderSkipped`. Ensured reverts only on critical `ccUpdate` failures.
 - **v0.1.2**: Updated `_validateOrder` to emit `OrderSkipped` instead of reverting, changed to `pure`. Added non-reverting logic in `_validateOrderParams`, `_checkPricing`, `_executeOrderSwap`, and `_prepareUpdateData`. Corrected `amountSent` with pre/post balance checks and status updates based on pending amount.
