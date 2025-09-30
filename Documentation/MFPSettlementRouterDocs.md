@@ -5,7 +5,7 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.5 (updated 2025-09-29)
+**Version:** 0.1.4 (updated 2025-09-30)
 
 **Inheritance Tree:** `MFPSettlementRouter` → `MFPSettlementPartial` → `CCMainPartial`
 
@@ -15,8 +15,7 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 - `MFPSettlementPartial.sol` (v0.1.5)
 
 ### Changes
-- **v0.1.5**: Redid 0.1.4, adjusted `_executeOrderSwap` and `_prepareUpdateData` (29/9).
-- **v0.1.4**: Updated `_prepareUpdateData` in `MFPSettlementPartial` to accumulate `amountSent` by adding prior `amountSent` from context, aligning with `CCUniPartial` v0.1.23 fix.
+- **v0.1.4**: Modified `_validateOrder` to set `context.status = 0` when pricing fails. Updated `_processOrderBatch` to skip orders with `context.status == 0`, preventing silent failures (30/9).
 - **v0.1.3**: Renamed `OrderFailed` event to `OrderSkipped`. Updated `_executeOrderSwap` to revert on transfer failure, ensuring batch halts and prior `amountSent` is preserved.
 - **v0.1.2**: Updated `_processOrderBatch` to handle dual return values (`context`, `isValid`) from `_validateOrder`, skipping invalid orders with `OrderSkipped`. Ensured reverts only on critical `ccUpdate` failures.
 - **v0.1.2**: Updated `_validateOrder` to emit `OrderSkipped` instead of reverting, changed to `pure`. Added non-reverting logic in `_validateOrderParams`, `_checkPricing`, `_executeOrderSwap`, and `_prepareUpdateData`. Corrected `amountSent` with pre/post balance checks and status updates based on pending amount.
@@ -46,8 +45,8 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
   - **Internal Call Tree**:
     - `_initSettlement`: Fetches order IDs via `pendingBuyOrdersView` or `pendingSellOrdersView`, validates non-zero orders and step, reverts if invalid.
     - `_createHistoricalEntry`: Creates `HistoricalUpdate` using `volumeBalances`, `prices`, `historicalDataLengthView`, `getHistoricalDataView`, applies via `ccUpdate`, reverts on failure.
-    - `_processOrderBatch`: Iterates orders, calls `_validateOrder`, `_processOrder`, `_updateOrder`. Skips invalid orders with `OrderSkipped`, reverts on critical `ccUpdate` failures.
-    - `_validateOrder`: Fetches order data (`getBuyOrderAmounts` or `getSellOrderAmounts`, `getBuyOrderCore` or `getSellOrderCore`), checks `status >= 1 && < 3`, validates pricing via `_checkPricing`, emits `OrderSkipped` on failure.
+    - `_processOrderBatch`: Iterates orders, calls `_validateOrder`, `_processOrder`, `_updateOrder`. Skips invalid orders or `status == 0` with `OrderSkipped`, reverts on critical `ccUpdate` failures.
+    - `_validateOrder`: Fetches order data (`getBuyOrderAmounts` or `getSellOrderAmounts`, `getBuyOrderCore` or `getSellOrderCore`), checks `status >= 1 && < 3`, validates pricing via `_checkPricing`, sets `status = 0` on pricing failure, emits `OrderSkipped` on failure.
     - `_processOrder`: Delegates to `_processBuyOrder` or `_processSellOrder`.
     - `_processBuyOrder`: Validates via `_validateOrderParams`, computes swap amount via `_computeSwapAmount`, applies updates via `_applyOrderUpdate`, emits `OrderSkipped` for invalid orders.
     - `_processSellOrder`: Similar to `_processBuyOrder` for sell orders.
@@ -58,12 +57,12 @@ The `MFPSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilita
 
 ## Internal Functions
 ### MFPSettlementRouter
-- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → (OrderContext memory, bool isValid)**: Fetches order data, validates `status >= 1 && < 3` and pending amount, checks pricing, emits `OrderSkipped` on failure, returns `false` to skip.
+- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → (OrderContext memory, bool isValid)**: Fetches order data, validates `status >= 1 && < 3` and pending amount, checks pricing, sets `status = 0` on pricing failure, emits `OrderSkipped` on failure, returns `false` to skip.
 - **_processOrder(address listingAddress, bool isBuyOrder, ICCListing listingContract, OrderContext memory context, SettlementContext memory settlementContext) → OrderContext memory**: Delegates to `_processBuyOrder` or `_processSellOrder`.
 - **_updateOrder(ICCListing listingContract, OrderContext memory context, bool isBuyOrder) → (bool success, string memory reason)**: Applies updates via `ccUpdate`, reverts on critical failure, returns `false` for empty updates or non-critical failures.
 - **_initSettlement(address listingAddress, bool isBuyOrder, uint256 step, ICCListing listingContract) → (SettlementState memory state, uint256[] memory orderIds)**: Fetches order IDs, validates step, reverts if no orders or invalid step.
 - **_createHistoricalEntry(ICCListing listingContract) → ICCListing.HistoricalUpdate[] memory**: Logs historical data via `ccUpdate`, reverts on failure.
-- **_processOrderBatch(SettlementState memory state, uint256[] memory orderIds, ICCListing listingContract, SettlementContext memory settlementContext) → uint256 count**: Processes orders, skips invalid ones with `OrderSkipped`, reverts on critical `ccUpdate` failures.
+- **_processOrderBatch(SettlementState memory state, uint256[] memory orderIds, ICCListing listingContract, SettlementContext memory settlementContext) → uint256 count**: Processes orders, skips invalid ones or `status == 0` with `OrderSkipped`, reverts on critical `ccUpdate` failures.
 
 ### MFPSettlementPartial
 - **_checkPricing(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) → bool**: Validates pricing, computes impact price, emits `OrderSkipped` on zero balance/price or price out of bounds, returns `false` to skip.

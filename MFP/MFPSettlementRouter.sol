@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.3
+// Version: 0.1.4 (30/09)
 // Changes:
+// - v0.1.4 (30/09): Modified _validateOrder to set context.status = 0 when pricing fails. Updated _processOrderBatch to explicitly skip orders with context.status == 0 to prevent silent failures.
 // - v0.1.3: Modified _executeOrderSwap to revert on transfer failure instead of setting amountSent to 0, ensuring batch halts and no updates occur if transfer fails. This prevents overwriting prior amountSent values. Renamed "OrderFailed" to "OrderSkipped".
 // - v0.1.2: Updated _validateOrder to return (OrderContext, bool) instead of reverting, emitting OrderFailed event for invalid orders. Changed visibility to pure as _checkPricing modifies state.
 // - v0.1.1: Updated validation to check status >= 1 && < 3
@@ -19,25 +20,26 @@ contract MFPSettlementRouter is MFPSettlementPartial {
     }
 
     function _validateOrder(
-        address listingAddress,
-        uint256 orderId,
-        bool isBuyOrder,
-        ICCListing listingContract
-    ) internal returns (OrderContext memory context, bool isValid) {
-        // Validates order, returns context and validity flag without reverting
-        context.orderId = orderId;
-        (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
-        (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
-        if (context.pending == 0 || context.status < 1 || context.status >= 3) {
-            emit OrderSkipped(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
-            return (context, false);
-        }
-        if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
-            emit OrderSkipped(orderId, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
-            return (context, false);
-        }
-        return (context, true);
+    address listingAddress,
+    uint256 orderId,
+    bool isBuyOrder,
+    ICCListing listingContract
+) internal returns (OrderContext memory context, bool isValid) {
+    // Validates order, returns context and validity flag without reverting
+    context.orderId = orderId;
+    (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
+    (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
+    if (context.pending == 0 || context.status < 1 || context.status >= 3) {
+        emit OrderSkipped(orderId, string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
+        return (context, false);
     }
+    if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
+        context.status = 0; // Set status to cancelled for pricing failure
+        emit OrderSkipped(orderId, string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
+        return (context, false);
+    }
+    return (context, true);
+}
 
     function _processOrder(
         address listingAddress,
@@ -135,28 +137,28 @@ contract MFPSettlementRouter is MFPSettlementPartial {
     }
 
     function _processOrderBatch(
-        SettlementState memory state,
-        uint256[] memory orderIds,
-        ICCListing listingContract,
-        SettlementContext memory settlementContext
-    ) private returns (uint256 count) {
-        // Processes batch of orders, skips invalid orders, reverts on critical failures
-        count = 0;
-        for (uint256 i = state.step; i < orderIds.length && count < state.maxIterations; i++) {
-            (OrderContext memory context, bool isValid) = _validateOrder(state.listingAddress, orderIds[i], state.isBuyOrder, listingContract);
-            if (!isValid) {
-                continue;
-            }
-            context = _processOrder(state.listingAddress, state.isBuyOrder, listingContract, context, settlementContext);
-            (bool success, string memory updateReason) = _updateOrder(listingContract, context, state.isBuyOrder);
-            if (!success && bytes(updateReason).length > 0) {
-                revert(string(abi.encodePacked("Critical ccUpdate failure: ", updateReason)));
-            }
-            if (success) {
-                count++;
-            }
+    SettlementState memory state,
+    uint256[] memory orderIds,
+    ICCListing listingContract,
+    SettlementContext memory settlementContext
+) private returns (uint256 count) {
+    // Processes batch of orders, skips invalid orders, reverts on critical failures
+    count = 0;
+    for (uint256 i = state.step; i < orderIds.length && count < state.maxIterations; i++) {
+        (OrderContext memory context, bool isValid) = _validateOrder(state.listingAddress, orderIds[i], state.isBuyOrder, listingContract);
+        if (!isValid || context.status == 0) {
+            continue;
+        }
+        context = _processOrder(state.listingAddress, state.isBuyOrder, listingContract, context, settlementContext);
+        (bool success, string memory updateReason) = _updateOrder(listingContract, context, state.isBuyOrder);
+        if (!success && bytes(updateReason).length > 0) {
+            revert(string(abi.encodePacked("Critical ccUpdate failure: ", updateReason)));
+        }
+        if (success) {
+            count++;
         }
     }
+}
 
     function settleOrders(
         address listingAddress,
