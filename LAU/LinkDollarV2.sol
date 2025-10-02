@@ -1,6 +1,7 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-10-02: Removed ITokenRegistry interface, tokenRegistry state variable, setTokenRegistry function, TokenRegistryNotSet and TokenRegistryCallFailed events, and all related calls.
  - 2025-05-20: Added try-catch for initializeBalances in _transfer and dispense, added TokenRegistryCallFailed event.
  - 2025-05-20: Updated ITokenRegistry interface to use initializeBalances(address token, address[] memory users).
  - 2025-05-20: Renamed totalSupply to _totalSupply, balances to _balances, allowances to _allowances to resolve naming conflicts with ERC20 functions.
@@ -8,7 +9,7 @@
  - 2025-05-19: Added ETH transfer to feeClaimer in dispense, added EthTransferred event.
 */
 
-pragma solidity 0.8.2;
+pragma solidity ^0.8.2;
 
 interface IERC20 {
     function totalSupply() external view returns (uint256);
@@ -21,10 +22,6 @@ interface IERC20 {
 
 interface IOracle {
     function latestAnswer() external view returns (int256);
-}
-
-interface ITokenRegistry {
-    function initializeBalances(address token, address[] memory users) external;
 }
 
 contract LinkDollarV2 {
@@ -41,7 +38,6 @@ contract LinkDollarV2 {
     address public owner;
     address public oracleAddress;
     address public feeClaimer;
-    address public tokenRegistry;
     uint256 private contractBalance;
     bool private locked;
 
@@ -60,9 +56,6 @@ contract LinkDollarV2 {
     event RewardsDistributed(uint256 indexed cellIndex, uint256 amount);
     event OracleAddressSet(address indexed oracleAddress);
     event FeeClaimerSet(address indexed feeClaimer);
-    event TokenRegistrySet(address indexed tokenRegistry);
-    event TokenRegistryNotSet(address indexed token, address[] users);
-    event TokenRegistryCallFailed(address indexed token, address[] users);
     event EthTransferred(address indexed to, uint256 amount);
 
     // Modifiers
@@ -101,21 +94,6 @@ contract LinkDollarV2 {
 
         _mint(msg.sender, lusdAmount);
 
-        if (tokenRegistry != address(0)) {
-            address[] memory users = new address[](1);
-            users[0] = msg.sender;
-            try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
-                // Success, no action needed
-            } catch {
-                emit TokenRegistryCallFailed(address(this), users);
-                emit TokenRegistryNotSet(address(this), users);
-            }
-        } else {
-            address[] memory users = new address[](1);
-            users[0] = msg.sender;
-            emit TokenRegistryNotSet(address(this), users);
-        }
-
         // Transfer ETH to feeClaimer
         (bool success, ) = feeClaimer.call{value: msg.value}("");
         require(success, "ETH transfer failed");
@@ -153,12 +131,6 @@ contract LinkDollarV2 {
         require(_feeClaimer != address(0), "Invalid fee claimer");
         feeClaimer = _feeClaimer;
         emit FeeClaimerSet(_feeClaimer);
-    }
-
-    function setTokenRegistry(address _tokenRegistry) external onlyOwner {
-        require(_tokenRegistry != address(0), "Invalid token registry");
-        tokenRegistry = _tokenRegistry;
-        emit TokenRegistrySet(_tokenRegistry);
     }
 
     function getCell(uint256 cellIndex) external view returns (address[100] memory) {
@@ -280,23 +252,6 @@ contract LinkDollarV2 {
         _updateCells(from, _balances[from]);
         _updateCells(to, _balances[to]);
 
-        if (tokenRegistry != address(0)) {
-            address[] memory users = new address[](2);
-            users[0] = from;
-            users[1] = to;
-            try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
-                // Success, no action needed
-            } catch {
-                emit TokenRegistryCallFailed(address(this), users);
-                emit TokenRegistryNotSet(address(this), users);
-            }
-        } else {
-            address[] memory users = new address[](2);
-            users[0] = from;
-            users[1] = to;
-            emit TokenRegistryNotSet(address(this), users);
-        }
-
         emit Transfer(from, to, amountAfterFee);
         emit Transfer(from, address(this), fee);
 
@@ -389,8 +344,6 @@ contract LinkDollarV2 {
 
         contractBalance -= rewardAmount;
 
-        address[] memory rewardedUsers = new address[](CELL_SIZE);
-        uint256 rewardedCount = 0;
         for (uint256 i = 0; i < CELL_SIZE; i++) {
             address account = cells[selectedCell][i];
             if (account == address(0)) continue;
@@ -399,30 +352,7 @@ contract LinkDollarV2 {
             uint256 accountReward = (rewardAmount * accountBalance) / cellBalance;
             unchecked { _balances[account] += accountReward; }
             _updateCells(account, _balances[account]);
-            rewardedUsers[rewardedCount] = account;
-            rewardedCount++;
             emit Transfer(address(this), account, accountReward);
-        }
-
-        if (rewardedCount > 0) {
-            if (tokenRegistry != address(0)) {
-                address[] memory users = new address[](rewardedCount);
-                for (uint256 i = 0; i < rewardedCount; i++) {
-                    users[i] = rewardedUsers[i];
-                }
-                try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
-                    // Success, no action needed
-                } catch {
-                    emit TokenRegistryCallFailed(address(this), users);
-                    emit TokenRegistryNotSet(address(this), users);
-                }
-            } else {
-                address[] memory users = new address[](rewardedCount);
-                for (uint256 i = 0; i < rewardedCount; i++) {
-                    users[i] = rewardedUsers[i];
-                }
-                emit TokenRegistryNotSet(address(this), users);
-            }
         }
 
         cellCycle[selectedCell]++;

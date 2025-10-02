@@ -1,6 +1,8 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-10-02: Replaced setOracleAddress with setOracleAddresses to take [XAU/USD, ETH/USD] oracles. Updated dispense and getOraclePrice to calculate ETH/XAU price.
+ - 2025-10-02: Removed ITokenRegistry interface, tokenRegistry state variable, setTokenRegistry function, TokenRegistryNotSet and TokenRegistryCallFailed events, and all related calls.
  - 2025-08-11: Removed TokenRegistry updates from _distributeRewards, keeping them only in transfer/transferFrom and dispense.
  - 2025-08-11: Created LAU (Link Gold) from LUSD, changed name to "Link Gold", ticker to "LAU", removed transfer fee.
  - 2025-05-20: Added try-catch for initializeBalances in _transfer and dispense, added TokenRegistryCallFailed event.
@@ -22,11 +24,8 @@ interface IERC20 {
 }
 
 interface IOracle {
+    // Fetches price data for XAU/USD or ETH/USD (8 decimals)
     function latestAnswer() external view returns (int256 price);
-}
-
-interface ITokenRegistry {
-    function initializeBalances(address token, address[] memory users) external;
 }
 
 contract LinkGold {
@@ -41,9 +40,8 @@ contract LinkGold {
     uint256 private swapCount;
     uint256 public cellHeight;
     address public owner;
-    address public oracleAddress;
+    address[2] public oracleAddresses; // [0]: XAU/USD, [1]: ETH/USD
     address public feeClaimer;
-    address public tokenRegistry;
     uint256 private contractBalance;
     bool private locked;
 
@@ -59,11 +57,8 @@ contract LinkGold {
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event Dispense(address indexed recipient, address indexed feeClaimer, uint256 lauAmount);
     event RewardsDistributed(uint256 indexed cellIndex, uint256 amount);
-    event OracleAddressSet(address indexed oracleAddress);
+    event OracleAddressesSet(address indexed xauUsdOracle, address indexed ethUsdOracle);
     event FeeClaimerSet(address indexed feeClaimer);
-    event TokenRegistrySet(address indexed tokenRegistry);
-    event TokenRegistryNotSet(address indexed token, address[] users);
-    event TokenRegistryCallFailed(address indexed token, address[] users);
     event EthTransferred(address indexed to, uint256 amount);
 
     // Modifiers
@@ -91,34 +86,20 @@ contract LinkGold {
 
     // External functions
     function dispense() external payable nonReentrant {
-        // Validates ETH sent and oracle/feeClaimer setup
+        // Mints LAU based on ETH/XAU price using XAU/USD and ETH/USD oracles
         require(msg.value > 0, "No ETH sent");
-        require(oracleAddress != address(0), "Oracle not set");
+        require(oracleAddresses[0] != address(0) && oracleAddresses[1] != address(0), "Oracles not set");
         require(feeClaimer != address(0), "Fee claimer not set");
 
-        // Calculates LAU amount based on oracle price
-        int256 priceInt = IOracle(oracleAddress).latestAnswer();
-        require(priceInt > 0, "Invalid oracle price");
-        uint256 price = uint256(priceInt);
-        uint256 lauAmount = (msg.value * price) / 10**8;
+        int256 xauUsdPrice = IOracle(oracleAddresses[0]).latestAnswer();
+        int256 ethUsdPrice = IOracle(oracleAddresses[1]).latestAnswer();
+        require(xauUsdPrice > 0 && ethUsdPrice > 0, "Invalid oracle prices");
+        
+        // Calculate ETH/XAU: (ETH/USD ÷ XAU/USD) * 10^8 for precision
+        uint256 ethXauPrice = (uint256(ethUsdPrice) * 10**8) / uint256(xauUsdPrice);
+        uint256 lauAmount = (msg.value * ethXauPrice) / 10**8;
 
         _mint(msg.sender, lauAmount);
-
-        // Updates token registry if set
-        if (tokenRegistry != address(0)) {
-            address[] memory users = new address[](1);
-            users[0] = msg.sender;
-            try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
-                // Success, no action needed
-            } catch {
-                emit TokenRegistryCallFailed(address(this), users);
-                emit TokenRegistryNotSet(address(this), users);
-            }
-        } else {
-            address[] memory users = new address[](1);
-            users[0] = msg.sender;
-            emit TokenRegistryNotSet(address(this), users);
-        }
 
         // Transfers ETH to feeClaimer
         (bool success, ) = feeClaimer.call{value: msg.value}("");
@@ -150,11 +131,11 @@ contract LinkGold {
         return true;
     }
 
-    function setOracleAddress(address _oracleAddress) external onlyOwner {
-        // Sets oracle address
-        require(_oracleAddress != address(0), "Invalid oracle address");
-        oracleAddress = _oracleAddress;
-        emit OracleAddressSet(_oracleAddress);
+    function setOracleAddresses(address[2] memory _oracleAddresses) external onlyOwner {
+        // Sets XAU/USD and ETH/USD oracle addresses
+        require(_oracleAddresses[0] != address(0) && _oracleAddresses[1] != address(0), "Invalid oracle addresses");
+        oracleAddresses = _oracleAddresses;
+        emit OracleAddressesSet(_oracleAddresses[0], _oracleAddresses[1]);
     }
 
     function setFeeClaimer(address _feeClaimer) external onlyOwner {
@@ -162,13 +143,6 @@ contract LinkGold {
         require(_feeClaimer != address(0), "Invalid fee claimer");
         feeClaimer = _feeClaimer;
         emit FeeClaimerSet(_feeClaimer);
-    }
-
-    function setTokenRegistry(address _tokenRegistry) external onlyOwner {
-        // Sets token registry address
-        require(_tokenRegistry != address(0), "Invalid token registry");
-        tokenRegistry = _tokenRegistry;
-        emit TokenRegistrySet(_tokenRegistry);
     }
 
     function getCell(uint256 cellIndex) external view returns (address[100] memory cell) {
@@ -276,11 +250,14 @@ contract LinkGold {
         return SYMBOL;
     }
 
-    function getOraclePrice() external view returns (uint256 price) {
-        // Returns oracle price or 0 if not set
-        if (oracleAddress == address(0)) return 0;
-        int256 priceInt = IOracle(oracleAddress).latestAnswer();
-        return priceInt > 0 ? uint256(priceInt) : 0;
+    function getOraclePrice() external view returns (uint256 ethXauPrice) {
+        // Returns ETH/XAU price using XAU/USD and ETH/USD oracles
+        if (oracleAddresses[0] == address(0) || oracleAddresses[1] == address(0)) return 0;
+        int256 xauUsdPrice = IOracle(oracleAddresses[0]).latestAnswer();
+        int256 ethUsdPrice = IOracle(oracleAddresses[1]).latestAnswer();
+        if (xauUsdPrice <= 0 || ethUsdPrice <= 0) return 0;
+        // Calculate ETH/XAU: (ETH/USD ÷ XAU/USD) * 10^8
+        return (uint256(ethUsdPrice) * 10**8) / uint256(xauUsdPrice);
     }
 
     // Internal functions
@@ -297,24 +274,6 @@ contract LinkGold {
 
         _updateCells(from, _balances[from]);
         _updateCells(to, _balances[to]);
-
-        // Updates token registry if set
-        if (tokenRegistry != address(0)) {
-            address[] memory users = new address[](2);
-            users[0] = from;
-            users[1] = to;
-            try ITokenRegistry(tokenRegistry).initializeBalances(address(this), users) {
-                // Success, no action needed
-            } catch {
-                emit TokenRegistryCallFailed(address(this), users);
-                emit TokenRegistryNotSet(address(this), users);
-            }
-        } else {
-            address[] memory users = new address[](2);
-            users[0] = from;
-            users[1] = to;
-            emit TokenRegistryNotSet(address(this), users);
-        }
 
         emit Transfer(from, to, amount);
 
