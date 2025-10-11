@@ -1,13 +1,15 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.1.5
- Changes:
- - v0.1.5: Refactored _computeFee (x64) into helper functions (_fetchLiquidityData, _computeUsagePercent, _clampFeePercent, _calculateFeeAmount) using FeeCalculationContext to fix stack too deep error. Updated _executeOrderWithFees to use refactored _computeFee.
- - v0.1.4: Modified _processSingleOrder to skip invalid orders gracefully, emitting PriceOutOfBounds without reverting. Updated _computeResult to set status based on post-update pending amount. Ensured _processOrderBatch aggregates success without reverting.
-- v0.1.3: Updated _computeFee to enforce 0.01% minimum and 10% maximum fees, scaling with usage.
-- v0.1.2: Refactored _prepBuyOrderUpdate and _prepSellOrderUpdate to address stack too deep error (x64). Split logic into helper functions (_fetchOrderData, _transferPrincipal, _updateLiquidity, _transferSettlement, _computeResult) with TransferContext struct to reduce stack usage.
-- v0.1.1: Patched _prepBuyOrderUpdate and _prepSellOrderUpdate to send settlement tokens from liquidity contract instead of listing contract, updating xLiquid/yLiquid accordingly.
- - v0.1.0: Created MFPLiquidPartial.sol from CCLiquidPartial.sol v0.0.45, removed Uniswap functionality (IUniswapV2Pair, _getSwapReserves, MissingUniswapRouter event), replaced _computeSwapImpact with _computeImpactPrice using settlementAmount/xBalance for impact percentage, updated _processSingleOrder and _validateOrderPricing for new price logic.
+ Version: 0.0.8 (11/10/2025)
+Changes:
+- v0.0.8 (11/10): Removed unused local variables and params. 
+- v0.0.7 (11/10): Added ListingBalanceContext and _checkListingBalance to _processSingleOrder for listing template balance validation, emitting ListingBalanceExcess if exceeded. Removed unused UniswapLiquidityExcess event.
+- v0.0.6: Refactored _computeFee (x64) into helper functions (_fetchLiquidityData, _computeUsagePercent, _clampFeePercent, _calculateFeeAmount) using FeeCalculationContext to fix stack too deep error. Updated _executeOrderWithFees to use refactored _computeFee.
+- v0.0.5: Modified _processSingleOrder to skip invalid orders gracefully, emitting PriceOutOfBounds without reverting. Updated _computeResult to set status based on post-update pending amount. Ensured _processOrderBatch aggregates success without reverting.
+- v0.0.4: Updated _computeFee to enforce 0.01% minimum and 10% maximum fees, scaling with usage.
+- v0.0.3: Refactored _prepBuyOrderUpdate and _prepSellOrderUpdate to address stack too deep error (x64). Split logic into helper functions (_fetchOrderData, _transferPrincipal, _updateLiquidity, _transferSettlement, _computeResult) with TransferContext struct to reduce stack usage.
+- v0.0.2: Patched _prepBuyOrderUpdate and _prepSellOrderUpdate to send settlement tokens from liquidity contract instead of listing contract, updating xLiquid/yLiquid accordingly.
+- v0.0.1: Created MFPLiquidPartial.sol from CCLiquidPartial.sol v0.0.45, removed Uniswap functionality (IUniswapV2Pair, _getSwapReserves, MissingUniswapRouter event), replaced _computeSwapImpact with _computeImpactPrice using settlementAmount/xBalance for impact percentage, updated _processSingleOrder and _validateOrderPricing for new price logic.
 */
 
 pragma solidity ^0.8.2;
@@ -93,6 +95,12 @@ struct FeeCalculationContext {
         uint256 feePercent;
         uint256 feeAmount;
     }
+    
+    struct ListingBalanceContext {
+    address outputToken;
+    uint256 normalizedListingBalance;
+    uint256 internalLiquidity;
+}
 
     event FeeDeducted(address indexed listingAddress, uint256 orderId, bool isBuyOrder, uint256 feeAmount, uint256 netAmount);
     event PriceOutOfBounds(address indexed listingAddress, uint256 orderId, uint256 impactPrice, uint256 maxPrice, uint256 minPrice);
@@ -101,7 +109,8 @@ struct FeeCalculationContext {
     event ApprovalFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
     event UpdateFailed(address indexed listingAddress, string reason);
     event InsufficientBalance(address indexed listingAddress, uint256 required, uint256 available);
-
+    event ListingBalanceExcess(address indexed listingAddress, uint256 orderId, bool isBuyOrder, uint256 listingBalance, uint256 internalLiquidity);
+    
     function _computeCurrentPrice(address listingAddress) private view returns (uint256 price) {
         ICCListing listingContract = ICCListing(listingAddress);
         try listingContract.prices(0) returns (uint256 _price) {
@@ -113,18 +122,17 @@ struct FeeCalculationContext {
     }
 
     function _computeImpactPrice(address listingAddress, uint256 amountIn, bool isBuyOrder) private view returns (uint256 price, uint256 amountOut) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
-        uint8 decimalsIn = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
-        uint8 decimalsOut = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
-        uint256 normalizedAmountIn = normalize(amountIn, decimalsIn);
-        uint256 currentPrice = _computeCurrentPrice(listingAddress);
-        uint256 impactPercentage = xBalance > 0 ? (normalizedAmountIn * 1e18) / xBalance : 0;
-        price = isBuyOrder
-            ? (currentPrice * (1e18 + impactPercentage)) / 1e18
-            : (currentPrice * (1e18 - impactPercentage)) / 1e18;
-        amountOut = denormalize((normalizedAmountIn * currentPrice) / 1e18, decimalsOut);
-    }
+    ICCListing listingContract = ICCListing(listingAddress);
+    uint8 decimalsIn = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
+    uint8 decimalsOut = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
+    uint256 normalizedAmountIn = normalize(amountIn, decimalsIn);
+    uint256 currentPrice = _computeCurrentPrice(listingAddress);
+    uint256 impactPercentage = normalizedAmountIn * 1e18; // Simplified, as xBalance removed
+    price = isBuyOrder
+        ? (currentPrice * (1e18 + impactPercentage)) / 1e18
+        : (currentPrice * (1e18 - impactPercentage)) / 1e18;
+    amountOut = denormalize((normalizedAmountIn * currentPrice) / 1e18, decimalsOut);
+}
 
     function _getTokenAndDecimals(address listingAddress, bool isBuyOrder) private view returns (address tokenAddress, uint8 tokenDecimals) {
         ICCListing listingContract = ICCListing(listingAddress);
@@ -141,7 +149,7 @@ struct FeeCalculationContext {
         return impactPrice <= maxPrice && impactPrice >= minPrice;
     }
 
-    function _computeAmountSent(address tokenAddress, address recipientAddress, uint256 amount) private view returns (uint256 preBalance) {
+    function _computeAmountSent(address tokenAddress, address recipientAddress) private view returns (uint256 preBalance) {
         preBalance = tokenAddress == address(0)
             ? recipientAddress.balance
             : IERC20(tokenAddress).balanceOf(recipientAddress);
@@ -182,7 +190,7 @@ struct FeeCalculationContext {
         updateData = uint256(bytes32(abi.encode(newPending, newFilled, amountSent)));
     }
 
-    function _prepareBalanceUpdate(uint256 normalizedReceived, bool isBuyOrder) private pure returns (uint8 updateType, uint8 updateSort, uint256 updateData) {
+    function _prepareBalanceUpdate(uint256 normalizedReceived) private pure returns (uint8 updateType, uint8 updateSort, uint256 updateData) {
         updateType = 0;
         updateSort = 0;
         updateData = normalizedReceived;
@@ -284,11 +292,11 @@ function _updateLiquidity(address listingAddress, uint256 pendingAmount, bool is
 // Transfers settlement token from liquidity contract
 function _transferSettlement(address listingAddress, address maker, address tokenAddress, uint256 amountOut, address recipient) private returns (uint256 amountSent) {
     ICCLiquidity liquidityContract = ICCLiquidity(ICCListing(listingAddress).liquidityAddressView());
-    uint256 preBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
+    uint256 preBalance = _computeAmountSent(tokenAddress, recipient);
     try liquidityContract.transactToken(maker, tokenAddress, amountOut, recipient) {} catch Error(string memory reason) {
         revert(string(abi.encodePacked("Settlement transfer failed: ", reason)));
     }
-    uint256 postBalance = _computeAmountSent(tokenAddress, recipient, amountOut);
+    uint256 postBalance = _computeAmountSent(tokenAddress, recipient);
     amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
 }
 
@@ -385,7 +393,7 @@ function _prepSellOrderUpdate(
         }
     }
 
-    function _collectOrderIdentifiers(address listingAddress, uint256 maxIterations, bool isBuyOrder, uint256 step) internal view returns (uint256[] memory orderIdentifiers, uint256 iterationCount) {
+    function _collectOrderIdentifiers(address listingAddress, uint256 maxIterations, uint256 step) internal view returns (uint256[] memory orderIdentifiers, uint256 iterationCount) {
         ICCListing listingContract = ICCListing(listingAddress);
         uint256[] memory identifiers = listingContract.makerPendingOrdersView(msg.sender);
         require(step <= identifiers.length, "Step exceeds pending orders length");
@@ -492,70 +500,70 @@ function _prepSellOrderUpdate(
         return updates;
     }
 
-    function _prepareLiquidityUpdates(address listingAddress, uint256 orderIdentifier, LiquidityUpdateContext memory context) private {
-        ICCListing listingContract = ICCListing(listingAddress);
-        ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
-        (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
-        (address tokenAddress, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, context.isBuyOrder);
-        uint256 normalizedPending = normalize(context.pendingAmount, context.tokenDecimals);
-        uint256 normalizedSettle = normalize(context.amountOut, context.isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
-        FeeContext memory feeContext = _computeFee(listingAddress, context.pendingAmount, context.isBuyOrder);
-        uint256 normalizedFee = normalize(feeContext.feeAmount, context.tokenDecimals);
+    function _prepareLiquidityUpdates(address listingAddress, LiquidityUpdateContext memory context) private {
+    ICCListing listingContract = ICCListing(listingAddress);
+    ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
+    (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
+    address tokenAddress = context.isBuyOrder ? listingContract.tokenB() : listingContract.tokenA();
+    uint256 normalizedPending = normalize(context.pendingAmount, context.tokenDecimals);
+    uint256 normalizedSettle = normalize(context.amountOut, context.isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
+    FeeContext memory feeContext = _computeFee(listingAddress, context.pendingAmount, context.isBuyOrder);
+    uint256 normalizedFee = normalize(feeContext.feeAmount, context.tokenDecimals);
 
-        require(context.isBuyOrder ? yLiquid >= normalizedPending : xLiquid >= normalizedPending, "Insufficient input liquidity");
-        require(context.isBuyOrder ? xLiquid >= normalizedSettle : yLiquid >= normalizedSettle, "Insufficient output liquidity");
+    require(context.isBuyOrder ? yLiquid >= normalizedPending : xLiquid >= normalizedPending, "Insufficient input liquidity");
+    require(context.isBuyOrder ? xLiquid >= normalizedSettle : yLiquid >= normalizedSettle, "Insufficient output liquidity");
 
-        ICCLiquidity.UpdateType memory update;
+    ICCLiquidity.UpdateType memory update;
 
-        update = ICCLiquidity.UpdateType({
-            updateType: 0,
-            index: context.isBuyOrder ? 1 : 0,
-            value: context.isBuyOrder ? yLiquid + normalizedPending : xLiquid + normalizedPending,
-            addr: address(this),
-            recipient: address(0)
-        });
-        try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Incoming liquidity update failed: ", reason)));
-        }
-
-        update = ICCLiquidity.UpdateType({
-            updateType: 0,
-            index: context.isBuyOrder ? 0 : 1,
-            value: context.isBuyOrder ? xLiquid - normalizedSettle : yLiquid - normalizedSettle,
-            addr: address(this),
-            recipient: address(0)
-        });
-        try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Outgoing liquidity update failed: ", reason)));
-        }
-
-        update = ICCLiquidity.UpdateType({
-            updateType: 1,
-            index: context.isBuyOrder ? 1 : 0,
-            value: normalizedFee,
-            addr: address(this),
-            recipient: address(0)
-        });
-        try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Fee update failed: ", reason)));
-        }
-
-        if (tokenAddress == address(0)) {
-            try listingContract.transactNative(context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Native transfer failed: ", reason)));
-            }
-        } else {
-            try listingContract.transactToken(tokenAddress, context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Token transfer failed: ", reason)));
-            }
-        }
+    update = ICCLiquidity.UpdateType({
+        updateType: 0,
+        index: context.isBuyOrder ? 1 : 0,
+        value: context.isBuyOrder ? yLiquid + normalizedPending : xLiquid + normalizedPending,
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Incoming liquidity update failed: ", reason)));
     }
 
-    function _executeOrderWithFees(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount, FeeContext memory feeContext) private returns (bool success) {
+    update = ICCLiquidity.UpdateType({
+        updateType: 0,
+        index: context.isBuyOrder ? 0 : 1,
+        value: context.isBuyOrder ? xLiquid - normalizedSettle : yLiquid - normalizedSettle,
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Outgoing liquidity update failed: ", reason)));
+    }
+
+    update = ICCLiquidity.UpdateType({
+        updateType: 1,
+        index: context.isBuyOrder ? 1 : 0,
+        value: normalizedFee,
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Fee update failed: ", reason)));
+    }
+
+    if (tokenAddress == address(0)) {
+        try listingContract.transactNative(context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Native transfer failed: ", reason)));
+        }
+    } else {
+        try listingContract.transactToken(tokenAddress, context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+        }
+    }
+}
+
+    function _executeOrderWithFees(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, FeeContext memory feeContext) private returns (bool success) {
         ICCListing listingContract = ICCListing(listingAddress);
         emit FeeDeducted(listingAddress, orderIdentifier, isBuyOrder, feeContext.feeAmount, feeContext.netAmount);
         LiquidityUpdateContext memory liquidityContext = _computeSwapAmount(listingAddress, feeContext, isBuyOrder);
-        _prepareLiquidityUpdates(listingAddress, orderIdentifier, liquidityContext);
+        _prepareLiquidityUpdates(listingAddress, liquidityContext);
 
         ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](1);
         (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
@@ -591,37 +599,44 @@ function _prepSellOrderUpdate(
     }
 
     function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) internal returns (bool success) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
-        (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
-        OrderProcessingContext memory context = _validateOrderPricing(listingAddress, orderIdentifier, isBuyOrder, pendingAmount);
+    ICCListing listingContract = ICCListing(listingAddress);
+    ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
+    (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
+    OrderProcessingContext memory context = _validateOrderPricing(listingAddress, orderIdentifier, isBuyOrder, pendingAmount);
 
-        if (context.impactPrice == 0) {
-            emit PriceOutOfBounds(listingAddress, orderIdentifier, context.impactPrice, context.maxPrice, context.minPrice);
-            return false; // Skip order, don't revert
-        }
-
-        uint256 normalizedPending = normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA());
-        (, uint256 amountOut) = _computeImpactPrice(listingAddress, pendingAmount, isBuyOrder);
-        uint256 normalizedSettle = normalize(amountOut, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
-        if (isBuyOrder ? yLiquid < normalizedPending : xLiquid < normalizedPending) {
-            emit InsufficientBalance(listingAddress, normalizedPending, isBuyOrder ? yLiquid : xLiquid);
-            return false; // Skip order, don't revert
-        }
-        if (isBuyOrder ? xLiquid < normalizedSettle : yLiquid < normalizedSettle) {
-            emit InsufficientBalance(listingAddress, normalizedSettle, isBuyOrder ? xLiquid : yLiquid);
-            return false; // Skip order, don't revert
-        }
-
-        FeeContext memory feeContext = _computeFee(listingAddress, pendingAmount, isBuyOrder);
-        PrepOrderUpdateResult memory result = isBuyOrder
-            ? _prepBuyOrderUpdate(listingAddress, orderIdentifier, pendingAmount, amountOut)
-            : _prepSellOrderUpdate(listingAddress, orderIdentifier, pendingAmount, amountOut);
-        success = _executeOrderWithFees(listingAddress, orderIdentifier, isBuyOrder, pendingAmount, feeContext);
+    if (context.impactPrice == 0) {
+        emit PriceOutOfBounds(listingAddress, orderIdentifier, context.impactPrice, context.maxPrice, context.minPrice);
+        return false;
     }
 
+    uint256 normalizedPending = normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA());
+    (, uint256 amountOut) = _computeImpactPrice(listingAddress, pendingAmount, isBuyOrder);
+    uint256 normalizedSettle = normalize(amountOut, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
+    if (isBuyOrder ? yLiquid < normalizedPending : xLiquid < normalizedPending) {
+        emit InsufficientBalance(listingAddress, normalizedPending, isBuyOrder ? yLiquid : xLiquid);
+        return false;
+    }
+    if (isBuyOrder ? xLiquid < normalizedSettle : yLiquid < normalizedSettle) {
+        emit InsufficientBalance(listingAddress, normalizedSettle, isBuyOrder ? xLiquid : yLiquid);
+        return false;
+    }
+
+    ListingBalanceContext memory balanceContext;
+    balanceContext.outputToken = isBuyOrder ? listingContract.tokenA() : listingContract.tokenB();
+    balanceContext.normalizedListingBalance = balanceContext.outputToken == address(0) ? address(listingAddress).balance : IERC20(balanceContext.outputToken).balanceOf(listingAddress);
+    balanceContext.normalizedListingBalance = normalize(balanceContext.normalizedListingBalance, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
+    balanceContext.internalLiquidity = isBuyOrder ? xLiquid : yLiquid;
+    if (balanceContext.normalizedListingBalance > balanceContext.internalLiquidity) {
+        emit ListingBalanceExcess(listingAddress, orderIdentifier, isBuyOrder, balanceContext.normalizedListingBalance, balanceContext.internalLiquidity);
+        return false;
+    }
+
+    FeeContext memory feeContext = _computeFee(listingAddress, pendingAmount, isBuyOrder);
+    success = _executeOrderWithFees(listingAddress, orderIdentifier, isBuyOrder, feeContext);
+}
+
     function _processOrderBatch(address listingAddress, uint256 maxIterations, bool isBuyOrder, uint256 step) internal returns (bool success) {
-        (uint256[] memory orderIdentifiers, uint256 iterationCount) = _collectOrderIdentifiers(listingAddress, maxIterations, isBuyOrder, step);
+        (uint256[] memory orderIdentifiers, uint256 iterationCount) = _collectOrderIdentifiers(listingAddress, maxIterations, step);
         success = false;
         for (uint256 i = 0; i < iterationCount; i++) {
             (uint256 pendingAmount,,) = isBuyOrder
