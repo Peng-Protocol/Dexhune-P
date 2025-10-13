@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.0.8 (11/10/2025)
-Changes:
+ Version: 0.0.9 (13/10/2025)
+ Changes:
+ - v0.0.9 (13/10): Updated _computeUsagePercent for 0.05% min fee at ≤1% liquidity usage, scaling to 0.10% at 2%, 0.50% at 10%, up to 50% at 100%. Removed Clamping.
 - v0.0.8 (11/10): Removed unused local variables and params. 
 - v0.0.7 (11/10): Added ListingBalanceContext and _checkListingBalance to _processSingleOrder for listing template balance validation, emitting ListingBalanceExcess if exceeded. Removed unused UniswapLiquidityExcess event.
 - v0.0.6: Refactored _computeFee (x64) into helper functions (_fetchLiquidityData, _computeUsagePercent, _clampFeePercent, _calculateFeeAmount) using FeeCalculationContext to fix stack too deep error. Updated _executeOrderWithFees to use refactored _computeFee.
@@ -457,16 +458,12 @@ function _prepSellOrderUpdate(
 
     // Computes usage percentage for fee
     function _computeUsagePercent(uint256 normalizedAmountSent, uint256 normalizedLiquidity) private pure returns (uint256 feePercent) {
-        feePercent = normalizedLiquidity > 0 ? (normalizedAmountSent * 1e18) / normalizedLiquidity : 1e17;
-        feePercent = feePercent / 10; // Divide by 10 for fee percentage
-    }
-
-    // Clamps fee percentage between 0.01% and 10%
-    function _clampFeePercent(uint256 feePercent) private pure returns (uint256 clampedFeePercent) {
-        uint256 minFeePercent = 1e14; // 0.01%
-        uint256 maxFeePercent = 1e17; // 10%
-        clampedFeePercent = feePercent < minFeePercent ? minFeePercent : (feePercent > maxFeePercent ? maxFeePercent : feePercent);
-    }
+    // Scales fee from 0.05% at ≤1% usage to 50% at 100% usage
+    uint256 usagePercent = (normalizedAmountSent * 1e18) / (normalizedLiquidity == 0 ? 1 : normalizedLiquidity);
+    feePercent = (usagePercent * 5e15) / 1e16; // Linear scaling: 0.05% per 1% usage
+    if (feePercent < 5e14) feePercent = 5e14; // 0.05% minimum
+    if (feePercent > 5e17) feePercent = 5e17; // 50% maximum
+}
 
     // Calculates final fee and net amount
     function _calculateFeeAmount(uint256 pendingAmount, uint256 feePercent) private pure returns (uint256 feeAmount, uint256 netAmount) {
@@ -479,8 +476,7 @@ function _prepSellOrderUpdate(
         (uint256 outputLiquidityAmount, uint8 outputDecimals, uint256 amountOut) = _fetchLiquidityData(listingAddress, isBuyOrder);
         calcContext.normalizedAmountSent = normalize(amountOut, outputDecimals);
         calcContext.normalizedLiquidity = normalize(outputLiquidityAmount, outputDecimals);
-        calcContext.feePercent = _computeUsagePercent(calcContext.normalizedAmountSent, calcContext.normalizedLiquidity);
-        calcContext.feePercent = _clampFeePercent(calcContext.feePercent);
+        calcContext.feePercent = _computeUsagePercent(calcContext.normalizedAmountSent, calcContext.normalizedLiquidity); // Removed clamping
         (calcContext.feeAmount, feeContext.netAmount) = _calculateFeeAmount(pendingAmount, calcContext.feePercent);
         feeContext.feeAmount = calcContext.feeAmount;
         feeContext.decimals = outputDecimals;
