@@ -1,6 +1,7 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-10-15: Added TokenRegistry call in dispense to register recipient after minting.
 - 2025-10-15: Split _transfer into _transferWithRegistry and _transferBasic for distinct transfer/transferFrom logic
 - Added rewardExceptions array and mapping, with owner-only add/remove functions
 - Added paginated view function for rewardExceptions
@@ -134,28 +135,35 @@ function setTokenRegistry(address _tokenRegistry) external onlyOwner {
 
     // External functions
     function dispense() external payable nonReentrant {
-        // Mints LAU based on ETH/XAU price using XAU/USD and ETH/USD oracles
-        require(msg.value > 0, "No ETH sent");
-        require(oracleAddresses[0] != address(0) && oracleAddresses[1] != address(0), "Oracles not set");
-        require(feeClaimer != address(0), "Fee claimer not set");
+    require(msg.value > 0, "No ETH sent");
+    require(oracleAddresses[0] != address(0) && oracleAddresses[1] != address(0), "Oracles not set");
+    require(feeClaimer != address(0), "Fee claimer not set");
 
-        int256 xauUsdPrice = IOracle(oracleAddresses[0]).latestAnswer();
-        int256 ethUsdPrice = IOracle(oracleAddresses[1]).latestAnswer();
-        require(xauUsdPrice > 0 && ethUsdPrice > 0, "Invalid oracle prices");
-        
-        // Calculate ETH/XAU: (ETH/USD ÷ XAU/USD) * 10^8 for precision
-        uint256 ethXauPrice = (uint256(ethUsdPrice) * 10**8) / uint256(xauUsdPrice);
-        uint256 lauAmount = (msg.value * ethXauPrice) / 10**8;
+    int256 xauUsdPrice = IOracle(oracleAddresses[0]).latestAnswer();
+    int256 ethUsdPrice = IOracle(oracleAddresses[1]).latestAnswer();
+    require(xauUsdPrice > 0 && ethUsdPrice > 0, "Invalid oracle prices");
+    
+    uint256 ethXauPrice = (uint256(ethUsdPrice) * 10**8) / uint256(xauUsdPrice);
+    uint256 lauAmount = (msg.value * ethXauPrice) / 10**8;
 
-        _mint(msg.sender, lauAmount);
+    _mint(msg.sender, lauAmount);
 
-        // Transfers ETH to feeClaimer
-        (bool success, ) = feeClaimer.call{value: msg.value}("");
-        require(success, "ETH transfer failed");
-        emit EthTransferred(feeClaimer, msg.value);
-
-        emit Dispense(msg.sender, feeClaimer, lauAmount);
+    // Register recipient in TokenRegistry
+    if (tokenRegistry != address(0)) {
+        address[] memory users = new address[](1);
+        users[0] = msg.sender;
+        try TokenRegistry(tokenRegistry).initializeBalances(address(this), users) {} catch {
+            emit TokenRegistryCallFailed(msg.sender, address(this));
+        }
     }
+
+    // Transfers ETH to feeClaimer
+    (bool success, ) = feeClaimer.call{value: msg.value}("");
+    require(success, "ETH transfer failed");
+    emit EthTransferred(feeClaimer, msg.value);
+
+    emit Dispense(msg.sender, feeClaimer, lauAmount);
+}
 
     // Modified transfer and transferFrom to use new internal functions
 function transfer(address to, uint256 amount) external returns (bool success) {

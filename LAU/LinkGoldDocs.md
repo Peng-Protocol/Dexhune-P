@@ -1,28 +1,29 @@
 # Link Gold (LAU) Smart Contract Docs
 
 ## Overview
-Link Gold (LAU) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LAU by depositing ETH, a cell-based balance tracking system, and a reward distribution mechanism based on `wholeCycle` and `cellCycle` counters. LAU uses Chainlink XAU/USD and ETH/USD oracles to calculate ETH/XAU for minting. It integrates with `TokenRegistry` for transfer tracking and supports reward exemptions.
+Link Gold (LAU) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LAU by depositing ETH, a cell-based balance tracking system, and a reward distribution mechanism based on `wholeCycle` and `cellCycle` counters. LAU uses Chainlink XAU/USD and ETH/USD oracles to calculate ETH/XAU for minting. It integrates with `TokenRegistry` for transfer and dispense tracking, with reward exemptions.
 
 ## Dispense Mechanism
 The `dispense` function mints LAU by depositing ETH:
 - **Params**: None (uses `msg.value`, `msg.sender`).
 - **Requires**: `msg.value > 0`, set `oracleAddresses[0]` (XAU/USD), `oracleAddresses[1]` (ETH/USD), `feeClaimer`.
-- **Logic**: Fetches XAU/USD and ETH/USD prices via `IOracle.latestAnswer()` (8 decimals). Calculates `ethXauPrice = (ethUsdPrice * 10^8) / xauUsdPrice`. Mints `lauAmount = (msg.value * ethXauPrice) / 10^8` to `msg.sender`. Transfers `msg.value` to `feeClaimer`. Emits `EthTransferred(feeClaimer, msg.value)` and `Dispense(msg.sender, feeClaimer, lauAmount)`.
+- **Logic**: Fetches XAU/USD and ETH/USD prices via `IOracle.latestAnswer()` (8 decimals). Calculates `ethXauPrice = (ethUsdPrice * 10^8) / xauUsdPrice`. Mints `lauAmount = (msg.value * ethXauPrice) / 10^8` to `msg.sender`. Registers `msg.sender` in `TokenRegistry` via `initializeBalances`. Transfers `msg.value` to `feeClaimer`. Emits `EthTransferred(feeClaimer, msg.value)` and `Dispense(msg.sender, feeClaimer, lauAmount)`.
 - **Call Tree**:
-  - External: `IOracle.latestAnswer()` (twice) → `_mint(msg.sender, lauAmount)` → `_updateCells(msg.sender, newBalance)`.
-  - Emits: `Transfer(address(0), msg.sender, lauAmount)`, `EthTransferred`, `Dispense`.
+  - External: `IOracle.latestAnswer()` (twice) → `_mint(msg.sender, lauAmount)` → `_updateCells(msg.sender, newBalance)` → `TokenRegistry.initializeBalances(address(this), [msg.sender])` → `feeClaimer.call{value: msg.value}`.
+  - Emits: `Transfer(address(0), msg.sender, lauAmount)`, `TokenRegistryCallFailed` (if registry fails), `EthTransferred`, `Dispense`.
 - **Security**: `nonReentrant` modifier prevents reentrancy.
 
 ## Transfer and Fees
 - **transfer(to, amount)**: Transfers LAU without fees, registers sender/receiver in `TokenRegistry`.
   - **Params**: `to` (recipient address), `amount` (LAU).
-  - **Logic**: Calls `_transferWithRegistry(msg.sender, to, amount)`. Registers in `TokenRegistry` via `initializeBalances`. Returns `true`.
-  - **Call Tree**: `_transferWithRegistry` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `TokenRegistry.initializeBalances`, `_distributeRewards` (if `swapCount % 10 == 0`) → `_updateCells` (per rewarded address).
-  - **Emits**: `Transfer(from, to, amount)`, `TokenRegistryCallFailed` (if registry fails).
-- **transferFrom(from, to, amount)**: Transfers LAU with allowance check, no `TokenRegistry` calls.
+  - **Logic**: Calls `_transferWithRegistry(msg.sender, to, amount)`. Transfers full `amount`, registers in `TokenRegistry` via `initializeBalances`. Increments `swapCount`, triggers `_distributeRewards` if `swapCount % 10 == 0`. Returns `true`.
+  - **Call Tree**: `_transferWithRegistry` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `TokenRegistry.initializeBalances(address(this), [from, to])`, `_distributeRewards` (if `swapCount % 10 == 0`) → `_updateCells` (per rewarded address).
+  - **Emits**: `Transfer(from, to, amount)`, `TokenRegistryCallFailed` (if registry fails), `RewardsDistributed`, `Transfer` (if rewards distributed).
+- **transferFrom(from, to, amount)**: Transfers LAU without fees, no `TokenRegistry` calls.
   - **Params**: `from` (sender), `to` (recipient), `amount` (LAU).
-  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transferBasic`. Returns `true`.
-  - **Call Tree**: `_transferBasic` → `_updateCells`, `_distributeRewards` (if needed).
+  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transferBasic`. Transfers full `amount`. Increments `swapCount`, triggers `_distributeRewards` if needed. Returns `true`.
+  - **Call Tree**: `_transferBasic` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `_distributeRewards` (if needed) → `_updateCells` (per rewarded address).
+  - **Emits**: `Transfer(from, to, amount)`, `RewardsDistributed`, `Transfer` (if rewards distributed).
 
 ## Cell System
 - **Structure**: `cells` (mapping: `uint256` → `address[100]`) stores non-zero balance addresses. `addressToCell` maps addresses to cell index.
@@ -80,5 +81,4 @@ The `dispense` function mints LAU by depositing ETH:
 - **Owner Privileges**: `setOracleAddresses`, `setFeeClaimer`, `setTokenRegistry`, `addRewardExceptions`, `removeRewardExceptions` are owner-only.
 - **Cell Management**: Empty cells below `cellHeight` may be selected (skipped if `cellBalance == 0`).
 - **ETH Transfer**: `feeClaimer` must accept ETH to avoid `dispense` reversion.
-- **Oracle Accuracy**: Ensure Chainlink oracles provide reliable prices.
-- **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer`.
+- **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer` and `dispense`.

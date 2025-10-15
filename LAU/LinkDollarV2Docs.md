@@ -1,28 +1,29 @@
 # Link Dollar v2 (LUSD) Docs
 
 ## Overview
-Link Dollar v2 (LUSD) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LUSD by depositing ETH, a 0.05% transfer fee, a cell-based balance tracking system, and reward distribution based on `wholeCycle` and `cellCycle` counters. LUSD integrates with a Chainlink ETH/USD oracle and `TokenRegistry` for transfer tracking, with reward exemptions.
+Link Dollar v2 (LUSD) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LUSD by depositing ETH, a 0.05% transfer fee, a cell-based balance tracking system, and reward distribution based on `wholeCycle` and `cellCycle` counters. LUSD integrates with a Chainlink ETH/USD oracle and `TokenRegistry` for transfer and dispense tracking, with reward exemptions.
 
 ## Dispense Mechanism
 The `dispense` function mints LUSD by depositing ETH:
 - **Params**: None (uses `msg.value`, `msg.sender`).
 - **Requires**: `msg.value > 0`, set `oracleAddress`, `feeClaimer`.
-- **Logic**: Fetches ETH/USD price via `IOracle.latestAnswer()` (8 decimals). Calculates `lusdAmount = msg.value * price / 10^8`. Mints to `msg.sender`. Transfers `msg.value` to `feeClaimer`. Emits `EthTransferred(feeClaimer, msg.value)` and `Dispense(msg.sender, feeClaimer, lusdAmount)`.
+- **Logic**: Fetches ETH/USD price via `IOracle.latestAnswer()` (8 decimals). Calculates `lusdAmount = msg.value * price / 10^8`. Mints to `msg.sender`. Registers `msg.sender` in `TokenRegistry` via `initializeBalances`. Transfers `msg.value` to `feeClaimer`. Emits `EthTransferred(feeClaimer, msg.value)` and `Dispense(msg.sender, feeClaimer, lusdAmount)`.
 - **Call Tree**:
-  - External: `IOracle.latestAnswer()` → `_mint(msg.sender, lusdAmount)` → `_updateCells(msg.sender, newBalance)`.
-  - Emits: `Transfer(address(0), msg.sender, lusdAmount)`, `EthTransferred`, `Dispense`.
+  - External: `IOracle.latestAnswer()` → `_mint(msg.sender, lusdAmount)` → `_updateCells(msg.sender, newBalance)` → `TokenRegistry.initializeBalances(address(this), [msg.sender])` → `feeClaimer.call{value: msg.value}`.
+  - Emits: `Transfer(address(0), msg.sender, lusdAmount)`, `TokenRegistryCallFailed` (if registry fails), `EthTransferred`, `Dispense`.
 - **Security**: `nonReentrant` modifier prevents reentrancy.
 
 ## Transfer and Fees
 - **transfer(to, amount)**: Transfers LUSD with 0.05% fee, registers sender/receiver in `TokenRegistry`.
   - **Params**: `to` (recipient address), `amount` (LUSD).
-  - **Logic**: Calls `_transferWithRegistry(msg.sender, to, amount)`. Registers in `TokenRegistry` via `initializeBalances`. Returns `true`.
-  - **Call Tree**: `_transferWithRegistry` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `TokenRegistry.initializeBalances`, `_distributeRewards` (if `swapCount % 10 == 0`).
-  - **Emits**: `Transfer(from, to, amountAfterFee)`, `Transfer(from, address(this), fee)`, `TokenRegistryCallFailed` (if registry fails).
-- **transferFrom(from, to, amount)**: Transfers LUSD with fee, no `TokenRegistry` calls.
+  - **Logic**: Calls `_transferWithRegistry(msg.sender, to, amount)`. Deducts fee (`amount * 0.05%`), registers in `TokenRegistry` via `initializeBalances`. Increments `swapCount`, triggers `_distributeRewards` if `swapCount % 10 == 0`. Returns `true`.
+  - **Call Tree**: `_transferWithRegistry` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `TokenRegistry.initializeBalances(address(this), [from, to])`, `_distributeRewards` (if `swapCount % 10 == 0`) → `_updateCells` (per rewarded address).
+  - **Emits**: `Transfer(from, to, amountAfterFee)`, `Transfer(from, address(this), fee)`, `TokenRegistryCallFailed` (if registry fails), `RewardsDistributed`, `Transfer` (if rewards distributed).
+- **transferFrom(from, to, amount)**: Transfers LUSD with 0.05% fee, no `TokenRegistry` calls.
   - **Params**: `from` (sender), `to` (recipient), `amount` (LUSD).
-  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transferBasic`. Returns `true`.
-  - **Call Tree**: `_transferBasic` → `_updateCells`, `_distributeRewards` (if needed).
+  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transferBasic`. Deducts fee, increments `swapCount`, triggers `_distributeRewards` if needed. Returns `true`.
+  - **Call Tree**: `_transferBasic` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `_distributeRewards` (if needed) → `_updateCells` (per rewarded address).
+  - **Emits**: `Transfer(from, to, amountAfterFee)`, `Transfer(from, address(this), fee)`, `RewardsDistributed`, `Transfer` (if rewards distributed).
 - **Fee**: 0.05% (5 bps) added to `contractBalance`.
 
 ## Cell System
@@ -56,6 +57,10 @@ The `dispense` function mints LUSD by depositing ETH:
 - **Interface**: `IOracle.latestAnswer()` returns int256 (8 decimals).
 - **Logic**: Converts to uint256, reverts on negative. Set via `setOracleAddress(_oracleAddress)` (owner-only).
 - **Call Tree**: Called by `dispense`, `getOraclePrice`.
+- **Frontend Interaction (Etherscan)**: To call `setOracleAddress`:
+  - Navigate to “Write Contract” on Etherscan.
+  - Connect owner wallet.
+  - Input `0xETHUSDAddress` in `setOracleAddress`, using a valid Chainlink oracle address.
 
 ## Query Functions
 - **Standard**:
@@ -77,4 +82,4 @@ The `dispense` function mints LUSD by depositing ETH:
 - **Owner Privileges**: `setOracleAddress`, `setFeeClaimer`, `setTokenRegistry`, `addRewardExceptions`, `removeRewardExceptions` are owner-only.
 - **Cell Management**: Empty cells below `cellHeight` may be selected (skipped if `cellBalance == 0`).
 - **ETH Transfer**: `feeClaimer` must accept ETH to avoid `dispense` reversion.
-- **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer`.
+- **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer` and `dispense`.

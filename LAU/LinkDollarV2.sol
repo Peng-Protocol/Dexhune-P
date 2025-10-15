@@ -1,6 +1,7 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-10-15: Added TokenRegistry call in dispense to register recipient after minting.
  - 2025-10-15: Split _transfer into _transferWithRegistry and _transferBasic for distinct transfer/transferFrom logic
 - Added rewardExceptions array and mapping, with owner-only add/remove functions
 - Added paginated view function for rewardExceptions
@@ -130,24 +131,33 @@ function setTokenRegistry(address _tokenRegistry) external onlyOwner {
 
     // External functions
     function dispense() external payable nonReentrant {
-        require(msg.value > 0, "No ETH sent");
-        require(oracleAddress != address(0), "Oracle not set");
-        require(feeClaimer != address(0), "Fee claimer not set");
+    require(msg.value > 0, "No ETH sent");
+    require(oracleAddress != address(0), "Oracle not set");
+    require(feeClaimer != address(0), "Fee claimer not set");
 
-        int256 priceInt = IOracle(oracleAddress).latestAnswer();
-        require(priceInt > 0, "Invalid oracle price");
-        uint256 price = uint256(priceInt);
-        uint256 lusdAmount = (msg.value * price) / 10**8;
+    int256 priceInt = IOracle(oracleAddress).latestAnswer();
+    require(priceInt > 0, "Invalid oracle price");
+    uint256 price = uint256(priceInt);
+    uint256 lusdAmount = (msg.value * price) / 10**8;
 
-        _mint(msg.sender, lusdAmount);
+    _mint(msg.sender, lusdAmount);
 
-        // Transfer ETH to feeClaimer
-        (bool success, ) = feeClaimer.call{value: msg.value}("");
-        require(success, "ETH transfer failed");
-        emit EthTransferred(feeClaimer, msg.value);
-
-        emit Dispense(msg.sender, feeClaimer, lusdAmount);
+    // Register recipient in TokenRegistry
+    if (tokenRegistry != address(0)) {
+        address[] memory users = new address[](1);
+        users[0] = msg.sender;
+        try TokenRegistry(tokenRegistry).initializeBalances(address(this), users) {} catch {
+            emit TokenRegistryCallFailed(msg.sender, address(this));
+        }
     }
+
+    // Transfer ETH to feeClaimer
+    (bool success, ) = feeClaimer.call{value: msg.value}("");
+    require(success, "ETH transfer failed");
+    emit EthTransferred(feeClaimer, msg.value);
+
+    emit Dispense(msg.sender, feeClaimer, lusdAmount);
+}
 
     // Modified transfer and transferFrom to use new internal functions
 function transfer(address to, uint256 amount) external returns (bool) {
