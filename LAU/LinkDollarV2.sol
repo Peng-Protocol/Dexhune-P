@@ -1,6 +1,9 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-10-15: Split _transfer into _transferWithRegistry and _transferBasic for distinct transfer/transferFrom logic
+- Added rewardExceptions array and mapping, with owner-only add/remove functions
+- Added paginated view function for rewardExceptions
  - 2025-10-02: Removed ITokenRegistry interface, tokenRegistry state variable, setTokenRegistry function, TokenRegistryNotSet and TokenRegistryCallFailed events, and all related calls.
  - 2025-05-20: Added try-catch for initializeBalances in _transfer and dispense, added TokenRegistryCallFailed event.
  - 2025-05-20: Updated ITokenRegistry interface to use initializeBalances(address token, address[] memory users).
@@ -18,6 +21,10 @@ interface IERC20 {
     function allowance(address owner, address spender) external view returns (uint256);
     function approve(address spender, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+
+interface TokenRegistry {
+    function initializeBalances(address token, address[] memory userAddresses) external;
 }
 
 interface IOracle {
@@ -48,6 +55,10 @@ contract LinkDollarV2 {
     uint8 private constant DECIMALS = 18;
     string private constant NAME = "Link Dollar v2";
     string private constant SYMBOL = "LUSD";
+    
+    mapping(address => bool isExempt) public rewardExceptions;
+    address[] private rewardExceptionList;
+    address public tokenRegistry;
 
     // Events
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -57,6 +68,10 @@ contract LinkDollarV2 {
     event OracleAddressSet(address indexed oracleAddress);
     event FeeClaimerSet(address indexed feeClaimer);
     event EthTransferred(address indexed to, uint256 amount);
+    
+    // Token registry events
+event TokenRegistryCallFailed(address indexed user, address indexed token);
+event TokenRegistrySet(address indexed tokenRegistry);
 
     // Modifiers
     modifier onlyOwner() {
@@ -80,6 +95,38 @@ contract LinkDollarV2 {
         cellHeight = 0;
         emit Transfer(address(0), msg.sender, _totalSupply);
     }
+    
+    function addRewardExceptions(address[] memory accounts) external onlyOwner {
+    for (uint256 i = 0; i < accounts.length; i++) {
+        if (accounts[i] != address(0) && !rewardExceptions[accounts[i]]) {
+            rewardExceptions[accounts[i]] = true;
+            rewardExceptionList.push(accounts[i]);
+        }
+    }
+}
+
+function removeRewardExceptions(address[] memory accounts) external onlyOwner {
+    for (uint256 i = 0; i < accounts.length; i++) {
+        if (rewardExceptions[accounts[i]]) {
+            rewardExceptions[accounts[i]] = false;
+            for (uint256 j = 0; j < rewardExceptionList.length; j++) {
+                if (rewardExceptionList[j] == accounts[i]) {
+                    rewardExceptionList[j] = rewardExceptionList[rewardExceptionList.length - 1];
+                    rewardExceptionList.pop();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// Add to external functions
+function setTokenRegistry(address _tokenRegistry) external onlyOwner {
+    // Sets TokenRegistry address
+    require(_tokenRegistry != address(0), "Invalid registry address");
+    tokenRegistry = _tokenRegistry;
+    emit TokenRegistrySet(_tokenRegistry);
+}
 
     // External functions
     function dispense() external payable nonReentrant {
@@ -102,18 +149,19 @@ contract LinkDollarV2 {
         emit Dispense(msg.sender, feeClaimer, lusdAmount);
     }
 
-    function transfer(address to, uint256 amount) external returns (bool) {
-        _transfer(msg.sender, to, amount);
-        return true;
-    }
+    // Modified transfer and transferFrom to use new internal functions
+function transfer(address to, uint256 amount) external returns (bool) {
+    _transferWithRegistry(msg.sender, to, amount);
+    return true;
+}
 
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        uint256 allowed = _allowances[from][msg.sender];
-        require(allowed >= amount, "Insufficient allowance");
-        unchecked { _allowances[from][msg.sender] = allowed - amount; }
-        _transfer(from, to, amount);
-        return true;
-    }
+function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+    uint256 allowed = _allowances[from][msg.sender];
+    require(allowed >= amount, "Insufficient allowance");
+    unchecked { _allowances[from][msg.sender] = allowed - amount; }
+    _transferBasic(from, to, amount);
+    return true;
+}
 
     function approve(address spender, uint256 amount) external returns (bool) {
         _allowances[msg.sender][spender] = amount;
@@ -233,34 +281,79 @@ contract LinkDollarV2 {
         int256 price = IOracle(oracleAddress).latestAnswer();
         return price > 0 ? uint256(price) : 0;
     }
+    
+    function getRewardExceptions(uint256 start, uint256 maxIterations) external view returns (address[] memory exceptions) {
+    uint256 end = start + maxIterations < rewardExceptionList.length ? start + maxIterations : rewardExceptionList.length;
+    exceptions = new address[](end - start);
+    for (uint256 i = start; i < end; i++) {
+        exceptions[i - start] = rewardExceptionList[i];
+    }
+}
 
     // Internal functions
-    function _transfer(address from, address to, uint256 amount) private {
-        require(from != address(0), "Transfer from zero address");
-        require(to != address(0), "Transfer to zero address");
-        require(_balances[from] >= amount, "Insufficient balance");
+    function _transferWithRegistry(address from, address to, uint256 amount) private {
+    require(from != address(0), "Transfer from zero address");
+    require(to != address(0), "Transfer to zero address");
+    require(_balances[from] >= amount, "Insufficient balance");
 
-        uint256 fee = (amount * FEE_BPS) / 10000;
-        uint256 amountAfterFee = amount - fee;
+    uint256 fee = (amount * FEE_BPS) / 10000;
+    uint256 amountAfterFee = amount - fee;
 
-        unchecked {
-            _balances[from] -= amount;
-            _balances[to] += amountAfterFee;
-            contractBalance += fee;
-        }
+    unchecked {
+        _balances[from] -= amount;
+        _balances[to] += amountAfterFee;
+        contractBalance += fee;
+    }
 
-        _updateCells(from, _balances[from]);
-        _updateCells(to, _balances[to]);
+    _updateCells(from, _balances[from]);
+    _updateCells(to, _balances[to]);
 
-        emit Transfer(from, to, amountAfterFee);
-        emit Transfer(from, address(this), fee);
-
-        swapCount++;
-        if (swapCount % SWAPS_PER_CYCLE == 0) {
-            wholeCycle++;
-            _distributeRewards();
+    // Register sender and receiver in TokenRegistry with dynamic array
+    if (tokenRegistry != address(0)) {
+        address[] memory users = new address[](2);
+        users[0] = from;
+        users[1] = to;
+        try TokenRegistry(tokenRegistry).initializeBalances(address(this), users) {} catch {
+            emit TokenRegistryCallFailed(from, address(this));
         }
     }
+
+    emit Transfer(from, to, amountAfterFee);
+    emit Transfer(from, address(this), fee);
+
+    swapCount++;
+    if (swapCount % SWAPS_PER_CYCLE == 0) {
+        wholeCycle++;
+        _distributeRewards();
+    }
+}
+
+function _transferBasic(address from, address to, uint256 amount) private {
+    require(from != address(0), "Transfer from zero address");
+    require(to != address(0), "Transfer to zero address");
+    require(_balances[from] >= amount, "Insufficient balance");
+
+    uint256 fee = (amount * FEE_BPS) / 10000;
+    uint256 amountAfterFee = amount - fee;
+
+    unchecked {
+        _balances[from] -= amount;
+        _balances[to] += amountAfterFee;
+        contractBalance += fee;
+    }
+
+    _updateCells(from, _balances[from]);
+    _updateCells(to, _balances[to]);
+
+    emit Transfer(from, to, amountAfterFee);
+    emit Transfer(from, address(this), fee);
+
+    swapCount++;
+    if (swapCount % SWAPS_PER_CYCLE == 0) {
+        wholeCycle++;
+        _distributeRewards();
+    }
+}
 
     function _mint(address account, uint256 amount) private {
         require(account != address(0), "Mint to zero address");
@@ -325,37 +418,38 @@ contract LinkDollarV2 {
         }
     }
 
-    function _distributeRewards() private {
-        if (contractBalance == 0 || cellHeight == 0) return;
+    // Modified _distributeRewards to skip reward-exempt addresses
+function _distributeRewards() private {
+    if (contractBalance == 0 || cellHeight == 0) return;
 
-        uint256 selectedCell = uint256(keccak256(abi.encode(blockhash(block.number - 1), block.timestamp))) % (cellHeight + 1);
-        if (cellCycle[selectedCell] >= wholeCycle) return;
+    uint256 selectedCell = uint256(keccak256(abi.encode(blockhash(block.number - 1), block.timestamp))) % (cellHeight + 1);
+    if (cellCycle[selectedCell] >= wholeCycle) return;
 
-        uint256 rewardAmount = (contractBalance * FEE_BPS) / 10000;
-        if (rewardAmount == 0) return;
+    uint256 rewardAmount = (contractBalance * FEE_BPS) / 10000;
+    if (rewardAmount == 0) return;
 
-        uint256 cellBalance;
-        for (uint256 i = 0; i < CELL_SIZE; i++) {
-            address account = cells[selectedCell][i];
-            if (account == address(0)) continue;
-            cellBalance += _balances[account];
-        }
-        if (cellBalance == 0) return;
-
-        contractBalance -= rewardAmount;
-
-        for (uint256 i = 0; i < CELL_SIZE; i++) {
-            address account = cells[selectedCell][i];
-            if (account == address(0)) continue;
-            uint256 accountBalance = _balances[account];
-            if (accountBalance == 0) continue;
-            uint256 accountReward = (rewardAmount * accountBalance) / cellBalance;
-            unchecked { _balances[account] += accountReward; }
-            _updateCells(account, _balances[account]);
-            emit Transfer(address(this), account, accountReward);
-        }
-
-        cellCycle[selectedCell]++;
-        emit RewardsDistributed(selectedCell, rewardAmount);
+    uint256 cellBalance;
+    for (uint256 i = 0; i < CELL_SIZE; i++) {
+        address account = cells[selectedCell][i];
+        if (account == address(0) || rewardExceptions[account]) continue;
+        cellBalance += _balances[account];
     }
+    if (cellBalance == 0) return;
+
+    contractBalance -= rewardAmount;
+
+    for (uint256 i = 0; i < CELL_SIZE; i++) {
+        address account = cells[selectedCell][i];
+        if (account == address(0) || rewardExceptions[account]) continue;
+        uint256 accountBalance = _balances[account];
+        if (accountBalance == 0) continue;
+        uint256 accountReward = (rewardAmount * accountBalance) / cellBalance;
+        unchecked { _balances[account] += accountReward; }
+        _updateCells(account, _balances[account]);
+        emit Transfer(address(this), account, accountReward);
+    }
+
+    cellCycle[selectedCell]++;
+    emit RewardsDistributed(selectedCell, rewardAmount);
+}
 }

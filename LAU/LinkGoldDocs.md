@@ -1,7 +1,7 @@
 # Link Gold (LAU) Smart Contract Docs
 
 ## Overview
-Link Gold (LAU) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LAU by depositing ETH, a cell-based balance tracking system, and a reward distribution mechanism based on `wholeCycle` and `cellCycle` counters. LAU uses Chainlink XAU/USD and ETH/USD oracles to calculate ETH/XAU for minting.
+Link Gold (LAU) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LAU by depositing ETH, a cell-based balance tracking system, and a reward distribution mechanism based on `wholeCycle` and `cellCycle` counters. LAU uses Chainlink XAU/USD and ETH/USD oracles to calculate ETH/XAU for minting. It integrates with `TokenRegistry` for transfer tracking and supports reward exemptions.
 
 ## Dispense Mechanism
 The `dispense` function mints LAU by depositing ETH:
@@ -14,31 +14,38 @@ The `dispense` function mints LAU by depositing ETH:
 - **Security**: `nonReentrant` modifier prevents reentrancy.
 
 ## Transfer and Fees
-- **transfer(to, amount)**: Transfers LAU without fees.
+- **transfer(to, amount)**: Transfers LAU without fees, registers sender/receiver in `TokenRegistry`.
   - **Params**: `to` (recipient address), `amount` (LAU).
-  - **Logic**: Calls `_transfer(msg.sender, to, amount)`. Returns `true`.
-  - **Call Tree**: `_transfer` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `_distributeRewards` (if `swapCount % 10 == 0`) → `_updateCells` (per rewarded address).
-  - **Emits**: `Transfer(from, to, amount)`.
-- **transferFrom(from, to, amount)**: Transfers LAU with allowance check.
+  - **Logic**: Calls `_transferWithRegistry(msg.sender, to, amount)`. Registers in `TokenRegistry` via `initializeBalances`. Returns `true`.
+  - **Call Tree**: `_transferWithRegistry` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `TokenRegistry.initializeBalances`, `_distributeRewards` (if `swapCount % 10 == 0`) → `_updateCells` (per rewarded address).
+  - **Emits**: `Transfer(from, to, amount)`, `TokenRegistryCallFailed` (if registry fails).
+- **transferFrom(from, to, amount)**: Transfers LAU with allowance check, no `TokenRegistry` calls.
   - **Params**: `from` (sender), `to` (recipient), `amount` (LAU).
-  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transfer`. Returns `true`.
-  - **Call Tree**: Same as `transfer`.
+  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transferBasic`. Returns `true`.
+  - **Call Tree**: `_transferBasic` → `_updateCells`, `_distributeRewards` (if needed).
 
 ## Cell System
 - **Structure**: `cells` (mapping: `uint256` → `address[100]`) stores non-zero balance addresses. `addressToCell` maps addresses to cell index.
 - **CellHeight**: Public `uint256`, tracks highest cell index.
 - **Addition**: Non-zero balance addresses added to `cells[cellHeight]`. Increments `cellHeight` if full.
-- **Removal**: Zero-balance addresses removed via gap-closing (last non-zero address in cell fills gap). If highest cell empties, `cellHeight` decrements.
-- **Internal Call**: `_updateCells(account, newBalance)` called by `_mint`, `_transfer`, `_distributeRewards`.
+- **Removal**: Zero-balance addresses removed via gap-closing (last non-zero address fills gap). If highest cell empties, `cellHeight` decrements.
+- **Internal Call**: `_updateCells(account, newBalance)` called by `_mint`, `_transferWithRegistry`, `_transferBasic`, `_distributeRewards`.
+
+## Reward Distribution
+- **Mechanism**: Distributes `contractBalance / 10000` to a randomly selected cell every 10 swaps (`swapCount % 10 == 0`), incrementing `wholeCycle`.
+- **Logic**: 
+  - Selects cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. Skips if `cellCycle[selectedCell] >= wholeCycle` or `cellBalance == 0`.
+  - Calculates total `cellBalance` excluding `rewardExceptions` addresses.
+  - Distributes reward proportionally to non-exempt account balances in the cell.
+  - Updates `contractBalance`, `_balances`, `cellCycle[selectedCell]`.
+- **Reward Exceptions**: `rewardExceptions` mapping and `rewardExceptionList` array track exempt addresses, managed via `addRewardExceptions` and `removeRewardExceptions` (owner-only). `getRewardExceptions(start, maxIterations)` provides paginated access.
+- **Call Tree**: `_distributeRewards` → `_updateCells` (per rewarded address).
+- **Emits**: `Transfer(address(this), account, accountReward)`, `RewardsDistributed(selectedCell, rewardAmount)`.
+- **Trigger**: Called by `_transferWithRegistry`, `_transferBasic` when `wholeCycle` increments.
 
 ## WholeCycle and CellCycle
 - **WholeCycle**: Increments every 10 swaps (`swapCount % 10 == 0`).
 - **CellCycle**: `mapping(uint256 => uint256)` tracks reward cycles per cell.
-- **Reward Distribution** (`_distributeRewards`):
-  - **Trigger**: Called by `_transfer` when `wholeCycle` increments.
-  - **Logic**: Selects random cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. If `cellCycle[selectedCell] < wholeCycle`, distributes `contractBalance / 10000` proportionally to cell balances. Updates `contractBalance`, `_balances`, `cellCycle`.
-  - **Call Tree**: `_updateCells` for each rewarded address.
-  - **Emits**: `Transfer(address(this), account, accountReward)`, `RewardsDistributed(selectedCell, rewardAmount)`.
 
 ## Reentrancy Protection
 - `dispense`: Uses `nonReentrant` modifier.
@@ -48,11 +55,10 @@ The `dispense` function mints LAU by depositing ETH:
 - **Interface**: `IOracle.latestAnswer()` returns int256 (8 decimals) for XAU/USD or ETH/USD.
 - **Logic**: `setOracleAddresses(_oracleAddresses)` (owner-only) sets `[XAU/USD, ETH/USD]`. `dispense` and `getOraclePrice` calculate `ethXauPrice = (ethUsdPrice * 10^8) / xauUsdPrice`. Reverts on negative prices.
 - **Call Tree**: `IOracle.latestAnswer()` called by `dispense`, `getOraclePrice`.
-- **Frontend Interaction (Etherscan)**: To call `setOracleAddresses` via Etherscan:
-  - Navigate to the contract’s “Write Contract” tab on Etherscan.
-  - Connect your wallet (owner address required).
-  - In the `setOracleAddresses` input, enter the array as a comma-separated list in square brackets, e.g., `[0xXAUUSDAddress,0xETHUSDAddress]`, where `0xXAUUSDAddress` and `0xETHUSDAddress` are the Chainlink oracle addresses for XAU/USD and ETH/USD.
-  - Submit the transaction, ensuring both addresses are valid and non-zero to avoid reversion.
+- **Frontend Interaction (Etherscan)**: To call `setOracleAddresses`:
+  - Navigate to “Write Contract” on Etherscan.
+  - Connect owner wallet.
+  - Input `[0xXAUUSDAddress,0xETHUSDAddress]` in `setOracleAddresses`, using valid Chainlink oracle addresses.
 
 ## Query Functions
 - **Standard**:
@@ -67,10 +73,12 @@ The `dispense` function mints LAU by depositing ETH:
   - `getCell(cellIndex)`: Returns `cells[cellIndex]`.
   - `getAddressCell(account)`: Returns `addressToCell[account]`.
   - `getCellBalances(cellIndex)`: Returns non-zero addresses and balances in cell.
-  - `getTopHolders(count)`: Iterates over all cells (might be gas intensive), Returns top holders up to the `count` number specified and their balances.
+  - `getTopHolders(count)`: Returns top `count` holders and balances.
+  - `getRewardExceptions(start, maxIterations)`: Returns paginated exempt addresses.
 
 ## Security Considerations
-- **Owner Privileges**: `setOracleAddresses`, `setFeeClaimer` are owner-only.
+- **Owner Privileges**: `setOracleAddresses`, `setFeeClaimer`, `setTokenRegistry`, `addRewardExceptions`, `removeRewardExceptions` are owner-only.
 - **Cell Management**: Empty cells below `cellHeight` may be selected (skipped if `cellBalance == 0`).
 - **ETH Transfer**: `feeClaimer` must accept ETH to avoid `dispense` reversion.
-- **Oracle Accuracy**: Ensure Chainlink oracles provide reliable XAU/USD and ETH/USD prices.
+- **Oracle Accuracy**: Ensure Chainlink oracles provide reliable prices.
+- **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer`.
