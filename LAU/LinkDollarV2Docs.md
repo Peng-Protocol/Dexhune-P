@@ -34,20 +34,22 @@ The `dispense` function mints LUSD by depositing ETH:
 - **Internal Call**: `_updateCells(account, newBalance)` called by `_mint`, `_transferWithRegistry`, `_transferBasic`, `_distributeRewards`.
 
 ## Reward Distribution
-- **Mechanism**: Distributes `contractBalance * 0.05%` to a randomly selected cell every 10 swaps (`swapCount % 10 == 0`), incrementing `wholeCycle`.
+- **Mechanism**: Every 10 swaps (`swapCount % 10 == 0`), checks if all cells have `cellCycle >= wholeCycle`. If true, increments `wholeCycle` and skips distribution. Otherwise, selects a cell with `cellCycle < wholeCycle` to distribute `contractBalance * 0.05%`.
 - **Logic**: 
-  - Selects cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. Skips if `cellCycle[selectedCell] >= wholeCycle` or `cellBalance == 0`.
+  - Checks all cells for `cellCycle < wholeCycle`. If none, increments `wholeCycle` and returns.
+  - Selects cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. Iterates (up to `cellHeight + 1` times) to find a cell with `cellCycle < wholeCycle`. Skips if none found or `cellBalance == 0`.
   - Calculates total `cellBalance` excluding `rewardExceptions` addresses.
   - Distributes reward proportionally to non-exempt account balances in the cell.
   - Updates `contractBalance`, `_balances`, `cellCycle[selectedCell]`.
 - **Reward Exceptions**: `rewardExceptions` mapping and `rewardExceptionList` array track exempt addresses, managed via `addRewardExceptions` and `removeRewardExceptions` (owner-only). `getRewardExceptions(start, maxIterations)` provides paginated access.
 - **Call Tree**: `_distributeRewards` → `_updateCells` (per rewarded address).
 - **Emits**: `Transfer(address(this), account, accountReward)`, `RewardsDistributed(selectedCell, rewardAmount)`.
-- **Trigger**: Called by `_transferWithRegistry`, `_transferBasic` when `wholeCycle` increments.
+- **Trigger**: Called by `_transferWithRegistry`, `_transferBasic` when `swapCount % 10 == 0`.
+- **Key Insight**: Ensures all cells receive rewards before advancing `wholeCycle`, improving fairness by preventing repeated rewards to the same cell.
 
 ## WholeCycle and CellCycle
-- **WholeCycle**: Increments every 10 swaps (`swapCount % 10 == 0`).
-- **CellCycle**: `mapping(uint256 => uint256)` tracks reward cycles per cell.
+- **WholeCycle**: Increments only when all cells have `cellCycle >= wholeCycle` after 10 swaps.
+- **CellCycle**: `mapping(uint256 => uint256)` tracks reward cycles per cell, incremented after distribution.
 
 ## Reentrancy Protection
 - `dispense`: Uses `nonReentrant` modifier.
@@ -83,3 +85,4 @@ The `dispense` function mints LUSD by depositing ETH:
 - **Cell Management**: Empty cells below `cellHeight` may be selected (skipped if `cellBalance == 0`).
 - **ETH Transfer**: `feeClaimer` must accept ETH to avoid `dispense` reversion.
 - **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer` and `dispense`.
+- **Gas Consideration**: `_distributeRewards` loop for cell cycle checks may increase gas costs, requiring monitoring.

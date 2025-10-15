@@ -1,10 +1,11 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-10-15: Modified _distributeRewards to increment wholeCycle only when all cells' cellCycle equals wholeCycle, ensuring fair reward distribution across cells.
  - 2025-10-15: Added TokenRegistry call in dispense to register recipient after minting.
-- 2025-10-15: Split _transfer into _transferWithRegistry and _transferBasic for distinct transfer/transferFrom logic
-- Added rewardExceptions array and mapping, with owner-only add/remove functions
-- Added paginated view function for rewardExceptions
+ - 2025-10-15: Split _transfer into _transferWithRegistry and _transferBasic for distinct transfer/transferFrom logic
+ - Added rewardExceptions array and mapping, with owner-only add/remove functions
+ - Added paginated view function for rewardExceptions
  - 2025-10-02: Replaced setOracleAddress with setOracleAddresses to take [XAU/USD, ETH/USD] oracles. Updated dispense and getOraclePrice to calculate ETH/XAU price.
  - 2025-10-02: Removed ITokenRegistry interface, tokenRegistry state variable, setTokenRegistry function, TokenRegistryNotSet and TokenRegistryCallFailed events, and all related calls.
  - 2025-08-11: Removed TokenRegistry updates from _distributeRewards, keeping them only in transfer/transferFrom and dispense.
@@ -446,12 +447,33 @@ function _transferBasic(address from, address to, uint256 amount) private {
         }
     }
 
-    // Modified _distributeRewards to skip reward-exempt addresses
+    // Modified _distributeRewards to ensure fairness 
 function _distributeRewards() private {
+    // Distributes rewards only if a cell has cellCycle < wholeCycle
     if (contractBalance == 0 || cellHeight == 0) return;
 
+    // Check if all cells have cellCycle equal to wholeCycle
+    bool allCellsSynced = true;
+    for (uint256 i = 0; i <= cellHeight; i++) {
+        if (cellCycle[i] < wholeCycle) {
+            allCellsSynced = false;
+            break;
+        }
+    }
+
+    if (allCellsSynced) {
+        wholeCycle++;
+        return; // No distribution, wait for next cycle
+    }
+
+    // Find a cell with cellCycle < wholeCycle
     uint256 selectedCell = uint256(keccak256(abi.encode(blockhash(block.number - 1), block.timestamp))) % (cellHeight + 1);
-    if (cellCycle[selectedCell] >= wholeCycle) return;
+    uint256 attempts = 0;
+    while (cellCycle[selectedCell] >= wholeCycle && attempts < cellHeight + 1) {
+        selectedCell = (selectedCell + 1) % (cellHeight + 1);
+        attempts++;
+    }
+    if (cellCycle[selectedCell] >= wholeCycle) return; // No eligible cell found
 
     uint256 rewardAmount = contractBalance / 10000;
     if (rewardAmount == 0) return;
