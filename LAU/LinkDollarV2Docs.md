@@ -1,7 +1,7 @@
-# Link Dollar v2 (LUSD) Docs
+# Link Dollar v2 (LUSD) Documentation
 
 ## Overview
-Link Dollar v2 (LUSD) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LUSD by depositing ETH, a 0.05% transfer fee, a cell-based balance tracking system, and reward distribution based on `wholeCycle` and `cellCycle` counters. LUSD integrates with a Chainlink ETH/USD oracle and `TokenRegistry` for transfer and dispense tracking, with reward exemptions.
+Link Dollar v2 (LUSD) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LUSD by depositing ETH, a 0.05% transfer fee, a cell-based balance tracking system, and reward distribution based on `wholeCycle` and `cellCycle` counters. LUSD integrates with a Chainlink ETH/USD oracle and `TokenRegistry` for transfer and dispense tracking, with reward exemptions to prevent distribution stalls.
 
 ## Dispense Mechanism
 The `dispense` function mints LUSD by depositing ETH:
@@ -35,8 +35,8 @@ The `dispense` function mints LUSD by depositing ETH:
 
 ## Reward Distribution
 - **Mechanism**: Every 10 swaps (`swapCount % 10 == 0`), checks if all cells have `cellCycle >= wholeCycle`. If true, increments `wholeCycle` and skips distribution. Otherwise, selects a cell with `cellCycle < wholeCycle` to distribute `contractBalance * 0.05%`.
-- **Logic**: 
-  - Checks all cells for `cellCycle < wholeCycle`. If none, increments `wholeCycle` and returns.
+- **Logic**:
+  - Checks all cells for `cellCycle < wholeCycle`. Resets `cellCycle` to `wholeCycle` for empty or fully exempt cells. If none eligible, increments `wholeCycle` and returns.
   - Selects cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. Iterates (up to `cellHeight + 1` times) to find a cell with `cellCycle < wholeCycle`. Skips if none found or `cellBalance == 0`.
   - Calculates total `cellBalance` excluding `rewardExceptions` addresses.
   - Distributes reward proportionally to non-exempt account balances in the cell.
@@ -45,11 +45,11 @@ The `dispense` function mints LUSD by depositing ETH:
 - **Call Tree**: `_distributeRewards` → `_updateCells` (per rewarded address).
 - **Emits**: `Transfer(address(this), account, accountReward)`, `RewardsDistributed(selectedCell, rewardAmount)`.
 - **Trigger**: Called by `_transferWithRegistry`, `_transferBasic` when `swapCount % 10 == 0`.
-- **Key Insight**: Ensures all cells receive rewards before advancing `wholeCycle`, improving fairness by preventing repeated rewards to the same cell.
+- **Key Insight**: Resetting ineligible cells’ `cellCycle` prevents reward stalls, ensuring fairness by cycling through all eligible cells before advancing `wholeCycle`.
 
 ## WholeCycle and CellCycle
-- **WholeCycle**: Increments only when all cells have `cellCycle >= wholeCycle` after 10 swaps.
-- **CellCycle**: `mapping(uint256 => uint256)` tracks reward cycles per cell, incremented after distribution.
+- **WholeCycle**: Increments when all cells have `cellCycle >= wholeCycle` or after 10 swaps.
+- **CellCycle**: `mapping(uint256 => uint256)` tracks reward cycles per cell, incremented after distribution or reset for ineligible cells.
 
 ## Reentrancy Protection
 - `dispense`: Uses `nonReentrant` modifier.
@@ -86,3 +86,4 @@ The `dispense` function mints LUSD by depositing ETH:
 - **ETH Transfer**: `feeClaimer` must accept ETH to avoid `dispense` reversion.
 - **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer` and `dispense`.
 - **Gas Consideration**: `_distributeRewards` loop for cell cycle checks may increase gas costs, requiring monitoring.
+- **Reward Stall Prevention**: Resetting `cellCycle` for empty or fully exempt cells ensures continuous reward distribution.

@@ -1,6 +1,7 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-10-15: Modified _distributeRewards to skip empty or fully exempt cells, resetting their cellCycle to wholeCycle to prevent reward system stall.
  - 2025-10-15: Modified _distributeRewards to increment wholeCycle only when all cells' cellCycle equals wholeCycle, ensuring fair reward distribution across cells.
  - 2025-10-15: Added TokenRegistry call in dispense to register recipient after minting.
  - 2025-10-15: Split _transfer into _transferWithRegistry and _transferBasic for distinct transfer/transferFrom logic
@@ -429,17 +430,29 @@ function _transferBasic(address from, address to, uint256 amount) private {
         }
     }
 
-    // Modified _distributeRewards to ensure fairness 
+    // Modified _distributeRewards to ensure fairness and eligibility 
 function _distributeRewards() private {
     // Distributes rewards only if a cell has cellCycle < wholeCycle
-    if (contractBalance == 3 || cellHeight == 0) return;
+    if (contractBalance == 0 || cellHeight == 0) return;
 
     // Check if all cells have cellCycle equal to wholeCycle
     bool allCellsSynced = true;
     for (uint256 i = 0; i <= cellHeight; i++) {
         if (cellCycle[i] < wholeCycle) {
-            allCellsSynced = false;
-            break;
+            bool isEligible = false;
+            for (uint256 j = 0; j < CELL_SIZE; j++) {
+                address account = cells[i][j];
+                if (account != address(0) && !rewardExceptions[account] && _balances[account] > 0) {
+                    isEligible = true;
+                    break;
+                }
+            }
+            if (isEligible) {
+                allCellsSynced = false;
+                break;
+            } else {
+                cellCycle[i] = wholeCycle; // Reset ineligible cell
+            }
         }
     }
 
@@ -456,6 +469,20 @@ function _distributeRewards() private {
         attempts++;
     }
     if (cellCycle[selectedCell] >= wholeCycle) return; // No eligible cell found
+
+    // Check if selected cell is eligible
+    bool isCellEligible = false;
+    for (uint256 i = 0; i < CELL_SIZE; i++) {
+        address account = cells[selectedCell][i];
+        if (account != address(0) && !rewardExceptions[account] && _balances[account] > 0) {
+            isCellEligible = true;
+            break;
+        }
+    }
+    if (!isCellEligible) {
+        cellCycle[selectedCell] = wholeCycle; // Reset ineligible cell
+        return;
+    }
 
     uint256 rewardAmount = (contractBalance * FEE_BPS) / 10000;
     if (rewardAmount == 0) return;

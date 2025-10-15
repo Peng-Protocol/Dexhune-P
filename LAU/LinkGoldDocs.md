@@ -1,7 +1,7 @@
-# Link Gold (LAU) Smart Contract Docs
+# Link Gold (LAU) Documentation
 
 ## Overview
-Link Gold (LAU) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LAU by depositing ETH, a cell-based balance tracking system, and a reward distribution mechanism based on `wholeCycle` and `cellCycle` counters. LAU uses Chainlink XAU/USD and ETH/USD oracles to calculate ETH/XAU for minting. It integrates with `TokenRegistry` for transfer and dispense tracking, with reward exemptions.
+Link Gold (LAU) is an ERC20-compliant token with 18 decimals, built on Solidity ^0.8.2. It features a dispense mechanism to mint LAU by depositing ETH, a cell-based balance tracking system, and a reward distribution mechanism based on `wholeCycle` and `cellCycle` counters. LAU uses Chainlink XAU/USD and ETH/USD oracles to calculate ETH/XAU for minting. It integrates with `TokenRegistry` for transfer and dispense tracking, with reward exemptions to prevent distribution stalls.
 
 ## Dispense Mechanism
 The `dispense` function mints LAU by depositing ETH:
@@ -34,8 +34,8 @@ The `dispense` function mints LAU by depositing ETH:
 
 ## Reward Distribution
 - **Mechanism**: Distributes `contractBalance / 10000` to a cell with `cellCycle < wholeCycle` every 10 swaps (`swapCount % 10 == 0`). If all cells have `cellCycle >= wholeCycle`, increments `wholeCycle` without distribution.
-- **Logic**: 
-  - Checks if all cells have `cellCycle >= wholeCycle`. If true, increments `wholeCycle` and skips distribution.
+- **Logic**:
+  - Checks if all cells have `cellCycle >= wholeCycle`. Resets `cellCycle` to `wholeCycle` for empty or fully exempt cells. If none eligible, increments `wholeCycle` and returns.
   - Selects cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. Iterates to find a cell with `cellCycle < wholeCycle`. Skips if none found or `cellBalance == 0`.
   - Calculates total `cellBalance` excluding `rewardExceptions` addresses.
   - Distributes reward proportionally to non-exempt account balances in the cell.
@@ -44,10 +44,11 @@ The `dispense` function mints LAU by depositing ETH:
 - **Call Tree**: `_distributeRewards` → `_updateCells` (per rewarded address).
 - **Emits**: `Transfer(address(this), account, accountReward)`, `RewardsDistributed(selectedCell, rewardAmount)`.
 - **Trigger**: Called by `_transferWithRegistry`, `_transferBasic` when `swapCount % 10 == 0`.
+- **Key Insight**: Resetting ineligible cells’ `cellCycle` prevents reward stalls, ensuring all eligible cells are rewarded before advancing `wholeCycle`.
 
 ## WholeCycle and CellCycle
-- **WholeCycle**: Increments only when all cells have `cellCycle >= wholeCycle` or after 10 swaps (`swapCount % 10 == 0`).
-- **CellCycle**: `mapping(uint256 => uint256)` tracks reward cycles per cell, incremented after rewards are distributed.
+- **WholeCycle**: Increments when all cells have `cellCycle >= wholeCycle` or after 10 swaps.
+- **CellCycle**: `mapping(uint256 => uint256)` tracks reward cycles per cell, incremented after distribution or reset for ineligible cells.
 
 ## Reentrancy Protection
 - `dispense`: Uses `nonReentrant` modifier.
@@ -83,4 +84,4 @@ The `dispense` function mints LAU by depositing ETH:
 - **Cell Management**: Empty cells below `cellHeight` may be selected (skipped if `cellBalance == 0`).
 - **ETH Transfer**: `feeClaimer` must accept ETH to avoid `dispense` reversion.
 - **TokenRegistry**: Must be set via `setTokenRegistry` to enable registration in `transfer` and `dispense`.
-- **Reward Fairness**: Modified `_distributeRewards` ensures all cells receive rewards before `wholeCycle` increments, improving distribution fairness.
+- **Reward Stall Prevention**: Resetting `cellCycle` for empty or fully exempt cells ensures continuous reward distribution.
