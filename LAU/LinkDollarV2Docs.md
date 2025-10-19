@@ -16,15 +16,15 @@ The `dispense` function mints LUSD by depositing ETH:
 ## Transfer and Fees
 - **transfer(to, amount)**: Transfers LUSD with 0.05% fee, registers sender/receiver in `TokenRegistry`.
   - **Params**: `to` (recipient address), `amount` (LUSD).
-  - **Logic**: Calls `_transferWithRegistry(msg.sender, to, amount)`. Deducts fee (`amount * 0.05%`), registers in `TokenRegistry` via `initializeBalances`. Increments `swapCount`, triggers `_distributeRewards` if `swapCount % 10 == 0`. Returns `true`.
+  - **Logic**: Calls `_transferWithRegistry(msg.sender, to, amount)`. Deducts fee (`amount * 0.05%`), adds to `_balances[address(this)]`. Registers in `TokenRegistry` via `initializeBalances`. Increments `swapCount`, triggers `_distributeRewards` if `swapCount % 10 == 0`. Returns `true`.
   - **Call Tree**: `_transferWithRegistry` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `TokenRegistry.initializeBalances(address(this), [from, to])`, `_distributeRewards` (if `swapCount % 10 == 0`) → `_updateCells` (per rewarded address).
   - **Emits**: `Transfer(from, to, amountAfterFee)`, `Transfer(from, address(this), fee)`, `TokenRegistryCallFailed` (if registry fails), `RewardsDistributed`, `Transfer` (if rewards distributed).
 - **transferFrom(from, to, amount)**: Transfers LUSD with 0.05% fee, no `TokenRegistry` calls.
   - **Params**: `from` (sender), `to` (recipient), `amount` (LUSD).
-  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transferBasic`. Deducts fee, increments `swapCount`, triggers `_distributeRewards` if needed. Returns `true`.
+  - **Logic**: Checks `_allowances[from][msg.sender] >= amount`, deducts allowance, calls `_transferBasic`. Deducts fee, adds to `_balances[address(this)]`. Increments `swapCount`, triggers `_distributeRewards` if needed. Returns `true`.
   - **Call Tree**: `_transferBasic` → `_updateCells(from, newBalance)`, `_updateCells(to, newBalance)`, `_distributeRewards` (if needed) → `_updateCells` (per rewarded address).
   - **Emits**: `Transfer(from, to, amountAfterFee)`, `Transfer(from, address(this), fee)`, `RewardsDistributed`, `Transfer` (if rewards distributed).
-- **Fee**: 0.05% (5 bps) added to `contractBalance`.
+- **Fee**: 0.05% (5 bps) added to `_balances[address(this)]`.
 
 ## Cell System
 - **Structure**: `cells` (mapping: `uint256` → `address[100]`) stores non-zero balance addresses. `addressToCell` maps addresses to cell index.
@@ -34,18 +34,18 @@ The `dispense` function mints LUSD by depositing ETH:
 - **Internal Call**: `_updateCells(account, newBalance)` called by `_mint`, `_transferWithRegistry`, `_transferBasic`, `_distributeRewards`.
 
 ## Reward Distribution
-- **Mechanism**: Every 10 swaps (`swapCount % 10 == 0`), checks if all cells have `cellCycle >= wholeCycle`. If true, increments `wholeCycle` and skips distribution. Otherwise, selects a cell with `cellCycle < wholeCycle` to distribute `contractBalance * 0.05%`.
+- **Mechanism**: Every 10 swaps (`swapCount % 10 == 0`), checks if all cells have `cellCycle >= wholeCycle`. If true, increments `wholeCycle` and skips distribution. Otherwise, selects a cell with `cellCycle < wholeCycle` to distribute `_balances[address(this)] * 0.05%`.
 - **Logic**:
   - Checks all cells for `cellCycle < wholeCycle`. Resets `cellCycle` to `wholeCycle` for empty or fully exempt cells. If none eligible, increments `wholeCycle` and returns.
   - Selects cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. Iterates (up to `cellHeight + 1` times) to find a cell with `cellCycle < wholeCycle`. Skips if none found or `cellBalance == 0`.
   - Calculates total `cellBalance` excluding `rewardExceptions` addresses.
   - Distributes reward proportionally to non-exempt account balances in the cell.
-  - Updates `contractBalance`, `_balances`, `cellCycle[selectedCell]`.
+  - Updates `_balances[address(this)]`, `_balances`, `cellCycle[selectedCell]`.
 - **Reward Exceptions**: `rewardExceptions` mapping and `rewardExceptionList` array track exempt addresses, managed via `addRewardExceptions` and `removeRewardExceptions` (owner-only). `getRewardExceptions(start, maxIterations)` provides paginated access.
 - **Call Tree**: `_distributeRewards` → `_updateCells` (per rewarded address).
 - **Emits**: `Transfer(address(this), account, accountReward)`, `RewardsDistributed(selectedCell, rewardAmount)`.
 - **Trigger**: Called by `_transferWithRegistry`, `_transferBasic` when `swapCount % 10 == 0`.
-- **Key Insight**: Resetting ineligible cells’ `cellCycle` prevents reward stalls, ensuring fairness by cycling through all eligible cells before advancing `wholeCycle`.
+- **Key Insight**: Using `_balances[address(this)]` for reward pool aligns with ERC20 standards, improving transparency. Fixing `isCellEligible` to use `cells[selectedCell][i]` ensures accurate cell eligibility checks, preventing reward distribution errors.
 
 ## WholeCycle and CellCycle
 - **WholeCycle**: Increments when all cells have `cellCycle >= wholeCycle` or after 10 swaps.

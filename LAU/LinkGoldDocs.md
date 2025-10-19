@@ -33,18 +33,18 @@ The `dispense` function mints LAU by depositing ETH:
 - **Internal Call**: `_updateCells(account, newBalance)` called by `_mint`, `_transferWithRegistry`, `_transferBasic`, `_distributeRewards`.
 
 ## Reward Distribution
-- **Mechanism**: Distributes `contractBalance / 10000` to a cell with `cellCycle < wholeCycle` every 10 swaps (`swapCount % 10 == 0`). If all cells have `cellCycle >= wholeCycle`, increments `wholeCycle` without distribution.
+- **Mechanism**: Distributes `_balances[address(this)] / 10000` to a cell with `cellCycle < wholeCycle` every 10 swaps (`swapCount % 10 == 0`). If all cells have `cellCycle >= wholeCycle`, increments `wholeCycle` without distribution.
 - **Logic**:
   - Checks if all cells have `cellCycle >= wholeCycle`. Resets `cellCycle` to `wholeCycle` for empty or fully exempt cells. If none eligible, increments `wholeCycle` and returns.
   - Selects cell via `keccak256(blockhash, timestamp) % (cellHeight + 1)`. Iterates to find a cell with `cellCycle < wholeCycle`. Skips if none found or `cellBalance == 0`.
   - Calculates total `cellBalance` excluding `rewardExceptions` addresses.
   - Distributes reward proportionally to non-exempt account balances in the cell.
-  - Updates `contractBalance`, `_balances`, `cellCycle[selectedCell]`.
+  - Updates `_balances[address(this)]`, `_balances`, `cellCycle[selectedCell]`.
 - **Reward Exceptions**: `rewardExceptions` mapping and `rewardExceptionList` array track exempt addresses, managed via `addRewardExceptions` and `removeRewardExceptions` (owner-only). `getRewardExceptions(start, maxIterations)` provides paginated access.
 - **Call Tree**: `_distributeRewards` → `_updateCells` (per rewarded address).
 - **Emits**: `Transfer(address(this), account, accountReward)`, `RewardsDistributed(selectedCell, rewardAmount)`.
 - **Trigger**: Called by `_transferWithRegistry`, `_transferBasic` when `swapCount % 10 == 0`.
-- **Key Insight**: Resetting ineligible cells’ `cellCycle` prevents reward stalls, ensuring all eligible cells are rewarded before advancing `wholeCycle`.
+- **Key Insight**: Using `_balances[address(this)]` aligns reward pool with ERC20 standards, relying on external deposits (e.g., owner transfers) since transfers are fee-less. Fixing `isCellEligible` to use `cells[selectedCell][i]` ensures accurate cell eligibility checks, preventing reward distribution errors.
 
 ## WholeCycle and CellCycle
 - **WholeCycle**: Increments when all cells have `cellCycle >= wholeCycle` or after 10 swaps.
