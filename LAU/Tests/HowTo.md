@@ -2,19 +2,20 @@
 
 ## Prerequisites
 - Ensure `LinkGold.sol`, `MockFeeClaimer.sol`, `MockOracleETH.sol`, `MockOracleXAU.sol`, and `LAUTests.sol` are in your Remix workspace.
-- `LinkGold.sol` should be in the `./LAU` directory.
-- Mock contracts should be in the `./LAU/Tests` directory.
+- Place `LinkGold.sol` in `./LAU`.
+- Place mock contracts and `LAUTests.sol` in `./LAU/Tests`.
 
 ## Steps
 1. Open Remix (https://remix.ethereum.org).
-2. Upload all contracts to the respective directories.
-3. In the "Solidity Compiler" tab, select version `^0.8.2` and compile all contracts.
-4. In the "Deploy & Run Transactions" tab, select the `LAUTests` contract.
-5. Deploy `LAUTests` using the Remix VM environment.
-6. Run the `testLAUFlow` function to execute the test suite.
-7. Check the Remix console for test results, ensuring all assertions pass.
+2. Upload all contracts to the specified directories.
+3. In the "Solidity Compiler" tab, select `^0.8.2` and compile all contracts.
+4. In the "Deploy & Run Transactions" tab, select the Remix VM.
+5. Fund the default account with 3 ETH in the Remix VM.
+6. Deploy `LAUTests` using the default account.
+7. Call `testDispense` with 3 ETH, then `testApprove`, and `testMockSwap` sequentially.
+8. Check the Remix console for reverts (failed `require` statements indicate test failures).
 
 ## Notes
-- Ensure sufficient gas limits in Remix VM.
-- Verify contract paths match the import statements in `LAUTests.sol`.
-</xaiArtifact>
+- Use the default account for all calls.
+- Set gas limit to at least 10M in Remix VM.
+- Verify contract paths match import statements in `LAUTests.sol`.
