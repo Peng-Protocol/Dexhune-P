@@ -24,6 +24,8 @@ contract MockFeeClaimer {
     constructor() {
         owner = msg.sender;
     }
+    
+    receive() external payable {}
 
     // Sets LAU contract address
     function setLAU(address _lauAddress) external onlyOwner {
