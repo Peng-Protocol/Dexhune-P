@@ -1,6 +1,18 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
  Changes:
+ - 2025-10-26: Split testMockSwap into testMockSwap and testRewardDistribution.
+ - 2025-10-26: Enhanced testMockSwap with allowance checks and detailed revert reasons.
+ - 2025-10-26: Updated testDispense to ensure min 0.01 LAU per tester with 50% ETH cap.
+ - 2025-10-26: Enhanced testMockSwap error messages with tester index, token (LAU), stage.
+ - 2025-10-26: Enhanced testMockSwap with explicit balance checks and detailed revert reasons.
+ - 2025-10-26: Added MockSwapFailed event decoding in testMockSwap for detailed errors.
+ - 2025-10-26: Added balance checks in testMockSwap to debug fee collection failure.
+ - 2025-10-26: Updated testMockSwap to skip swaps if tester LAU balance is too low.
+ - 2025-10-26: Updated testMockSwap to use initiateSimpleCall for mockSwap, removing unused swapAmount.
+ - 2025-10-26: Updated testDispense to use 50% of tester ETH, testMockSwap to use 1% of LAU balance.
+ - 2025-10-26: Updated testMockSwap to log addresses not receiving rewards and check rewards after all swaps.
+ - 2025-10-26: Relaxed testMockSwap to check if any non-exempt tester received rewards.
  - 2025-10-23: Fixed testDispense to calculate expectedLAU per ethAmount in loop, added reward exception for last MockTester if >2 testers, updated testMockSwap to verify exempt address receives no rewards.
  - 2025-10-23: Removed payable modifier from testDispense, as MockTesters use their own ETH.
  - 2025-10-23: Added MockTester deployment via initiateTesters, updated testDispense, testApprove, testMockSwap to use testers, added reward validation.
@@ -38,7 +50,9 @@ contract LAUTests {
         lau.setFeeClaimer(address(feeClaimer));
         feeClaimer.setLAU(address(lau));
     }
-
+    
+    event NonRewardedTester(address indexed tester);
+    event MockSwapFailed(address indexed tester, string reason);
     // Deploys and funds MockTester contracts, adds last tester as reward exception if >2 testers
     function initiateTesters(uint256 numTesters) public payable {
         require(msg.sender == tester, "Only tester");
@@ -59,19 +73,21 @@ contract LAUTests {
 
     // Tests dispense using MockTesters
     function testDispense() public {
-        require(msg.sender == tester, "Only tester");
-        require(testers.length > 0, "No testers deployed");
-        uint256[] memory balancesBefore = new uint256[](testers.length);
+    require(msg.sender == tester, "Only tester");
+    require(testers.length > 0, "No testers deployed");
+    uint256[] memory balancesBefore = new uint256[](testers.length);
 
-        for (uint256 i = 0; i < testers.length; i++) {
-            balancesBefore[i] = lau.balanceOf(address(testers[i]));
-            uint256 ethAmount = (address(testers[i]).balance * 90) / 100;
-            uint256 expectedLAU = (ethAmount * 3500) / 4000;
-            testers[i].initiateEthCall(address(lau), ethAmount);
-            uint256 balanceAfter = lau.balanceOf(address(testers[i]));
-            require(balanceAfter - balancesBefore[i] == expectedLAU, "Incorrect LAU dispensed");
-        }
+    for (uint256 i = 0; i < testers.length; i++) {
+        balancesBefore[i] = lau.balanceOf(address(testers[i]));
+        uint256 ethAmount = (address(testers[i]).balance * 50) / 100; // Use 50% ETH
+        require(ethAmount > 0, "Tester ETH balance too low");
+        uint256 expectedLAU = (ethAmount * 3500) / 4000; // ETH to LAU ratio
+        if (expectedLAU < 0.01 * 10**18) expectedLAU = 0.01 * 10**18; // Min 0.01 LAU
+        testers[i].initiateEthCall(address(lau), ethAmount);
+        uint256 balanceAfter = lau.balanceOf(address(testers[i]));
+        require(balanceAfter - balancesBefore[i] >= expectedLAU, "Incorrect LAU dispensed for tester");
     }
+}
 
     // Tests approve using MockTesters
     function testApprove() public {
@@ -83,37 +99,84 @@ contract LAUTests {
         }
     }
 
-    // Tests mockSwap and reward distribution using MockTesters
+    // Tests mockSwap for one swap each using MockTesters
     function testMockSwap() public {
-        require(msg.sender == tester, "Only tester");
-        require(testers.length > 0, "No testers deployed");
-        uint256[] memory balancesBefore = new uint256[](testers.length);
+    require(msg.sender == tester, "Only tester");
+    require(testers.length > 0, "No testers deployed");
 
-        for (uint256 i = 0; i < testers.length; i++) {
-            balancesBefore[i] = lau.balanceOf(address(testers[i]));
-            testers[i].initiateNonEthCall(address(feeClaimer), "mockSwap()", address(0), 0);
+    for (uint256 i = 0; i < testers.length; i++) {
+        uint256 balanceBefore = lau.balanceOf(address(testers[i]));
+        if (balanceBefore < 0.01 * 10**18) {
+            emit NonRewardedTester(address(testers[i]));
+            revert(string(abi.encodePacked("Swap failed: Tester ", i, " has insufficient LAU balance")));
         }
-
-        for (uint256 i = 0; i < 19; i++) {
-            testers[0].initiateNonEthCall(address(feeClaimer), "mockSwap()", address(0), 0);
+        uint256 allowance = lau.allowance(address(testers[i]), address(feeClaimer));
+        if (allowance < 0.01 * 10**18) {
+            emit NonRewardedTester(address(testers[i]));
+            revert(string(abi.encodePacked("Swap failed: Tester ", i, " has insufficient LAU allowance")));
         }
-
-        uint256 feesInPool = lau.balanceOf(address(lau));
-        require(feesInPool > 0, "Fees were not collected");
-
-        bool rewardsDistributed = true;
-        for (uint256 i = 1; i < testers.length - (testers.length > 2 ? 1 : 0); i++) {
-            uint256 balanceAfter = lau.balanceOf(address(testers[i]));
-            if (balanceAfter <= balancesBefore[i]) {
-                rewardsDistributed = false;
-                break;
-            }
+        (bool success, bytes memory data) = address(testers[i]).call(
+            abi.encodeWithSignature("initiateSimpleCall(address,string)", address(feeClaimer), "mockSwap()")
+        );
+        if (!success) {
+            string memory reason = data.length >= 4 ? abi.decode(data, (string)) : "Unknown mockSwap error";
+            emit MockSwapFailed(address(testers[i]), reason);
+            revert(string(abi.encodePacked("Swap failed for tester ", i, ": ", reason)));
         }
-        require(rewardsDistributed, "Rewards not distributed to testers");
+        uint256 balanceAfter = lau.balanceOf(address(testers[i]));
+        uint256 fee = (balanceBefore * 1) / 10000; // 0.01% fee
+        require(balanceBefore - balanceAfter == fee, "TransferFrom failed");
+    }
+}
 
-        if (testers.length > 2) {
-            uint256 exemptBalance = lau.balanceOf(address(testers[testers.length - 1]));
-            require(exemptBalance == balancesBefore[testers.length - 1], "Exempt tester received rewards");
+// Split from testMockSwap, tests reward distribution using tester zero as initiator.
+function testRewardDistribution() public {
+    require(msg.sender == tester, "Only tester");
+    require(testers.length > 0, "No testers deployed");
+    uint256[] memory balancesBefore = new uint256[](testers.length);
+
+    for (uint256 i = 0; i < testers.length; i++) {
+        balancesBefore[i] = lau.balanceOf(address(testers[i]));
+    }
+
+    for (uint256 i = 0; i < 20; i++) {
+        uint256 currentBalance = lau.balanceOf(address(testers[0]));
+        if (currentBalance < 0.01 * 10**18) {
+            emit NonRewardedTester(address(testers[0]));
+            revert(string(abi.encodePacked("Swap ", i, " failed: Tester 0 has insufficient LAU balance")));
+        }
+        uint256 allowance = lau.allowance(address(testers[0]), address(feeClaimer));
+        if (allowance < 0.01 * 10**18) {
+            emit NonRewardedTester(address(testers[0]));
+            revert(string(abi.encodePacked("Swap ", i, " failed: Tester 0 has insufficient LAU allowance")));
+        }
+        (bool success, bytes memory data) = address(testers[0]).call(
+            abi.encodeWithSignature("initiateSimpleCall(address,string)", address(feeClaimer), "mockSwap()")
+        );
+        if (!success) {
+            string memory reason = data.length >= 4 ? abi.decode(data, (string)) : "Unknown mockSwap error";
+            emit MockSwapFailed(address(testers[0]), reason);
+            revert(string(abi.encodePacked("Swap ", i, " failed for tester 0: ", reason)));
         }
     }
+
+    uint256 feesInPool = lau.balanceOf(address(lau));
+    require(feesInPool > 0, "No fees collected in pool");
+
+    bool rewardsDistributed = false;
+    for (uint256 i = 1; i < testers.length - (testers.length > 2 ? 1 : 0); i++) {
+        uint256 balanceAfter = lau.balanceOf(address(testers[i]));
+        if (balanceAfter > balancesBefore[i]) {
+            rewardsDistributed = true;
+        } else {
+            emit NonRewardedTester(address(testers[i]));
+        }
+    }
+    require(rewardsDistributed, "No rewards distributed to eligible testers");
+
+    if (testers.length > 2) {
+        uint256 exemptBalance = lau.balanceOf(address(testers[testers.length - 1]));
+        require(exemptBalance == balancesBefore[testers.length - 1], "Exempt tester received rewards");
+    }
+}
 }

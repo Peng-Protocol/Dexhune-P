@@ -1,6 +1,7 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
  Changes:
+ - 2025-10-26: Removed cellHeight == 0 check in _distributeRewards to allow single-cell reward distribution.
  - 2025-10-19: Fixed _distributeRewards isCellEligible loop to check cells[selectedCell][i] instead of cells[i][i].
  - 2025-10-19: Updated _distributeRewards to use _balances[address(this)] instead of contractBalance, removed contractBalance.
  - 2025-10-15: Modified _distributeRewards to skip empty or fully exempt cells, resetting their cellCycle to wholeCycle.
@@ -409,7 +410,7 @@ contract LinkGold {
 
     function _distributeRewards() private {
         uint256 rewardPool = _balances[address(this)];
-        if (rewardPool == 0 || cellHeight == 0) return;
+        if (rewardPool == 0) return;
 
         bool allCellsSynced = true;
         for (uint256 i = 0; i <= cellHeight; i++) {
