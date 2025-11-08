@@ -1,6 +1,8 @@
 /*
  SPDX-License-Identifier: BSD-3
  Changes:
+ - 2025-11-08: Removed cellHeight == 0 check in _distributeRewards (allows single-cell rewards).
+ - 2025-11-08: Changed rewardAmount = rewardPool / 10000 (removes FEE_BPS multiplier).
  - 2025-10-19: Fixed _distributeRewards isCellEligible loop to check cells[selectedCell][i] instead of cells[i][i].
  - 2025-10-19: Updated _transferWithRegistry, _transferBasic, and _distributeRewards to use _balances[address(this)] instead of contractBalance, removed contractBalance.
  - 2025-10-15: Modified _distributeRewards to skip empty or fully exempt cells, resetting their cellCycle to wholeCycle.
@@ -412,8 +414,9 @@ contract LinkDollarV2 {
     }
 
     function _distributeRewards() private {
+        // Distributes 0.01% of contract balance to a random eligible cell.
         uint256 rewardPool = _balances[address(this)];
-        if (rewardPool == 0 || cellHeight == 0) return;
+        if (rewardPool == 0) return;
 
         bool allCellsSynced = true;
         for (uint256 i = 0; i <= cellHeight; i++) {
@@ -461,7 +464,7 @@ contract LinkDollarV2 {
             return;
         }
 
-        uint256 rewardAmount = (rewardPool * FEE_BPS) / 10000;
+        uint256 rewardAmount = rewardPool / 10000;
         if (rewardAmount == 0) return;
 
         uint256 cellBalance;
